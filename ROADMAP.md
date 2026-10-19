@@ -505,6 +505,14 @@ Now, and not before: we have three real join types to generalize from.
       request: most of the cost is the programs' own run time, so `tp_btf`
       for the two device reads is the next cut. Not met; whether 1 % stays the
       criterion is still open (`DECISIONS.md`).*
+      *With `tp_btf` for the two device reads (2026-10-20, `bpf_stats_enabled`
+      1, `null_blk` at its default `submit_queues=1`): 13.10 %, 395 ns a
+      request (bare 3 049 930 IOPS, 2 650 479 under the histogram, every one
+      of fio's 26 507 438 reads counted), the programs 118.9 ns a run and
+      237.8 ns a request, against 149.3 and 298.5 before: the cut took 30 ns
+      off each close. The 1 % budget is 26.2 ns a request, less than one run
+      of either program, so no program pair meets it on a device that does no
+      work; the criterion is the user's to restate (`DECISIONS.md`).*
 - [x] Exceeding the budget produces an **announced** degradation, not a loss.
       *The runner checks every 100 ms and, over the ceiling, moves the
       collection onto the next cheaper backend of its chain that this machine
