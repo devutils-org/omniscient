@@ -1,0 +1,10 @@
+# A manifest for an Arch machine, for examples/devutils/xpac-plan-read-only.yml:
+# one package that is installed and one that usually is not.
+version = 1
+
+[system]
+name = "promise-check"
+mode = "additive"
+
+[packages.pacman]
+install = ["git", "cowsay"]

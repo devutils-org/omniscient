@@ -1,0 +1,35 @@
+# atfq's promise, checked: "read-only: it never runs your commands, never
+# changes the system, never uses the network" -- the one program it may start
+# is `systemctl`, with fixed arguments (atfq's README).
+#
+#   ATFQ=/path/to/atfq omn -f examples/devutils/atfq-read-only.yml --format json --program-stdout /dev/null
+#
+# One run of every hub, the probes included. scripts/devutils/promises.py runs
+# this session and judges it: no exec but atfq's own and systemctl, no TCP
+# connection, no socket outside AF_UNIX, and no file created, renamed,
+# removed or synced.
+name: atfq stays read-only
+format: json
+
+requests:
+  - label: execs
+    source: proc.exec
+    target: {launch: [sh, -c, 'for h in disk permissions processes memory cpu network boot gpu logs; do "$ATFQ" "$h"; done']}
+    mode: trace
+    emit: [raw]
+  - label: connects
+    source: net.tcp.connect
+    target: {launch: [sh, -c, 'for h in disk permissions processes memory cpu network boot gpu logs; do "$ATFQ" "$h"; done']}
+    mode: trace
+    emit: [summary]
+  - label: sockets
+    source: net.socket
+    target: {launch: [sh, -c, 'for h in disk permissions processes memory cpu network boot gpu logs; do "$ATFQ" "$h"; done']}
+    mode: trace
+    emit: [raw]
+  - label: files
+    source: io.vfs
+    target: {launch: [sh, -c, 'for h in disk permissions processes memory cpu network boot gpu logs; do "$ATFQ" "$h"; done']}
+    mode: count
+    keys: [op]
+    emit: [summary]

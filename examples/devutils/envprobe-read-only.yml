@@ -1,0 +1,33 @@
+# envprobe's promise, checked: it describes the environment, "read-only", and
+# reports what it cannot read instead of changing anything (distroproof's
+# README) -- while it probes BPF and perf with real system calls.
+#
+#   ENVPROBE=/path/to/envprobe omn -f examples/devutils/envprobe-read-only.yml --format json --program-stdout /dev/null
+#
+# scripts/devutils/promises.py judges it: no file created, renamed, removed or
+# synced, no TCP connection; and says what the probe cost.
+name: envprobe reads the machine without changing it
+format: json
+
+requests:
+  - label: execs
+    source: proc.exec
+    target: {launch: [sh, -c, '"$ENVPROBE" --json']}
+    mode: trace
+    emit: [raw]
+  - label: connects
+    source: net.tcp.connect
+    target: {launch: [sh, -c, '"$ENVPROBE" --json']}
+    mode: trace
+    emit: [summary]
+  - label: files
+    source: io.vfs
+    target: {launch: [sh, -c, '"$ENVPROBE" --json']}
+    mode: count
+    keys: [op]
+    emit: [summary]
+  - label: cpu
+    source: cpu.oncpu_time
+    target: {launch: [sh, -c, '"$ENVPROBE" --json']}
+    mode: count
+    emit: [summary]

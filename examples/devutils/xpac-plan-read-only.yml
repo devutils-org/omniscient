@@ -1,0 +1,29 @@
+# xpac's promise, checked: inspection and planning change nothing -- "review
+# plans before execution", "inspection never elevates" (xpac's README).
+#
+#   XPAC=/path/to/xpac omn -f examples/devutils/xpac-plan-read-only.yml --format json --program-stdout /dev/null
+#
+# Lists the Pacman inventory, explains one package, then plans a manifest
+# (examples/devutils/xpac-pacman.toml) without applying it.
+# scripts/devutils/promises.py judges it: no file created, renamed, removed
+# or synced, no TCP connection, no sudo.
+name: xpac plans without changing anything
+format: json
+
+requests:
+  - label: execs
+    source: proc.exec
+    target: {launch: [sh, -c, '"$XPAC" list --provider pacman && "$XPAC" why pacman:git && "$XPAC" plan -f examples/devutils/xpac-pacman.toml']}
+    mode: trace
+    emit: [raw]
+  - label: connects
+    source: net.tcp.connect
+    target: {launch: [sh, -c, '"$XPAC" list --provider pacman && "$XPAC" why pacman:git && "$XPAC" plan -f examples/devutils/xpac-pacman.toml']}
+    mode: trace
+    emit: [summary]
+  - label: files
+    source: io.vfs
+    target: {launch: [sh, -c, '"$XPAC" list --provider pacman && "$XPAC" why pacman:git && "$XPAC" plan -f examples/devutils/xpac-pacman.toml']}
+    mode: count
+    keys: [op]
+    emit: [summary]
