@@ -1792,7 +1792,12 @@ count.
   passed, 5 failed, all in the flaky tally or wanting an idle GPU, but the
   cases' finding. A live `omn top` still runs late in the debug build (none
   of it in release, where only the 10 ms drains run late, by 170 ms at
-  most). With the witnesses installed and granted the same evening
+  most). *Found on 2026-10-20, in release as much as in debug: every
+  two-map drain waited for a grace period of its own, one after another, in
+  the round all the 100 ms sources share -- 271 waits, 1.25 s of 5. The
+  runner now retires a round's drains together and waits once
+  (`bpf::retire_owned_by`): 92 late ticks in 8 s became 10 to 13, the worst
+  92 ms 24 to 31.* With the witnesses installed and granted the same evening
   (`perf`, `bpftrace`, the bcc tools, `tcpdump`, `strace`, `turbostat`,
   `cpupower`, `slabtop`, `powertop`, `stress-ng`, `sysstat`): the reference
   runner read no grant (Arch's `/usr/sbin` is `/usr/bin`), four `perf stat`

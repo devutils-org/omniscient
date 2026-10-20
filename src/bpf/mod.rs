@@ -34,6 +34,9 @@ mod io;
 mod io_pagecache;
 mod io_writeback;
 mod map;
+/// The round's shared grace period: the runner registers which collection
+/// owns the row maps it creates, and retires a round's maps together.
+pub use map::{owned_by, retire_owned_by};
 mod mem_alloc;
 // The heap stream's: `mem.heap.alloc` through uprobes on the allocator.
 pub mod mem_heap;

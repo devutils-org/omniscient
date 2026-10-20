@@ -2580,7 +2580,7 @@ fn run_core(
         // open, a file that is not readable, a process that has gone -- so an
         // unmarked refusal here is a failure of this run. A collector refusing
         // a shape it has not implemented says so with `not_built`.
-        let attached = prepared.attach(&bound[index]);
+        let attached = crate::bpf::owned_by(index, || prepared.attach(&bound[index]));
         if let Some(named) = Target::narrowed_to_one() {
             if let Some(child) = child.as_mut() {
                 child.terminate();
@@ -2589,7 +2589,7 @@ fn run_core(
         }
         let mut collector =
             attached.map_err(|reason| CollectError::start(&source_id, reason, Whose::Machine))?;
-        if let Err(reason) = collector.start() {
+        if let Err(reason) = crate::bpf::owned_by(index, || collector.start()) {
             if let Some(child) = child.as_mut() {
                 child.terminate();
             }
@@ -3711,11 +3711,11 @@ impl<'a> Spending<'a> {
         // is bounded, and said. Nothing else runs between the replacement's
         // start and the outgoing's stop, which keeps it to the two calls.
         let overlap_from_ns = monotonic_ns();
-        let mut replacement = prepared.attach(&self.bound[index])?;
+        let mut replacement = crate::bpf::owned_by(index, || prepared.attach(&self.bound[index]))?;
         if let Some(named) = Target::narrowed_to_one() {
             return Err(one_process_of_several(&next, named).to_string());
         }
-        replacement.start()?;
+        crate::bpf::owned_by(index, || replacement.start())?;
         // What the outgoing collector spent inside the target, read while its
         // programs are open: a `stop` that drops them leaves nothing to read.
         let _ = self.inside[index].read();
@@ -4159,6 +4159,17 @@ fn drive(
         let mut read_now = vec![false; count];
         // When each read of this round ended: a round can outlast its run.
         let mut read_at_ns = vec![0u64; count];
+        // The round's drained row maps retired together and waited for once,
+        // rather than each drain waiting for a grace period of its own. A
+        // failure here leaves each drain to wait as before.
+        let due_now = |index: usize| {
+            matches!(slots[index], Slot::Attached(_))
+                && ledger.finished[index].is_none()
+                && round_started_ns
+                    >= detach_at(index)
+                        .map_or(ledger.due_ns[index], |at| ledger.due_ns[index].min(at))
+        };
+        let _ = crate::bpf::retire_owned_by(due_now);
         for (index, slot) in slots.iter_mut().enumerate() {
             let Slot::Attached(collector) = slot else {
                 continue;
@@ -4557,9 +4568,11 @@ impl Ledger {
         let mut attached = match blind_to_running_threads(prepared.as_ref(), &spending.bound[index])
         {
             Some(reason) => Err(reason),
-            None => prepared
-                .attach(&spending.bound[index])
-                .and_then(|mut collector| collector.start().map(|()| collector)),
+            None => crate::bpf::owned_by(index, || {
+                prepared
+                    .attach(&spending.bound[index])
+                    .and_then(|mut collector| collector.start().map(|()| collector))
+            }),
         };
         if let Some(named) = Target::narrowed_to_one() {
             attached = Err(one_process_of_several(&spending.serving[index], named).to_string());

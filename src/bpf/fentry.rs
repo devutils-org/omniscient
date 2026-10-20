@@ -1504,12 +1504,8 @@ pub struct HistogramSpec<'a> {
 pub struct HistogramProgram {
     pending: Hash,
     rows: [Hash; 2],
-    generation: OwnedFd,
+    flip: std::rc::Rc<Flip>,
     drops: Counters,
-    /// Which map the programs are writing now.
-    writing: std::cell::Cell<usize>,
-    /// When the current map started being written.
-    flipped_at: std::cell::Cell<u64>,
     links: Vec<Link>,
     /// The processes a process target started, followed by the entry
     /// programs: a launched shell script's calls are its children's.
@@ -1548,6 +1544,46 @@ struct MapUpdateAttr {
 }
 
 /// Writes one `u32` into element zero of a one-word array.
+/// The generation word and what the drain knows of it, shared with the
+/// round's registry so a round can retire it ahead of the drain
+/// ([`crate::bpf::retire_owned_by`]).
+struct Flip {
+    generation: OwnedFd,
+    /// Which map the programs are writing now.
+    writing: std::cell::Cell<usize>,
+    /// When the current map started being written.
+    flipped_at: std::cell::Cell<u64>,
+    /// The map retired ahead of the drain: which, the grace period it waits
+    /// for, and the interval it was written over.
+    retired: std::cell::Cell<Option<(usize, u64, u64, u64)>>,
+}
+
+impl Flip {
+    /// Points the programs at the idle map; returns the retired one and the
+    /// interval it was written over.
+    fn flip(&self) -> io::Result<(usize, u64, u64)> {
+        let retired = self.writing.get();
+        let idle = 1 - retired;
+        write_word(&self.generation, idle as u32)?;
+        let now = crate::clock::monotonic_ns();
+        let opened = self.flipped_at.replace(now);
+        self.writing.set(idle);
+        Ok((retired, opened, now))
+    }
+}
+
+impl crate::bpf::map::Retire for Flip {
+    fn retire(&self) -> io::Result<bool> {
+        if self.retired.get().is_some() {
+            return Ok(false);
+        }
+        let (retired, opened, closed) = self.flip()?;
+        let needed = crate::bpf::map::next_grace_period();
+        self.retired.set(Some((retired, needed, opened, closed)));
+        Ok(true)
+    }
+}
+
 fn write_word(map: &OwnedFd, value: u32) -> io::Result<()> {
     let key = 0u32;
     let mut attr = MapUpdateAttr {
@@ -1668,10 +1704,18 @@ impl HistogramProgram {
         Ok(Self {
             pending,
             rows,
-            generation,
+            flip: {
+                let flip = std::rc::Rc::new(Flip {
+                    generation,
+                    writing: std::cell::Cell::new(0),
+                    flipped_at: std::cell::Cell::new(now),
+                    retired: std::cell::Cell::new(None),
+                });
+                let shared: std::rc::Rc<dyn crate::bpf::map::Retire> = flip.clone();
+                crate::bpf::map::register(&shared);
+                flip
+            },
             drops,
-            writing: std::cell::Cell::new(0),
-            flipped_at: std::cell::Cell::new(now),
             links,
             descendants,
         })
@@ -1685,21 +1729,35 @@ impl HistogramProgram {
     /// a call is in this drain or in the next one, never lost between them and
     /// never a tick late. `last` is kept for the callers, and asks for nothing
     /// more: the last drain is an ordinary one.
+    ///
+    /// Retired ahead by its round, the map retired then is read, once a grace
+    /// period that began after it has ended: the round's own.
     pub fn drain(&self, _last: bool) -> Result<Drained, String> {
-        let retired = self.writing.get();
-        let idle = 1 - retired;
-        write_word(&self.generation, idle as u32)
-            .map_err(|error| format!("cannot flip the histogram's generation: {error}"))?;
-        let now = crate::clock::monotonic_ns();
-        crate::bpf::map::grace_period()
-            .map_err(|error| format!("cannot wait for the histogram's grace period: {error}"))?;
+        let (retired, needed, opened, closed) = match self.flip.retired.take() {
+            Some(ahead) => ahead,
+            None => {
+                let (retired, opened, closed) = self
+                    .flip
+                    .flip()
+                    .map_err(|error| format!("cannot flip the histogram's generation: {error}"))?;
+                (
+                    retired,
+                    crate::bpf::map::next_grace_period(),
+                    opened,
+                    closed,
+                )
+            }
+        };
+        if !crate::bpf::map::grace_period_ended(needed) {
+            crate::bpf::map::grace_period().map_err(|error| {
+                format!("cannot wait for the histogram's grace period: {error}")
+            })?;
+        }
         let mut drained = Drained {
-            opened_ns: self.flipped_at.get(),
-            closed_ns: now,
+            opened_ns: opened,
+            closed_ns: closed,
             ..Default::default()
         };
-        self.flipped_at.set(now);
-        self.writing.set(idle);
         self.take(retired, &mut drained)?;
         Ok(drained)
     }

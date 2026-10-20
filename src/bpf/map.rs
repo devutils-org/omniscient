@@ -29,6 +29,7 @@
 
 use std::io;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::insn::{helper, Insn, Program, BPF_DW, R10};
 
@@ -231,14 +232,32 @@ struct ElemAttr {
 /// interrupt enters, shows thousands of the kernel's recursion misses under
 /// eight busy threads -- so "a program runs for microseconds" is not a bound.
 ///
-/// The price is that wait, paid once per drain in the drain's thread and never
-/// by the program: 5 to 18 ms of sleeping on this machine, against a 100 ms
-/// tick.
+/// The price is that wait, paid in the drain's thread and never by the
+/// program: 5 to 18 ms of sleeping on this machine, against a 100 ms tick --
+/// once per round, not once per drain, where the runner retires the round's
+/// drains together ([`retire_owned_by`]).
 pub struct Rows {
+    state: std::rc::Rc<RowsState>,
+}
+
+/// What a [`Rows`] holds, shared with the round's registry
+/// ([`retire_owned_by`]) so a round can retire it before it is read.
+pub struct RowsState {
     outer: OwnedFd,
     maps: [Hash; 2],
     /// Which of the two the slot names now.
     writing: std::cell::Cell<usize>,
+    /// The map retired ahead of its drain, and the grace period that must
+    /// have ended before it is read: see [`retire_owned_by`].
+    retired: std::cell::Cell<Option<(usize, u64)>>,
+}
+
+impl std::ops::Deref for Rows {
+    type Target = RowsState;
+
+    fn deref(&self) -> &RowsState {
+        &self.state
+    }
 }
 
 impl Rows {
@@ -282,11 +301,16 @@ impl Rows {
         }
         let outer = unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd as RawFd) };
         let rows = Self {
-            outer,
-            maps,
-            writing: std::cell::Cell::new(0),
+            state: std::rc::Rc::new(RowsState {
+                outer,
+                maps,
+                writing: std::cell::Cell::new(0),
+                retired: std::cell::Cell::new(None),
+            }),
         };
         rows.point_at(0)?;
+        let shared: std::rc::Rc<dyn Retire> = rows.state.clone();
+        register(&shared);
         Ok(rows)
     }
 
@@ -294,7 +318,9 @@ impl Rows {
     pub fn as_raw_fd(&self) -> RawFd {
         self.outer.as_raw_fd()
     }
+}
 
+impl RowsState {
     /// Points the slot at one row map. Programs that begin after this read the
     /// new one; programs already running may still hold the old one, which is
     /// what [`grace_period`] is for.
@@ -328,13 +354,40 @@ impl Rows {
     /// The slot is pointed at the empty map first, a grace period is waited
     /// for, and only then is the other map read -- so a row is either in this
     /// drain whole or in the next one whole.
+    ///
+    /// Retired ahead by its round ([`retire_owned_by`]), the map retired then
+    /// is read, once a grace period that began after it has ended -- the
+    /// round's own, which every drain of the round shares.
     pub fn drain(&self) -> io::Result<Drained> {
+        if let Some((retired, needed)) = self.retired.take() {
+            if !grace_period_ended(needed) {
+                grace_period()?;
+            }
+            return self.maps[retired].drain();
+        }
         let retired = self.writing.get();
         self.point_at(1 - retired)?;
         grace_period()?;
         self.maps[retired].drain()
     }
+}
 
+impl Retire for RowsState {
+    /// Points the programs at the empty map ahead of the drain, and notes the
+    /// grace period the retired one waits for. Retired already, it stays as
+    /// it is: the drain has not read it yet.
+    fn retire(&self) -> io::Result<bool> {
+        if self.retired.get().is_some() {
+            return Ok(false);
+        }
+        let retired = self.writing.get();
+        self.point_at(1 - retired)?;
+        self.retired.set(Some((retired, next_grace_period())));
+        Ok(true)
+    }
+}
+
+impl RowsState {
     /// How many rows the map being written holds now, without taking any.
     #[cfg(test)]
     pub fn len(&self) -> io::Result<usize> {
@@ -363,11 +416,104 @@ pub(crate) fn grace_periods_offered() -> bool {
 /// stream K proposed, where a round retires every drained source first and
 /// waits once.
 pub fn grace_period() -> io::Result<()> {
+    let ticket = GRACE_STARTED.fetch_add(1, Ordering::SeqCst) + 1;
     let result = unsafe { libc::syscall(libc::SYS_membarrier, MEMBARRIER_CMD_GLOBAL, 0, 0) };
     if result < 0 {
         return Err(io::Error::last_os_error());
     }
+    GRACE_ENDED.fetch_max(ticket, Ordering::SeqCst);
     Ok(())
+}
+
+/// Grace periods begun, and the latest of them to have ended. Numbered so
+/// that "one that began after this point has ended" is a comparison: a grace
+/// period that began later carries a larger number.
+static GRACE_STARTED: AtomicU64 = AtomicU64::new(0);
+static GRACE_ENDED: AtomicU64 = AtomicU64::new(0);
+
+/// The number the next grace period to begin will carry.
+pub(crate) fn next_grace_period() -> u64 {
+    GRACE_STARTED.load(Ordering::SeqCst) + 1
+}
+
+/// Whether a grace period numbered `needed` or later has ended.
+pub(crate) fn grace_period_ended(needed: u64) -> bool {
+    GRACE_ENDED.load(Ordering::SeqCst) >= needed
+}
+
+std::thread_local! {
+    /// The collection whose collector is being attached or started on this
+    /// thread, set by the runner ([`owned_by`]): the [`Rows`] created then are
+    /// that collection's.
+    static OWNER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    /// Every two-map drain created under an owner, while it lives.
+    static REGISTRY: std::cell::RefCell<Vec<(usize, std::rc::Weak<dyn Retire>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A drain that points its programs at an empty map and reads the retired
+/// one once a grace period has passed: [`Rows`], and the fentry histogram's
+/// generation word.
+pub(crate) trait Retire {
+    /// Points the programs at the empty map and notes the grace period the
+    /// retired one waits for; whether it did, which it does not when a map
+    /// retired earlier is still unread.
+    fn retire(&self) -> io::Result<bool>;
+}
+
+/// Registers a drain as the collection being attached or started now owns
+/// it, when one is ([`owned_by`]).
+pub(crate) fn register(drain: &std::rc::Rc<dyn Retire>) {
+    OWNER.with(|owner| {
+        if let Some(index) = owner.get() {
+            REGISTRY.with(|registry| {
+                registry
+                    .borrow_mut()
+                    .push((index, std::rc::Rc::downgrade(drain)))
+            });
+        }
+    });
+}
+
+/// Runs `f` with the [`Rows`] it creates registered as collection `index`'s.
+pub fn owned_by<T>(index: usize, f: impl FnOnce() -> T) -> T {
+    let before = OWNER.with(|owner| owner.replace(Some(index)));
+    let result = f();
+    OWNER.with(|owner| owner.set(before));
+    result
+}
+
+/// Retires the row maps of every collection `due` says is read this round,
+/// then waits one grace period for all of them: the round's drains then read
+/// without waiting each for its own.
+///
+/// **Why.** Each drain of a [`Rows`] waits for a grace period, 3 to 16 ms here,
+/// and a round reads its due collections one after another: a live `omn top`
+/// with ten drained sources on one 100 ms pace spent 30 to 90 ms in one round,
+/// one in ten, and every 10 ms source read in it ran late (271 waits, 1.25 s
+/// of 5, measured on 2026-10-20). Retired first and waited for once, the round
+/// pays one.
+///
+/// A map retired here and never drained -- the collection ended first -- is
+/// read by its stop's drain as any retired map is.
+pub fn retire_owned_by(due: impl Fn(usize) -> bool) -> io::Result<bool> {
+    let owned: Vec<std::rc::Rc<dyn Retire>> = REGISTRY.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        registry.retain(|(_, rows)| rows.strong_count() > 0);
+        registry
+            .iter()
+            .filter(|(index, _)| due(*index))
+            .filter_map(|(_, rows)| rows.upgrade())
+            .collect()
+    });
+    let mut any = false;
+    for rows in owned {
+        any |= rows.retire()?;
+    }
+    if any {
+        grace_period()?;
+    }
+    Ok(any)
 }
 
 /// A name, truncated to the 15 characters plus NUL the kernel stores.
@@ -872,6 +1018,39 @@ mod tests {
         assert_eq!(second.entries.len(), 1, "only what was written since");
         assert_eq!(second.entries[0].0, 3u32.to_ne_bytes());
         assert!(rows.drain().expect("a third drain").entries.is_empty());
+    }
+
+    /// Retired by its round, a drain reads what was written until the
+    /// retire and leaves what came after it for the next one; the round's
+    /// one grace period serves it, and a collection not due is not retired.
+    #[test]
+    fn a_round_retires_its_due_drains_and_waits_once() {
+        let rows = match owned_by(7, || Rows::create(4, 8, 16, "omn_test_round")) {
+            Ok(rows) => rows,
+            Err(error) => {
+                eprintln!(
+                    "skipped: this machine does not let this process create the row maps: {error}"
+                );
+                return;
+            }
+        };
+        let write = |key: u32, value: u64| {
+            let map = &rows.maps[rows.writing.get()];
+            syscall::map_update(map.as_raw_fd(), &key.to_ne_bytes(), &value.to_ne_bytes())
+                .expect("a write into a map this process owns");
+        };
+        write(1, 10);
+        assert!(!retire_owned_by(|index| index == 8).expect("a round"));
+        assert!(retire_owned_by(|index| index == 7).expect("a round"));
+        let (_, needed) = rows.retired.get().expect("retired by the round");
+        assert!(grace_period_ended(needed), "the round waited once for it");
+        write(2, 20);
+        let first = rows.drain().expect("a drain");
+        assert_eq!(first.entries.len(), 1, "what was written until the retire");
+        assert_eq!(first.entries[0].0, 1u32.to_ne_bytes());
+        let second = rows.drain().expect("a second drain");
+        assert_eq!(second.entries.len(), 1, "what came after it");
+        assert_eq!(second.entries[0].0, 2u32.to_ne_bytes());
     }
 
     /// The BTF handed to the kernel is checked byte by byte on the other side,
