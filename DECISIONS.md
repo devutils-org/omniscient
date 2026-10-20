@@ -1546,6 +1546,6 @@ Restated from `ROADMAP.md` because they are decisions, not omissions.
    because it writes in-line into its own buffer without a trap, which is also
    why its events do not exist for an eBPF program. If it is ever worth having,
    it is worth having as an **import** -- a CTF stream merged into the timeline
-   after the fact, a consumer of one more format rather than a source. That is
-   written down in `STATE.md` under what remains, at the priority it
-   deserves.
+   after the fact, a consumer of one more format rather than a source. It
+   landed so on 2026-10-20: `omn import` merges a CTF trace into a stored run,
+   for `omn join`, and is not in the catalog.

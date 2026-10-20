@@ -49,6 +49,11 @@ omn \- one vocabulary for system observability
 .B \-f
 .I rules results
 .br
+.B omn import
+.I trace results
+.RB [ \-o
+.IR file ]
+.br
 .B omn top
 .RB [ \-\-view
 .IR name ]
@@ -327,6 +332,30 @@ correlations as a run prints its joins, in
 text, json, yaml or toml. A rule the stored run cannot answer -- a side with no
 result, or one stored without \fBraw\fR -- refuses the command with exit 2
 rather than being left out.
+.TP
+.B import \fItrace results\fR [\fB\-o\fR \fIfile\fR]
+Merges a CTF 1.8 trace, as LTTng writes one, into a stored run, so
+.B omn join
+meets its events with the run's. An import rather than a source: LTTng-UST
+writes in-line into its own buffer, so its events exist for no program of
+.BR omn 's.
+.I trace
+is a directory holding \fImetadata\fR and its data streams, or one above
+them, as LTTng writes a session;
+.I results
+is a run's \fIresults.json\fR or its
+.B \-o
+directory. Each event becomes one of source \fBctf.event\fR, stored
+\fBraw\fR: \fBevent\fR is its name, its fields are its attributes (a
+leading underscore taken off), and \fBtask\fR, \fBproc\fR and \fBcpu\fR
+are its \fBvtid\fR, \fBvpid\fR and packet's cpu -- the traced process's
+own ids, which inside a container are not the host's. Only LTTng's
+\fBmonotonic\fR clock is accepted, because it is CLOCK_MONOTONIC; an event
+outside the run's window is counted and left out, a trace none of whose events
+falls inside it is refused, and the events the tracer discarded are the
+result's losses. Writes the merged run as JSON to
+.I file
+or standard output, and says what it kept on standard error.
 .TP
 .B top \fR[\fIoptions\fR] [\fB\-\-pid\fR \fIpid\fR | \fB\-\-\fR \fIprogram\fR]
 An interactive terminal view of what
@@ -1460,6 +1489,13 @@ A join applied after the run, to what the run stored:
 .EX
 omn \-f session.yml \-\-format json \-o run
 omn join \-f session.yml run
+.EE
+.TP
+An LTTng-UST trace of the same program, joined with the kernel's switches:
+.EX
+omn sched.switches \-m trace \-k task \-e raw \-\-format json \-o run \-\- ./app
+omn import ~/lttng\-traces/app\-session run \-o merged.json
+omn join \-f rules.yml merged.json
 .EE
 .TP
 Write a session down for a machine other than this one:

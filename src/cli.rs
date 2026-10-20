@@ -94,6 +94,7 @@ impl Cli {
             | Command::Validate(_)
             | Command::Diff(_)
             | Command::Join(_)
+            | Command::Import(_)
             | Command::Selftest(_) => false,
         };
         (!launches).then(|| {
@@ -125,14 +126,16 @@ pub enum Command {
     Top(Box<TopArgs>),
     /// Apply join rules to a stored run: the query tier, after the run.
     Join(JoinArgs),
+    /// Merge a CTF trace (LTTng's) into a stored run, for `omn join`.
+    Import(ImportArgs),
     /// What this machine serves: every source listed, and run briefly, with why
     /// each one that does not attach does not.
     Selftest(SelftestArgs),
 }
 
 /// The subcommand names, used to tell `omn io.latency` from `omn list`.
-pub const SUBCOMMANDS: [&str; 11] = [
-    "trace", "list", "formats", "validate", "latency", "saturate", "diff", "top", "join",
+pub const SUBCOMMANDS: [&str; 12] = [
+    "trace", "list", "formats", "validate", "latency", "saturate", "diff", "top", "join", "import",
     "selftest", "help",
 ];
 
@@ -605,6 +608,71 @@ pub struct JoinArgs {
     /// `joins` are a run's own.
     #[arg(long, value_name = "FORMAT", default_value_t = OutputFormat::Text)]
     pub format: OutputFormat,
+}
+
+/// `omn import`: a trace another tool recorded, merged into a stored run.
+///
+/// An import rather than a source (`DECISIONS.md`, boundary 6): LTTng-UST
+/// writes in-line into its own buffer, so its events exist for no program of
+/// this tool's, and are read after the fact instead.
+#[derive(Debug, Args)]
+pub struct ImportArgs {
+    /// The CTF trace: a directory holding `metadata` and its data streams, or
+    /// one above them, as LTTng writes a session (`ust/uid/1000/64-bit/`).
+    #[arg(value_name = "TRACE")]
+    pub trace: PathBuf,
+
+    /// The stored run: its results.json, or the `-o DIR` it was written to.
+    #[arg(value_name = "RESULTS")]
+    pub results: PathBuf,
+
+    /// Where to write the merged run, as JSON; standard output by default.
+    #[arg(short = 'o', long = "output", value_name = "FILE")]
+    pub output: Option<PathBuf>,
+}
+
+/// The merged run as JSON, and a line saying what the import kept.
+pub fn import(args: &ImportArgs) -> Result<(String, String), ParseError> {
+    let results_path = if args.results.is_dir() {
+        args.results.join("results.json")
+    } else {
+        args.results.clone()
+    };
+    let text = std::fs::read_to_string(&results_path).map_err(|error| {
+        ParseError::new(format!("cannot read {}: {error}", results_path.display()))
+    })?;
+    let mut run: crate::encode::RunOutput = serde_json::from_str(&text).map_err(|error| {
+        ParseError::new(format!(
+            "{} is not a run's results, which `omn import` reads from a run written with \
+             `--format json`: {error}",
+            results_path.display()
+        ))
+    })?;
+    let trace =
+        crate::ctf::read(&args.trace).map_err(|error| ParseError::new(error.to_string()))?;
+    let discarded = trace.discarded;
+    let (result, account) = crate::ctf::merge(trace, &run.results)
+        .map_err(|error| ParseError::new(format!("{}: {error}", args.trace.display())))?;
+    run.results.push(result);
+    let json = serde_json::to_string_pretty(&run)
+        .map_err(|error| ParseError::new(format!("cannot write the merged run: {error}")))?;
+    let mut said = format!(
+        "{} events imported as `{}`",
+        account.kept,
+        crate::ctf::SOURCE
+    );
+    if account.before + account.after > 0 {
+        said.push_str(&format!(
+            ", {} outside the run's window left out ({} before, {} after)",
+            account.before + account.after,
+            account.before,
+            account.after
+        ));
+    }
+    if discarded > 0 {
+        said.push_str(&format!(", {discarded} discarded by the tracer"));
+    }
+    Ok((json + "\n", said))
 }
 
 /// The rules of `omn join -f`, in any of the three shapes the flag accepts.

@@ -269,6 +269,22 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Diff(args) => diff(args),
         Command::Top(args) => top(*args),
         Command::Selftest(args) => selftest(args),
+        Command::Import(args) => match omn::cli::import(&args) {
+            Ok((json, said)) => {
+                match &args.output {
+                    Some(path) => std::fs::write(path, json).map_err(|error| {
+                        anyhow::anyhow!("cannot write {}: {error}", path.display())
+                    })?,
+                    None => print!("{json}"),
+                }
+                eprintln!("{said}");
+                Ok(ExitCode::SUCCESS)
+            }
+            Err(error) => {
+                eprintln!("error: {error}");
+                Ok(ExitCode::from(EXIT_REJECTED))
+            }
+        },
         Command::Join(args) => match omn::cli::join(&args) {
             Ok(out) => {
                 print!("{out}");

@@ -2052,10 +2052,18 @@ count.
 
 Below the milestones, and not scheduled:
 
-- **CTF import** — ingest an LTTng-UST stream and merge it into the timeline.
-  A consumer of one more format, not a source: `DECISIONS.md` boundary 6 says
-  why LTTng is a peer rather than a backend. Low priority; nothing depends on
-  it and no measurement here is worse without it.
+- ~~**CTF import**~~ -- **done** (2026-10-20): `omn import TRACE RESULTS`
+  reads a CTF 1.8 trace as LTTng writes it (`src/ctf.rs`) and adds its
+  events to a stored run as `ctf.event`, `raw`, on the thread, process and
+  cpu keys, so `omn join` meets them with the run's own. Only LTTng's
+  `monotonic` clock is accepted; an event outside the run's window is
+  counted and left out, the tracer's discards are the result's losses. The
+  reader holds against babeltrace's own readings of its test traces (the
+  LTTng-UST `wk-heartbeat-u`, a kernel and user session's 4272 events and 728
+  discards, the aligned empty arrays), and decodes every CTF 1 trace of
+  babeltrace's corpus; a program's markers stamped as LTTng-UST stamps them
+  meet each of its ten switches out to sleep (`tests/ctf_import.rs`). Not
+  read: CTF 2's JSON metadata, a trace of several clocks.
 - **The four open decisions were settled on 2026-10-19** (`DECISIONS.md`,
   "Settled on 2026-10-19"): the budget's 10 ms slack and `sched.wakeup` in
   the latency session, `cost_by_regime` and `tp_btf` for the histogram's

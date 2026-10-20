@@ -41,6 +41,7 @@ pub mod catalog;
 pub mod cli;
 pub mod clock;
 pub mod collect;
+pub mod ctf;
 pub mod emit;
 pub mod encode;
 pub mod error;

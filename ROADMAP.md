@@ -1256,7 +1256,8 @@ it has no "obviously wrong" output.
    `DECISIONS.md` carries the reasoning.
 6. **LTTng and its kind are peers, not backends.** Same events, another path;
    nothing to recover by wrapping one. If LTTng-UST ever earns a place it is as
-   a CTF **import**, a consumer of one more format.
+   a CTF **import**, a consumer of one more format -- `omn import`, since
+   2026-10-20.
 
 These limits must be visible on first contact with the tool. A project named
 "Omniscient" that fails to state them turns its boundaries into perceived bugs.
