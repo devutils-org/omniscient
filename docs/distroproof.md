@@ -27,6 +27,7 @@ commit that fixed it. It is meant to be read as distroproof's living proof.
 | Findings in Omniscient | **27 defects** no test on the development machine had shown: **13 in the tool** (the release, the probes, the catalog, a collector) and **14 in its test suite** (a judge, the reference runner, twelve reference pairs) |
 | Claims refuted | **158** runs of a source Omniscient called usable that the kernel refused at start, in the first matrix; **0** after |
 | Cross-checked | every reason Omniscient gives for a refusal agrees with envprobe's independent reading of the same guest, on all 21 targets |
+| Latest run | 2026-10-20, the binary of `main` after the io histogram's `tp_btf` and one-program paths: **25 of 25** targets passed, the 8 containers swept, 33 cells, and the 28 judges of `cargo test --test portability` green. Usable sources per cell, of 123: 36 (Debian 10, Ubuntu 18.04) to 96 (Fedora, Arch, Gentoo, NixOS); arm64 82 to 88; containers 44 rootless, 57 with the capabilities added, 59 privileged |
 | Back into distroproof | 3 images (Gentoo, Debian sid, Fedora 43), 2 boot fixes, 3 `[run]` options, 2 envprobe facts (pull requests [#4](https://github.com/devutils-org/distroproof/pull/4), [#5](https://github.com/devutils-org/distroproof/pull/5)) |
 
 ## Reproducing it
