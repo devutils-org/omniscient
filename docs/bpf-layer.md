@@ -194,9 +194,9 @@ cpus: 377 000 to 478 000 skipped runs in a two-second session, and the
 workload's own lookups short by 3 to 15 of 256. Nothing was silent, but the
 count is every task's, not the target's, so it is never slack for one
 workload's count (`DECISIONS.md`, the fourteenth wave). Narrowing earlier does
-not help, since the guard is taken before the program runs; a per-target
-attach (an fentry on a function only the target calls) or a shorter program
-does. Not scheduled.
+not stop the skips, since the guard is taken before the program runs, but it
+does keep the target's own runs short, which is why a process target lost none
+of its lookups below; a shorter program does not help (below).
 
 **Measured again on 7.2 (2026-10-20), and the program cannot close it.**
 Upstream's `__bpf_trace_run` takes the guard under
@@ -212,6 +212,23 @@ preemption is off is taken at the `enable`, which is still inside the guard,
 so the guard is held across the preemption all the same. Only the kernel can
 disable preemption from the guard to its release; a program of its own can
 only move where it is preempted.
+
+**Whose the skipped runs are, measured on 2026-10-20.** A process target
+reading a cached 32 MiB file four times in 4 KiB `pread`s, beside 48 readers
+of another file on 24 cpus: every one of its 32 768 lookups was kept, in each
+of three runs, while the programs reported 3 000 to 4 600 skipped runs. The
+skips were the other readers', which leave at the narrowing, and the run still
+said its totals were lower bounds. Telling the two apart was tried with a
+witness: a program of a few instructions on each tracepoint, attached before
+the real one, narrowing to the target and counting, beside a count of the
+target's runs in the real programs. The two counts agreed to the run (32 784
+and 32 784), but the witness was skipped 820 to 6 566 times itself, more than
+the program it witnessed (1 286 to 2 548), so a difference of zero could not be
+read as no loss. The guard is held from the dispatch to the release, and the
+dispatch costs as much as a short program: **a shorter program does not narrow
+the window**, and no program of this layer can say whose a skipped run was.
+The experiment was not kept. What is left is the kernel's: a guard taken with
+preemption off, or `recursion_misses` per task.
 
 ## Privileges
 

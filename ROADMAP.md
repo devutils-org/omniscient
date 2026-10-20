@@ -539,7 +539,13 @@ Now, and not before: we have three real join types to generalize from.
       runs: 123 and 141 ns a request in two runs of the test, every one of
       fio's reads counted. A completion with no stamp (a passthrough command)
       is counted lost and said. A process target still pays the pair, 282 to
-      289 ns, printed beside: the submitter is known at the issue alone.*
+      289 ns, printed beside: the submitter is known at the issue alone.
+      Two programs fired per request cost about 188 ns before any work, so
+      no pair meets 200. The one other key a completion carries is the
+      bio's cgroup, and on a stock systemd machine no cgroup has the `io`
+      controller -- not the root's `cgroup.subtree_control` here -- so every
+      bio carries the root blkcg and a cgroup made for the target would not
+      be seen (2026-10-20). Closed as the limit it is.*
 - [x] Exceeding the budget produces an **announced** degradation, not a loss.
       *The runner checks every 100 ms and, over the ceiling, moves the
       collection onto the next cheaper backend of its chain that this machine

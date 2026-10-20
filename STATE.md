@@ -2070,17 +2070,23 @@ Below the milestones, and not scheduled:
   device reads landed the same day. Phase 6's criterion, restated on
   2026-10-20 as 1 % of a fast NVMe's 20 us request, is met system-wide by
   one program reading the kernel's issue stamp (123 to 141 ns a request on
-  `null_blk`); a process target pays the pair, 282 to 289 ns.
+  `null_blk`); a process target pays the pair, 282 to 289 ns, and no
+  program can do better: the submitter is known at the issue alone, and the
+  bio's cgroup is the root's wherever the `io` controller is not enabled,
+  which is a stock systemd machine (`ROADMAP.md`, phase 6).
 - **An `lbr` collector** waits on a cpu with a branch call stack (Intel from
   Haswell) to be tested against, and **`sframe`** on a kernel that reads
   `.sframe` (none through 7.2).
 - **A preempted eBPF program skips every run behind it on that cpu**
-  (`docs/bpf-layer.md`, "Losses"): counted, never silent, but a program that
-  fires on every page-cache lookup loses the target's events to the machine's
-  load. A per-target attach would narrow it. Disabling preemption inside the
-  program was tried on 2026-10-20 and changed nothing: the reschedule is
-  taken at the program's `enable`, still inside the kernel's guard
-  (`docs/bpf-layer.md`).
+  (`docs/bpf-layer.md`, "Losses"): counted, never silent, and closed as far as
+  this layer can. Disabling preemption inside the program changed nothing
+  (the reschedule is taken at the `enable`, inside the kernel's guard), and a
+  witness program meant to tell the target's skipped runs from other tasks'
+  was skipped as often as the program itself, since the guard is held for the
+  dispatch as much as for the body (both 2026-10-20). Measured with it: a
+  process target beside 48 readers kept all of its 32 768 lookups while the
+  run reported 3 000 to 4 600 skips, all other tasks'. What would close it is
+  the kernel's: a guard taken with preemption off, or misses per task.
 
 The fifth wave closed 52 of the sixty-three defects the scenario wave found;
 the eleven that are left are named in `docs/fixes/`.
