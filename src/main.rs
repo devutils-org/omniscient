@@ -794,11 +794,15 @@ fn resolution_is(error: &resolve::ResolveError) -> omn::collect::Whose {
 /// What to do about a resolver failure, in one line, said per case.
 fn resolution_hint(error: &resolve::ResolveError) -> Option<String> {
     match error {
-        resolve::ResolveError::NoViableBackend { .. } => Some(
-            "the request is valid; it is this machine that cannot serve it. \
-             Use --no-resolve to write it down for one that can."
-                .to_owned(),
-        ),
+        resolve::ResolveError::NoViableBackend { .. } => {
+            let mut hint = "the request is valid; it is this machine that cannot serve it. \
+                            Use --no-resolve to write it down for one that can."
+                .to_owned();
+            if kernel_access_refused(&error.to_string()) {
+                hint.push_str(KERNEL_ACCESS_HINT);
+            }
+            Some(hint)
+        }
         resolve::ResolveError::UnknownSource { .. } => {
             Some("`omn list` names every source the catalog carries.".to_owned())
         }
@@ -816,6 +820,30 @@ fn resolution_hint(error: &resolve::ResolveError) -> Option<String> {
              each backend serves."
         )),
     }
+}
+
+/// What to read when a refusal comes from the kernel's settings for tracing
+/// rather than from a missing feature: atfq's card on them, with this
+/// machine's values (devutils' atfq, a separate tool).
+const KERNEL_ACCESS_HINT: &str = " The kernel settings and capabilities behind such a refusal \
+     (perf_event_paranoid, CAP_PERFMON, CAP_BPF, lockdown, BTF, memlock) are explained, against \
+     this machine, by `atfq kernel.tracing`.";
+
+/// Whether a refusal names one of those settings.
+fn kernel_access_refused(reason: &str) -> bool {
+    let reason = reason.to_ascii_lowercase();
+    [
+        "perf_event_paranoid",
+        "cap_perfmon",
+        "cap_bpf",
+        "lockdown",
+        "btf",
+        "memlock",
+        "unprivileged_bpf_disabled",
+        "kptr_restrict",
+    ]
+    .iter()
+    .any(|word| reason.contains(word))
 }
 
 /// One step a budget can take below the backend and mode serving a request:
@@ -4004,6 +4032,18 @@ fn reject(rejections: &[Rejection]) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn kernel_access_refusals_point_to_atfq() {
+        assert!(super::kernel_access_refused(
+            "`perf:task` needs perf_event_paranoid <= 1, this machine has 2"
+        ));
+        assert!(super::kernel_access_refused(
+            "needs CAP_BPF on the omn binary"
+        ));
+        assert!(!super::kernel_access_refused(
+            "`fs:sys:amdgpu`: /sys/bus/pci/drivers/amdgpu does not exist"
+        ));
+    }
 
     /// `gpu.kernel` through CUPTI is `extreme` on a launch-bound program and
     /// `low` on a memory-bound one: a 5 % ceiling says which regimes fit.
