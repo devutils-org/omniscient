@@ -187,8 +187,15 @@ def still_running(pid):
 
 
 def schedstat(pid):
-    """The process's tasks' time on a cpu and waiting for one, summed."""
+    """The process's tasks' time on a cpu and waiting for one, summed.
+
+    None when no task's account could be read: a process exiting between the
+    listing of its tasks and the read of their files answers with nothing,
+    and a nothing taken for zero once erased a 3.8 s compile from its job's
+    account (`cases/make-sqlite/case.yml`, the refiled finding).
+    """
     cpu_ns = delay_ns = 0
+    read = 0
     try:
         tasks = os.listdir(f"/proc/{pid}/task")
     except OSError:
@@ -199,9 +206,10 @@ def schedstat(pid):
                 fields = file.read().split()
             cpu_ns += int(fields[0])
             delay_ns += int(fields[1])
+            read += 1
         except (OSError, IndexError, ValueError):
             pass
-    return cpu_ns, delay_ns
+    return (cpu_ns, delay_ns) if read else None
 
 
 deadline = time.monotonic() + 120
@@ -234,7 +242,10 @@ if target is not None:
             if stat is None:
                 continue
             entry = seen.setdefault(pid, [job, now, now, 0, 0])
-            entry[2], entry[3], entry[4] = now, stat[0], stat[1]
+            # A process's account only grows: a read that finds less is one
+            # that lost a task on its way out, and the larger stands.
+            entry[2] = now
+            entry[3], entry[4] = max(entry[3], stat[0]), max(entry[4], stat[1])
             for child in children(pid):
                 walk.append((child, child if pid == target else job))
         time.sleep(0.001)

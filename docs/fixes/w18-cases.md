@@ -546,3 +546,16 @@ That is the same failure as in section 8, which is red on `main` and not in
 this stream's files. `cases` passed in it: 6 tests in 185 s, every case. That
 run captures no output, so the check-by-check lines of the other cases were
 not read.
+
+## Closed on 2026-10-20: the reference's lost compile
+
+The finding left after the nineteenth's fixes was the reference's: once in
+six runs, `watch.py`'s longest job held 1.44 s of cpu where its second
+compile alone used 3.8 s. `schedstat()` summed what it could read of a
+process's tasks and answered zero when it could read none -- a process
+between the listing of its tasks and the read of their files, on its way
+out -- and that zero replaced the last good reading. It now answers nothing
+when it read nothing, and a process's account keeps the larger of two
+readings. Six runs of `OMN_CASES_ONLY=make-sqlite` after it: every check
+of both causes agreed, both ways; the case's `open_findings` is gone.
+

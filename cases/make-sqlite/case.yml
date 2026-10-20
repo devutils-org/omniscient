@@ -142,18 +142,7 @@ causes:
           plus: watch.poll_ns
           relative: 0.02
 
-open_findings:
-  - check: every-cited-number-agrees-with-the-reference
-    cause: the-critical-path-is-one-job
-    sometimes: true
-    filed: >-
-      docs/fixes/w18-cases.md, "a job is a chain of processes", closed on
-      omn's side (2026-10-19): each task's on-cpu row holds its cpu from
-      before it was found and the samples its ring lost, every sample
-      carries `ppid`, and the tasks the target starts are found on a thread
-      of their own every 10 ms -- with the name and parent read there, while
-      they run -- rather than on the drain's late rounds. Both ways agreed
-      with the reference in five runs of six. What is left is the
-      reference's: once in six, watch.py's longest-lived job used 1.44 s of
-      cpu where the build's longest compile alone used 3.8 s, so omn's
-      5.34 s read as over by 3.9 s
+# The last open finding, the reference's lost compile, closed on 2026-10-20:
+# watch.py read a process on its way out as a zero and kept it, which once in
+# six erased the 3.8 s compile from its job; it now keeps the larger reading.
+# Six runs after, every check agreed both ways (`docs/fixes/w18-cases.md`).
