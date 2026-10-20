@@ -14369,4 +14369,4 @@ the runner: a witness that cannot load (a dynamic-linker or `ImportError`
 message on stderr) is neither a refusal nor a disagreement; should it skip
 with its reason, as a refusal does, instead of failing the pair? Until then,
 `chain-gentoo` fails its tenth check on these two pairs alone; the other nine
-checks pass, 46 pairs hold and none disagrees.
+checks pass, 46 pairs hold and no other pair fails.
