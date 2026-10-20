@@ -14347,3 +14347,26 @@ worth reading again with it in mind. To run the suite without it:
 `systemd-run --user --wait --pipe -p WorkingDirectory=$PWD make check`, or
 a terminal that leaves the limit alone. Which part of the terminal lowers it
 is not found: the transient scope `ghostty` runs in sets no limit.
+
+### Gentoo's bcc does not load, and the pairs read it as a disagreement (2026-10-21)
+
+With xpac's Portage fix (xpac `b2de598`), the cross-tool chain installs
+bpftrace and bcc on `chain-gentoo` (Portage binhost, `dev-util/bcc-0.36.1-r1`,
+LLVM 22) for the first time. Two pairs then fail, neither because omn measured
+wrong:
+
+- `io/vfsstat-reads`: `vfsstat` exits 1 before printing a row:
+  `/usr/lib64/libbcc.so.0: undefined symbol:
+  _ZN4llvm24DisableABIBreakingChecksE, version LLVM_22.1`. The binary package
+  was built against another LLVM build than the one installed beside it.
+- `net/tcplife-pid`: omn 20 sessions, `tcplife` 0. `tcplife` is bcc's on
+  Gentoo, so most likely the same load failure, read by `libbpf_tcplife` as no
+  rows; its stderr is not kept in `reference.log` to say.
+
+The bpftrace pairs skip on the same guest (`*.bt was refused`), so the whole
+bcc/bpftrace stack of that binhost snapshot is unusable. Open question for
+the runner: a witness that cannot load (a dynamic-linker or `ImportError`
+message on stderr) is neither a refusal nor a disagreement; should it skip
+with its reason, as a refusal does, instead of failing the pair? Until then,
+`chain-gentoo` fails its tenth check on these two pairs alone; the other nine
+checks pass, 46 pairs hold and none disagrees.
