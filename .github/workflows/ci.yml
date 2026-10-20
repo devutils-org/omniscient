@@ -22,12 +22,26 @@
 # would grant the capabilities this cell exists to go without. The two C
 # fixtures `make` builds beside the tool are built by their own targets, which
 # grant nothing.
+#
+# Started by hand only (Actions tab, or `gh workflow run ci -f cell=both`): the
+# repository is private, so every minute counts against the account's included
+# minutes, and `make check` on the development machine is the everyday check.
+# A second run on the same ref cancels the one still running.
 
 name: ci
 
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
+    inputs:
+      cell:
+        description: "Matrix cell to run"
+        type: choice
+        options: [both, defaults, stock]
+        default: both
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -45,7 +59,7 @@ jobs:
       # One cell failing says nothing about the other; both are read.
       fail-fast: false
       matrix:
-        cell: [defaults, stock]
+        cell: ${{ fromJSON(inputs.cell == 'both' && '["defaults","stock"]' || format('["{0}"]', inputs.cell)) }}
     env:
       OMN_CI_CELL: ${{ matrix.cell }}
     steps:
@@ -266,3 +280,4 @@ jobs:
             target/matrix/cells
             target/test.log
           if-no-files-found: warn
+          retention-days: 7

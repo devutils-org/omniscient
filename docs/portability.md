@@ -329,8 +329,9 @@ time, and `the_listing_parser_reads_every_answer_kind` carries that line.
 
 `.github/workflows/ci.yml`, one job on `ubuntu-24.04`: `cargo fmt --check`,
 `cargo clippy --all-targets -- -D warnings`, a build, the matrix cell of the
-runner, the whole suite, and a gate on the skips. It has **not been pushed**:
-the coordinator decides when it reaches the remote, and so it has never run.
+runner, the whole suite, and a gate on the skips. It runs only when started
+by hand (`workflow_dispatch`, `gh workflow run ci -f cell=both|defaults|stock`):
+the repository is private, so its minutes are billed against the account.
 
 - **It is the unprivileged cell**: a distribution kernel, no file
   capabilities, no GPU. `make` is not used to build, because its capability
@@ -339,7 +340,7 @@ the coordinator decides when it reaches the remote, and so it has never run.
   with `cargo build --workspace` and the two C fixtures with their own `make`
   targets, and fails if the binary carries a capability anyway.
 - **It sweeps itself before the suite**, as `ci-<kernel>-nocaps`, so the
-  suite's own `tests/portability.rs` judges a real cell on every push, and the
+  suite's own `tests/portability.rs` judges a real cell on every run, and the
   cell and the test log are uploaded as an artifact.
 - **A skip is not a pass.** `.github/scripts/skip-gate.sh` reads every
   `skipped:`/`SKIPPED` line of the log and matches its *reason* against
