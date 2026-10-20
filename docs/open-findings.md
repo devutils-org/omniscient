@@ -14307,7 +14307,12 @@ Open: **`cpu.cache_misses`** reads 0.96 to 0.98 M through the runner on
 every run, where root `perf` reads 1.13 to 1.15 M; by hand, the same `omn`
 command, `-o` and stdin included, reads 1.13 to 1.17 M, beside `perf`'s 1.11
 to 1.17 M. Something of the runner's environment lowers `omn`'s count of a
-workload whose misses follow its page faults; not found. The two
+workload whose misses follow its page faults; not found. *Not reproduced
+on 2026-10-20*: through the runner, `omn` 2.92 M and 3.15 M against `perf`'s
+2.81 M and 3.28 M, 3.9 and 4.1 % apart in either direction, inside the
+pair's 10 % -- the runner's runs now serialized one family at a time, and
+the machine without the wave's load. Kept here until it is seen again or a
+quiet month passes. The two
 `tool_wraps_omn` system pairs (`cpu.cycles.system`,
 `cpu.context_switches.system`) skip: through `sudo`, `omn` itself would run
 as root.
