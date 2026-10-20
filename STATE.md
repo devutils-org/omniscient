@@ -2064,7 +2064,10 @@ Below the milestones, and not scheduled:
 - **A preempted eBPF program skips every run behind it on that cpu**
   (`docs/bpf-layer.md`, "Losses"): counted, never silent, but a program that
   fires on every page-cache lookup loses the target's events to the machine's
-  load. A per-target attach would narrow it.
+  load. A per-target attach would narrow it. Disabling preemption inside the
+  program was tried on 2026-10-20 and changed nothing: the reschedule is
+  taken at the program's `enable`, still inside the kernel's guard
+  (`docs/bpf-layer.md`).
 
 The fifth wave closed 52 of the sixty-three defects the scenario wave found;
 the eleven that are left are named in `docs/fixes/`.

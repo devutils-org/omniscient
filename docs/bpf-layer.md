@@ -198,6 +198,21 @@ not help, since the guard is taken before the program runs; a per-target
 attach (an fentry on a function only the target calls) or a shorter program
 does. Not scheduled.
 
+**Measured again on 7.2 (2026-10-20), and the program cannot close it.**
+Upstream's `__bpf_trace_run` takes the guard under
+`rcu_read_lock_dont_migrate()` and the tracepoint under SRCU-fast, so the run
+is preemptible from the guard to its release. It is preemption: with
+`io.readahead` system-wide for two seconds beside readers of a cached file on
+24 cpus, 4 and 12 readers cost 0 to 100 skipped runs, 48 readers 144 000 to
+205 000. Disabling preemption inside the program (`bpf_preempt_disable` after
+the context is saved, `bpf_preempt_enable` before each exit; every program
+of `omn selftest` loaded so, 199 of 199) changed nothing: 187 000 to 205 000
+skipped either way, three alternated runs each. A reschedule asked for while
+preemption is off is taken at the `enable`, which is still inside the guard,
+so the guard is held across the preemption all the same. Only the kernel can
+disable preemption from the guard to its release; a program of its own can
+only move where it is preempted.
+
 ## Privileges
 
 `CAP_BPF` and `CAP_PERFMON`, as settled in `DECISIONS.md`. Root works because
