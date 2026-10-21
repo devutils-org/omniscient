@@ -65,20 +65,26 @@
 - id: cpu.ipc
   source: cpu.ipc
   tool: perf stat
-  use: "perf stat -e cycles,instructions -- prog (the insn per cycle column)"
+  use: "perf stat -p PID -e cycles,instructions (the insn per cycle column)"
   workload: [env, PYTHONHASHSEED=0, python3, -S, tests/reference/workloads/perfstat/spin.py, "3000000"]
-  omn: [trace, cpu.ipc, -m, count, -e, summary, --format, json, -o, "{out}"]
-  run: separate
-  runs: 3
+  # One run, as cpu.cache_misses: separate runs spread with the cycles'
+  # frequency (Fedora 44 read 3.09 against 3.51 once, 2026-10-21).
+  run: attach
+  settle_ms: 700
+  omn: [trace, cpu.ipc, --pid, "{pid}", -d, 10s, -m, count, -e, summary, --format, json, -o, "{out}"]
   reference:
-    command: [perf, stat, -x, ",", -e, "cycles,instructions", --]
+    # As root: attaching to another process is refused unprivileged at
+    # Ubuntu's perf_event_paranoid 4 (2026-10-21).
+    command: [sh, -c, '$SUDO perf stat -x , -e cycles,instructions -p "$1"', sh, "{pid}"]
     parse: perf_stat_csv
-    requires: [perf]
+    requires: [perf, sh]
+    privileged: true
+    sudo: perf
   compare:
     key: ipc
     omn: results.0.outputs[emit=summary].series.*.last
-    tolerance: {rel: 0.08}
-    why: "both divide instructions by cycles read in one group; the cycles' frequency spread across separate runs is the whole tolerance"
+    tolerance: {rel: 0.02}
+    why: "one run: both divide instructions by cycles read in one group, on the same task over the same life"
 
 - id: cpu.branch_misses
   source: cpu.branch_misses
@@ -106,16 +112,20 @@
 - id: cpu.cache_misses
   source: cpu.cache_misses
   tool: perf stat
-  use: "perf stat -e cache-misses -- prog"
+  use: "perf stat -p PID -e cache-misses (the same process, the same run)"
   workload: [env, PYTHONHASHSEED=0, python3, -S, tests/reference/workloads/perfstat/touch.py, "256", "4"]
-  omn: [trace, cpu.cache_misses, -m, count, -e, summary, --format, json, -o, "{out}"]
-  run: separate
-  runs: 5
+  # One run both count: the workload is held stopped until both have
+  # attached to its pid, and both follow it to its exit. Separate runs (five
+  # medians) read the last-level cache as every other process left it, and
+  # missed by 10 % on a different distribution each chain run (Fedora 44,
+  # -10.2 %, 2026-10-21).
+  run: attach
+  settle_ms: 700
+  omn: [trace, cpu.cache_misses, --pid, "{pid}", -d, 10s, -m, count, -e, summary, --format, json, -o, "{out}"]
   reference:
     # As root, so that perf counts the kernel's part as omn (CAP_PERFMON)
-    # does: unprivileged, at perf_event_paranoid 2, it counts user mode only,
-    # and read 0 switches and 0 migrations where omn read 2003 and 503.
-    command: [sh, -c, '$SUDO perf stat -x , -e cache-misses -- "$@"', sh]
+    # does: unprivileged, at perf_event_paranoid 2, it counts user mode only.
+    command: [sh, -c, '$SUDO perf stat -x , -e cache-misses -p "$1"', sh, "{pid}"]
     parse: perf_stat_csv
     requires: [perf, sh]
     privileged: true
@@ -123,8 +133,8 @@
   compare:
     key: cache-misses
     omn: results.0.outputs[emit=summary].series.*.last
-    tolerance: {rel: 0.10}
-    why: "the same architectural counter, but the last-level cache is shared with every other process on the machine: separate runs of either tool alone spread 7 % under a loaded wave, and a load spike during one tool's runs moved its median 70 % once, so five runs' medians, and the verdict is a quiet machine's. One run with omn launching perf is no cure: perf's own misses add 40 % to omn's count"
+    tolerance: {rel: 0.02}
+    why: "one run: the same architectural counter on the same task over the same life, two counters reading the same misses"
 
 - id: mem.faults
   source: mem.faults

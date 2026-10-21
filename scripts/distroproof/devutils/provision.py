@@ -142,13 +142,22 @@ def main():
             Path('xpac-history.json').write_text(history['stdout'] if history['code'] == 0 else json.dumps(history))
             if history['code'] != 0:
                 report['errors'].append('journal export failed')
-        for directory in ('/usr/share/bcc/tools', '/usr/sbin'):
-            for tool in ('runqlat', 'tcplife', 'tcpaccept', 'memleak', 'opensnoop', 'vfsstat', 'biolatency', 'execsnoop'):
-                destination = Path('/usr/local/bin') / tool
-                for name in (tool, tool + '-bpfcc'):
-                    path = Path(directory) / name
-                    if os.access(str(path), os.X_OK) and not destination.exists():
-                        destination.symlink_to(path)
+        # libbpf-tools first, where the distribution has them: compiled ahead
+        # (CO-RE), they start at once and need no kernel headers, where bcc's
+        # Python tools compile for seconds or not at all (Debian 13 and
+        # Gentoo's bcc did not run; Arch's libbpf ones held every pair). Their
+        # names: Debian 12 and Ubuntu `tcplife`, Debian 13 `tcplife-libbpf`,
+        # Fedora and Rocky `bpf-tcplife`. Then bcc's.
+        for tool in ('runqlat', 'tcplife', 'tcpaccept', 'memleak', 'opensnoop', 'vfsstat', 'biolatency', 'execsnoop'):
+            destination = Path('/usr/local/bin') / tool
+            candidates = [Path(d) / n for d in ('/usr/sbin', '/usr/bin')
+                          for n in (tool + '-libbpf', 'bpf-' + tool, tool)]
+            candidates += [Path('/usr/share/bcc/tools') / tool, Path('/usr/sbin') / (tool + '-bpfcc')]
+            for path in candidates:
+                if os.access(str(path), os.X_OK) and not destination.exists() \
+                        and path.resolve() != destination.resolve():
+                    destination.symlink_to(path)
+                    break
         if shutil.which('sudo'):
             Path('/etc/sudoers.d').mkdir(exist_ok=True)
             policy = Path('/etc/sudoers.d/omn-witnesses')

@@ -126,19 +126,22 @@ fn bound(text: &str) -> Result<f64, String> {
 }
 
 /// Writes one histogram's values: `<map>/count` (its events), `<map>/p50`
-/// (the lower bound of the bucket holding the median, the resolution a log2
-/// histogram has) and `<map>/<low>` per non-empty bucket.
+/// and `<map>/p90` (the lower bound of the bucket holding the median and the
+/// ninetieth percentile, the resolution a log2 histogram has) and
+/// `<map>/<low>` per non-empty bucket.
 fn flush_hist(values: &mut Values, map: Option<&str>, buckets: &mut Vec<(f64, f64)>) {
     if let Some(map) = map {
         let total: f64 = buckets.iter().map(|(_, c)| c).sum();
         if total > 0.0 {
             add(values, &format!("{map}/count"), total);
-            let mut seen = 0.0;
-            for (low, c) in buckets.iter() {
-                seen += c;
-                if seen * 2.0 >= total {
-                    add(values, &format!("{map}/p50"), *low);
-                    break;
+            for (key, share) in [("p50", 0.5), ("p90", 0.9)] {
+                let mut seen = 0.0;
+                for (low, c) in buckets.iter() {
+                    seen += c;
+                    if seen >= total * share {
+                        add(values, &format!("{map}/{key}"), *low);
+                        break;
+                    }
                 }
             }
             for (low, c) in buckets.iter().filter(|(_, c)| *c > 0.0) {
@@ -753,6 +756,7 @@ mod tests {
         // 508 requests on two devices; the median in [32, 64) us.
         assert_eq!(get(&v, "@usecs/count"), 508.0);
         assert_eq!(get(&v, "@usecs/p50"), 32768.0);
+        assert!(get(&v, "@usecs/p90") >= get(&v, "@usecs/p50"));
         assert_eq!(get(&v, "@usecs/4096"), 44.0);
         let v = omn_hist_usecs(&omn_capture("runqlat"), "").unwrap();
         assert_eq!(get(&v, "@usecs/count"), 26406.0);
@@ -779,7 +783,7 @@ mod tests {
             ("bitesize", 504.0), // 500 O_DIRECT 4 KiB reads and the setup's
             ("biosnoop", 508.0),
             ("biolatency", 32768.0),
-            ("runqlat", 65536.0),
+            ("runqlat", 4194304.0),
             ("tcpconnect", 10.0),
             ("tcplife", 20.0),
         ];
