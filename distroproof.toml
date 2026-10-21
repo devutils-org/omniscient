@@ -139,6 +139,24 @@ name = "debian-12-root"
 image = "debian-12"
 as_user = "root"
 
+# Root on the kernels before CAP_BPF and kernel BTF: the one place a classic
+# tracepoint (`bpf:tp`, tracefs readable) or a program on copied fields serves
+# what a raw tracepoint cannot (the twenty-sixth wave).
+[[target]]
+name = "debian-10-root"
+image = "debian-10"
+as_user = "root"
+
+[[target]]
+name = "ubuntu-20.04-root"
+image = "ubuntu-20.04"
+as_user = "root"
+
+[[target]]
+name = "rocky-8-root"
+image = "rocky-8"
+as_user = "root"
+
 [run]
 setup = "sh scripts/distroproof/setup.sh"
 command = "sh scripts/distroproof/sweep.sh"

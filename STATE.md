@@ -115,6 +115,18 @@ wave.
 ## What the numbers say
 
 ```
+123 sources: 115 usable here, 8 out of reach on this machine.
+152 of their 242 backends have a collector.
+```
+
+(`target/debug/omn list` on `claude/w26` after the twenty-sixth wave, with the
+capabilities on the binary. Before it, at `bd09424`: 146 of 238. The six are
+`power.cstate` through `bpf:raw_tp`, `io.latency` through `/proc/diskstats`,
+and the four fallbacks of `collect::counter_file`; the four new rows are those
+fallbacks'. What the cells of the distribution matrix serve is in
+`docs/distroproof.md`. The paragraphs below are the earlier waves' record.)
+
+```
 102 sources: 95 usable here, 0 unverified, 7 out of reach on this machine.
 99 of them have a collector, covering 112 of their 206 backends.
 ```
@@ -286,6 +298,39 @@ join what-released-the-block  sched.wakeup -> sched.offcpu  evidence WAKEUP
 **This section is the one place the plan after the current wave is written.**
 `BRIEF.md` is the wave being run; there is no second brief for the one after it,
 because a plan kept in two documents drifted in both.
+
+### After the twenty-sixth wave
+
+The wave is `docs/briefs/wave-26-coverage.md`, its handoffs
+`docs/fixes/w26-*.md`, its decisions `DECISIONS.md`, "Settled in the
+twenty-sixth wave". **Phase 0 landed whole**: backend kinds, requirements read
+at load, `collect::poll`, the commands in the library, `bpf::program` and
+`collect::kernel`, `collect::Run`, the runner and the decomposition split.
+**Phase 1 landed what this machine can show**: `power.cstate` through the
+tracepoint, `io.latency` through diskstats, four counter-file fallbacks, and
+the eighteen and twenty-six collectors moved onto `UserFilter` and
+`KernelCounts`. What is left, by what it waits on:
+
+1. **A machine**: `power.freq` through `cpu_frequency` (a cpufreq driver that
+   sets the frequency; here `amd-pstate-epp` lets the hardware choose),
+   `power.throttle` through the thermal tracepoints (a cpu with a thermal
+   zone), and the hardware the user chose to wait for (`DECISIONS.md`).
+2. **Root on a kernel without BTF**: the `bpf:tp` rows. Each is another
+   program where the tracepoint's arguments are pointers; the syscall ones
+   can go through `bpf::context::Syscall`. The matrix's three root cells on
+   old kernels are where they would be shown.
+3. **Kernels without fentry**: the `bpf:kprobe` rows (`io.fsync`, `io.fs`,
+   `net.socket`, `net.tcp.connect`, `sched.lock`). The fentry programs read
+   through typed pointers, which a kprobe cannot: each is a program that
+   reads through `bpf_probe_read_kernel`, and Rocky 8, Alpine and Ubuntu
+   22.04 are the cells that would show them.
+4. **The pollers' move onto `collect::poll`**: eighteen collectors still keep
+   their own `previous` reading (`grep -rn "previous: Option<" src/collect`),
+   and twelve eBPF collectors that count only what their filter removed keep
+   their own wording.
+5. **perftp** (`BRIEF.md`): a counting perf tracepoint needs the event's id
+   from tracefs, which only root reads here; under lockdown and in a
+   container it is as out of reach as eBPF. Not written.
 
 The eleventh wave -- the escalation, the engine's debts, the silent
 degradations, the drains and the portability matrix -- is merged, and
