@@ -85,7 +85,7 @@ pub enum Flow {
 /// An escalation that attaches nothing and hands each round's new events to a
 /// closure, as `(request index, events, now_ns)`.
 ///
-/// Run it with [`run_all_escalating`](super::run_all_escalating). The closure
+/// Run it with [`Run::escalation`](super::Run::escalation). The closure
 /// runs on the runner's thread, between two rounds: what it spends is time the
 /// rings are not drained, so a slow consumer sends the events to a channel
 /// rather than working on them here.

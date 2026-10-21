@@ -90,7 +90,7 @@ hold a layer for part of its window); a decomposition (its whole is the
 program's life, which a document is one window of). The refusals are in
 `Session::check_recording` and `check_trigger_fields` (`src/request.rs`), run
 where a session is loaded, where a command line is built, after `--duration`
-overrides a file, and after resolution for the fields; `collect::record_within`
+overrides a file, and after resolution for the fields; `collect::Run::recorder`
 refuses the same shapes for a caller that built its requests itself.
 
 ## The mechanism, for `DECISIONS.md`
@@ -170,7 +170,7 @@ none.
 A held request (`window: on <layer>`) the resolver finds no viable backend for
 is set aside in `main.rs` with the resolver's reason (a note on stderr before
 the run) rather than refusing the run, and handed to
-`collect::run_all_within_unserved(&resolutions, &mut ladder, &unserved)`, which
+`collect::Run::new(&resolutions).cheaper(&mut ladder).unserved(&unserved)`, which
 passes it to `triage::escalate::Policy::for_run_with`. The policy carries it as
 a detailed source of its layer with no index in the run: when the cheap pass
 names that layer, it attaches what it can serve of it and says the rest was not

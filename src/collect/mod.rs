@@ -1762,7 +1762,7 @@ pub struct Unserved {
 /// where each document goes as it is cut.
 ///
 /// A recording is a mode of a run, not a second runner. The run is the one
-/// [`run_all_within`] drives -- the same collectors, the same rounds, the same
+/// [`Run`] drives -- the same collectors, the same rounds, the same
 /// budget -- with three differences: it keeps only what the retention holds,
 /// evicting and counting the rest; it reads one request's rounds against a
 /// predicate; and when the predicate fires it hands the retained window out
@@ -2189,105 +2189,126 @@ fn all_or_nothing<T>(
     }
 }
 
-/// Runs one resolved request to completion.
-pub fn run(resolved: &ResolvedRequest) -> Result<Collection, CollectError> {
-    let mut collections = run_all(std::slice::from_ref(resolved))?;
-    Ok(collections.remove(0))
-}
-
-/// Runs several resolved requests over one target, in one window.
+/// How a session is run: the one entry point to the runner.
 ///
-/// They share a window deliberately. Running them one after another would
-/// measure several different moments and present them as one, and a join across
-/// them would then be correlating a program with its own past. One launch, one
-/// set of collectors, one clock.
+/// Every run is one window over one target, whatever it is asked to do on
+/// top: several requests share it deliberately -- running them one after
+/// another would measure several moments and present them as one, and a join
+/// across them would correlate a program with its own past. What varies is
+/// what the run may turn to, and each is an option here with the default an
+/// ordinary run takes:
 ///
-/// A run started this way has nowhere to degrade to, so a `--budget` it exceeds
-/// ends it. [`run_all_within`] is the same run with a ladder underneath.
-pub fn run_all(resolved: &[ResolvedRequest]) -> Result<Vec<Collection>, CollectError> {
-    run_all_within(resolved, &mut StopWhenOverBudget)
+/// - **`cheaper`**: where to turn when a `--budget` is exceeded. The split
+///   keeps the collector layer from knowing about the catalog: *which backend
+///   is cheaper and reachable here* is answered by whoever holds both. With
+///   none, the run stops when it is over its budget.
+/// - **`unserved`**: the session's held requests this machine could not
+///   serve. They are never attached; the escalation is told of them, and a
+///   held request that does not resolve is a layer the machine cannot serve,
+///   not a failed run.
+/// - **`bound`**: a program the run launches and no request targets, whose
+///   life is the window -- as `perf stat -a -- prog` measures the machine for
+///   a program's life. A request whose target is a launch beside it is
+///   refused: the program is launched once.
+/// - **`escalation`**: what is asked between rounds which held requests to
+///   attach and detach. By default the session's own, when it holds a window
+///   written `on <layer>`.
+/// - **`recorder`**: a recording, with no fixed end but its longest
+///   duration, keeping what `recorder.retain_ns` holds and handing a
+///   [`Document`] to its sink each time its trigger fires. A recording asks
+///   no escalation.
+pub struct Run<'r, 'a> {
+    resolved: &'r [ResolvedRequest],
+    cheaper: Option<&'r mut dyn Cheaper>,
+    unserved: &'r [Unserved],
+    bound: Option<&'r [String]>,
+    escalation: Asked<'r>,
+    recorder: Option<&'r mut Recorder<'a>>,
 }
 
-/// The same run, with somewhere to turn when a budget is exceeded.
-///
-/// The split keeps the collector layer from knowing about the catalog. The
-/// runner can measure what it is spending and compare it against the ceiling;
-/// *which backend is cheaper than this one and reachable here* is a question
-/// about the catalog and about this machine, and it is answered by whoever
-/// holds both.
-pub fn run_all_within(
-    resolved: &[ResolvedRequest],
-    cheaper: &mut dyn Cheaper,
-) -> Result<Vec<Collection>, CollectError> {
-    run_all_within_unserved(resolved, cheaper, &[])
+/// Which escalation a run asks.
+enum Asked<'r> {
+    /// The session's own, if it holds one.
+    Session,
+    /// This one, or none.
+    Given(Option<&'r mut dyn Escalate>),
 }
 
-/// The same run, told which of the session's held requests this machine
-/// could not serve.
-///
-/// They are not in `resolved` and are never attached; the escalation is
-/// told of them, and if it names their layer it says that the layer could
-/// not be served and why, in the resolver's words. A held request that does
-/// not resolve is a layer this machine cannot serve, not a failed run.
-pub fn run_all_within_unserved(
-    resolved: &[ResolvedRequest],
-    cheaper: &mut dyn Cheaper,
-    unserved: &[Unserved],
-) -> Result<Vec<Collection>, CollectError> {
-    run_all_bounded(resolved, cheaper, unserved, None)
+/// What a run returns: each request's collection, and what a recording did.
+#[derive(Debug)]
+pub struct Ran {
+    pub collections: Vec<Collection>,
+    pub recorded: Option<Recorded>,
 }
 
-/// The same run, lasting as long as `bound` -- a program it launches and no
-/// request targets -- when one is given: the window of a machine, a core, a
-/// cgroup or a pid measured for a program's life, as `perf stat -a -- prog`
-/// and `turbostat prog` measure. A request whose target is a launch beside
-/// it is refused: the program is launched once, and is either the run's
-/// bound or a request's target.
-pub fn run_all_bounded(
-    resolved: &[ResolvedRequest],
-    cheaper: &mut dyn Cheaper,
-    unserved: &[Unserved],
-    bound: Option<&[String]>,
-) -> Result<Vec<Collection>, CollectError> {
-    let mut escalation = escalation_for(resolved, unserved)?;
-    run_core(
-        resolved,
-        cheaper,
-        escalation
-            .as_deref_mut()
-            .map(|escalation| escalation as &mut dyn Escalate),
-        None,
-        bound,
-    )
-    .map(|(collections, _)| collections)
-}
+impl<'r, 'a> Run<'r, 'a> {
+    /// An ordinary run of `resolved`.
+    pub fn new(resolved: &'r [ResolvedRequest]) -> Self {
+        Self {
+            resolved,
+            cheaper: None,
+            unserved: &[],
+            bound: None,
+            escalation: Asked::Session,
+            recorder: None,
+        }
+    }
 
-/// A recording: the same run, with no fixed end but its longest duration,
-/// keeping only what `recorder.retain_ns` holds and handing a [`Document`]
-/// to `recorder.sink` each time its trigger fires.
-///
-/// Returns the run's collections as an ordinary run would -- what they cost,
-/// what they lost, what their collectors noted -- holding the events still
-/// retained at the end, and what the recording did.
-pub fn record_within(
-    resolved: &[ResolvedRequest],
-    cheaper: &mut dyn Cheaper,
-    recorder: &mut Recorder<'_>,
-) -> Result<(Vec<Collection>, Recorded), CollectError> {
-    record_bounded(resolved, cheaper, recorder, None)
-}
+    pub fn cheaper(mut self, cheaper: &'r mut dyn Cheaper) -> Self {
+        self.cheaper = Some(cheaper);
+        self
+    }
 
-/// [`record_within`], bounded by a launched program as [`run_all_bounded`]
-/// is.
-pub fn record_bounded(
-    resolved: &[ResolvedRequest],
-    cheaper: &mut dyn Cheaper,
-    recorder: &mut Recorder<'_>,
-    bound: Option<&[String]>,
-) -> Result<(Vec<Collection>, Recorded), CollectError> {
-    recording_holds(resolved, recorder)?;
-    run_core(resolved, cheaper, None, Some(recorder), bound)
-        .map(|(collections, recorded)| (collections, recorded.unwrap_or_default()))
+    pub fn unserved(mut self, unserved: &'r [Unserved]) -> Self {
+        self.unserved = unserved;
+        self
+    }
+
+    pub fn bound(mut self, bound: Option<&'r [String]>) -> Self {
+        self.bound = bound;
+        self
+    }
+
+    /// Asks `escalation` instead of the session's, or nothing.
+    pub fn escalation(mut self, escalation: Option<&'r mut dyn Escalate>) -> Self {
+        self.escalation = Asked::Given(escalation);
+        self
+    }
+
+    pub fn recorder(mut self, recorder: &'r mut Recorder<'a>) -> Self {
+        self.recorder = Some(recorder);
+        self
+    }
+
+    /// Runs it.
+    pub fn go(self) -> Result<Ran, CollectError> {
+        let mut stop = StopWhenOverBudget;
+        let cheaper: &mut dyn Cheaper = match self.cheaper {
+            Some(cheaper) => cheaper,
+            None => &mut stop,
+        };
+        let recording = self.recorder.is_some();
+        let (collections, recorded) = match (self.recorder, self.escalation) {
+            (Some(recorder), _) => {
+                recording_holds(self.resolved, recorder)?;
+                run_core(self.resolved, cheaper, None, Some(recorder), self.bound)?
+            }
+            (None, Asked::Given(given)) => {
+                run_core(self.resolved, cheaper, given, None, self.bound)?
+            }
+            (None, Asked::Session) => {
+                let mut owned = escalation_for(self.resolved, self.unserved)?;
+                let escalation = owned
+                    .as_deref_mut()
+                    .map(|escalation| escalation as &mut dyn Escalate);
+                run_core(self.resolved, cheaper, escalation, None, self.bound)?
+            }
+        };
+        Ok(Ran {
+            collections,
+            recorded: recording.then(|| recorded.unwrap_or_default()),
+        })
+    }
 }
 
 /// Refuses a recording the runner cannot hold, for a caller that built its
@@ -2354,17 +2375,6 @@ fn escalation_for(
         .map_err(|refusal| CollectError::Escalation {
             reason: refusal.to_string(),
         })
-}
-
-/// The same run, asking `escalation` between rounds which held requests to
-/// attach and detach. `None` runs it as [`run_all_within`] would a session
-/// that holds nothing; a held request is then never attached, and says so.
-pub fn run_all_escalating(
-    resolved: &[ResolvedRequest],
-    cheaper: &mut dyn Cheaper,
-    escalation: Option<&mut dyn Escalate>,
-) -> Result<Vec<Collection>, CollectError> {
-    run_core(resolved, cheaper, escalation, None, None).map(|(collections, _)| collections)
 }
 
 /// The one runner behind every entry point: an ordinary run, an escalating
@@ -5828,7 +5838,7 @@ mod tests {
             })
             .collect();
 
-        match run_all(&resolved) {
+        match Run::new(&resolved).go().map(|ran| ran.collections) {
             Err(CollectError::MixedTargets { .. }) => {}
             other => panic!(
                 "expected a refusal, got {:?}",
@@ -6057,7 +6067,10 @@ mod tests {
                 return;
             }
         };
-        match run(&resolved) {
+        match Run::new(std::slice::from_ref(&resolved))
+            .go()
+            .map(|mut ran| ran.collections.remove(0))
+        {
             Err(CollectError::NoStopCondition) => {}
             // A machine with no GPU cannot get that far, and says so first.
             Err(CollectError::Start { reason, .. }) => {
@@ -7646,7 +7659,10 @@ mod tests {
         whole.request.duration = Some("400ms".parse().unwrap());
         let mut late = windowed(Some("100ms..250ms"), poll_ms(20));
         late.request.duration = Some("400ms".parse().unwrap());
-        let collections = run_all(&[whole, late]).expect("the run completes");
+        let collections = Run::new(&[whole, late])
+            .go()
+            .map(|ran| ran.collections)
+            .expect("the run completes");
         let (whole, late) = (&collections[0], &collections[1]);
 
         eprintln!(

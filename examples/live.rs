@@ -18,8 +18,8 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use omn::capabilities::Capabilities;
+use omn::collect;
 use omn::collect::live::{Flow, Live};
-use omn::collect::{self, StopWhenOverBudget};
 use omn::format::InputFormat;
 use omn::{resolve, validate, Catalog, Session};
 
@@ -94,12 +94,11 @@ fn run(cgroup: &str, duration: &str) -> Result<(), String> {
                 Flow::Continue
             },
         );
-        let error = match collect::run_all_escalating(
-            &resolutions,
-            &mut StopWhenOverBudget,
-            Some(&mut live),
-        ) {
-            Ok(collections) => break collections,
+        let error = match collect::Run::new(&resolutions)
+            .escalation(Some(&mut live))
+            .go()
+        {
+            Ok(ran) => break ran.collections,
             Err(error) => error,
         };
         let refused: Vec<(String, String)> = error

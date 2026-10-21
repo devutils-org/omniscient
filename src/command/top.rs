@@ -478,8 +478,12 @@ pub(crate) fn top_live(catalog: &Catalog, args: &TopArgs) -> anyhow::Result<Exit
             std::sync::Arc::clone(&quit),
             view_cpu.as_mut(),
         );
-        match collect::run_all_escalating(&resolutions, &mut ladder, Some(&mut tap)) {
-            Ok(collections) => break (collections, ladder),
+        match collect::Run::new(&resolutions)
+            .cheaper(&mut ladder)
+            .escalation(Some(&mut tap))
+            .go()
+        {
+            Ok(ran) => break (ran.collections, ladder),
             Err(error) => {
                 let named: Option<Vec<(String, String)>> = error
                     .each()

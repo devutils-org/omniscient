@@ -509,7 +509,10 @@ fn the_launched_program_s_lifetime_brackets_its_own_clock() {
         ),
         resolved("cpu.util", Target::System, poll_every(tick), None),
     ];
-    let collections: Vec<Collection> = collect::run_all(&requests).expect("the run completes");
+    let collections: Vec<Collection> = collect::Run::new(&requests)
+        .go()
+        .map(|ran| ran.collections)
+        .expect("the run completes");
     let (start_ns, end_ns) = {
         let text = std::fs::read_to_string(&report).expect("the program wrote its clock");
         let _ = std::fs::remove_file(&report);
@@ -577,7 +580,10 @@ fn a_program_the_run_outlived_is_marked_terminated() {
         poll_every("50ms"),
         Some("300ms"),
     )];
-    let collections = collect::run_all(&requests).expect("the run completes");
+    let collections = collect::Run::new(&requests)
+        .go()
+        .map(|ran| ran.collections)
+        .expect("the run completes");
     let lifetime = collections[0].lifetime.expect("the program was launched");
     assert!(lifetime.terminated, "{lifetime:?}");
     let lived_ns = lifetime.exited_ns - lifetime.released_ns;
@@ -602,7 +608,10 @@ fn a_run_that_launched_nothing_has_no_lifetime() {
         poll_every("20ms"),
         Some("60ms"),
     )];
-    let collections = collect::run_all(&requests).expect("the run completes");
+    let collections = collect::Run::new(&requests)
+        .go()
+        .map(|ran| ran.collections)
+        .expect("the run completes");
     assert_eq!(collections[0].lifetime, None);
 }
 
@@ -1161,7 +1170,10 @@ fn count_the_phases(
         .zip(windows)
         .map(|(label, window)| windowed("cpu.instructions", argv, Mode::Count, window, label))
         .collect::<Result<Vec<_>, _>>()?;
-    collect::run_all(&requests).map_err(|error| error.to_string())
+    collect::Run::new(&requests)
+        .go()
+        .map(|ran| ran.collections)
+        .map_err(|error| error.to_string())
 }
 
 /// A source attached for the first phase counts the first phase and nothing

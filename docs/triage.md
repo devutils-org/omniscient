@@ -20,7 +20,7 @@ omn SOURCE --window START..STOP ...
 
 **It sits above the engine and calls it like any other user.** Each method
 writes a `Session`, runs it through the calls `omn -f` makes — validate,
-resolve, `collect::run_all_within`, `emit::aggregate`, `join::apply`,
+resolve, `collect::Run`, `emit::aggregate`, `join::apply`,
 `join::decompose` (`src/triage/engine.rs`) — and reads the answer off the
 results. It edits nothing in the collector layer, the join engine or the emit
 layer. `--dump-session` prints the session a question is asked through; `omn

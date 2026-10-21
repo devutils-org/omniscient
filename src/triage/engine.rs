@@ -241,7 +241,9 @@ pub fn run(
         }
     }
 
-    let collections = collect::run_all_within(&resolved, &mut collect::StopWhenOverBudget)
+    let collections = collect::Run::new(&resolved)
+        .go()
+        .map(|ran| ran.collections)
         .map_err(|error| Failure {
             whose: error.whose(),
             message: error.to_string(),

@@ -208,7 +208,13 @@ pub(crate) fn measure(
 
     let mut ladder = Ladder::new(catalog, capabilities, resolved);
     let bound = (!session.launch.is_empty()).then_some(session.launch.as_slice());
-    let collections = match collect::run_all_bounded(resolved, &mut ladder, unserved, bound) {
+    let collections = match collect::Run::new(resolved)
+        .cheaper(&mut ladder)
+        .unserved(unserved)
+        .bound(bound)
+        .go()
+        .map(|ran| ran.collections)
+    {
         Ok(collections) => collections,
         Err(error) => return Ok(refused_at_collect(catalog, &error, resolved)),
     };
@@ -272,7 +278,13 @@ pub(crate) fn measure_repeated(
     let mut broke = Vec::new();
     for index in 1..=repeat {
         let mut ladder = Ladder::new(catalog, capabilities, resolved);
-        let collections = match collect::run_all_bounded(resolved, &mut ladder, unserved, bound) {
+        let collections = match collect::Run::new(resolved)
+            .cheaper(&mut ladder)
+            .unserved(unserved)
+            .bound(bound)
+            .go()
+            .map(|ran| ran.collections)
+        {
             Ok(collections) => collections,
             Err(error) => {
                 eprintln!("error: run {index} of {repeat} could not run");
@@ -501,11 +513,15 @@ pub(crate) fn record(
     };
     let mut cheaper = Shared(&ladder);
     let bound = (!session.launch.is_empty()).then_some(session.launch.as_slice());
-    let (collections, recorded) =
-        match collect::record_bounded(resolved, &mut cheaper, &mut recorder, bound) {
-            Ok(done) => done,
-            Err(error) => return Ok(refused_at_collect(catalog, &error, resolved)),
-        };
+    let (collections, recorded) = match collect::Run::new(resolved)
+        .cheaper(&mut cheaper)
+        .recorder(&mut recorder)
+        .bound(bound)
+        .go()
+    {
+        Ok(ran) => (ran.collections, ran.recorded.unwrap_or_default()),
+        Err(error) => return Ok(refused_at_collect(catalog, &error, resolved)),
+    };
     RUN_STARTED.store(true, std::sync::atomic::Ordering::SeqCst);
     drop(recorder);
     let failures = failures(&collections);
