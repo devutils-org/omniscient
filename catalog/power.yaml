@@ -78,8 +78,10 @@
   summary: "Effective CPU frequency"
   unit: hz
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:cpu_frequency", "bpf_map:ringbuf"], cost: free}
-    - {id: "bpf:tp", requires: ["tracepoint:power:cpu_frequency", "bpf"], cost: free, equivalent: true}
+    # The tracepoint fires only where a driver sets the frequency:
+    # `cpufreq:transitions` says whether this one does.
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:cpu_frequency", "bpf_map:ringbuf", "cpufreq:transitions"], cost: free}
+    - {id: "bpf:tp", requires: ["tracepoint:power:cpu_frequency", "bpf", "cpufreq:transitions"], cost: free, equivalent: true}
     # APERF, MPERF and the TSC as perf events of the kernel's `msr` unit, which
     # an ordinary user may open where /dev/cpu/*/msr is root's. Every number
     # covers the interval, an idle cpu's included: preferred over sysfs.
@@ -111,7 +113,11 @@
   summary: "Idle state residency"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:cpu_idle", "bpf_map:ringbuf"], cost: low}
+    # One record per announcement, paired per cpu into idle periods: the
+    # timeline cpuidle's totals cannot give, and the trace mode alone. It
+    # fires without a cpuidle driver too: the kernel's default idle loop
+    # announces itself as state 1, which is what a guest has.
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:cpu_idle(unsigned int, unsigned int)", "bpf_map:ringbuf"], cost: low, modes: [trace]}
     - {id: "bpf:tp", requires: ["tracepoint:power:cpu_idle", "bpf"], cost: low, equivalent: true}
     - {id: "fs:sys", requires: ["/sys/devices/system/cpu/cpu0/cpuidle"], cost: high, modes: [poll, count],
        degraded: "residency totals only: no transition timeline"}

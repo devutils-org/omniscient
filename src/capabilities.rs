@@ -1153,6 +1153,14 @@ impl Capabilities {
             // software stamps every kernel offers; a device's own stamps are
             // `phc`'s question.
             Word::SoTimestamping => probe_so_timestamping(),
+            // A tracepoint that exists is not one that fires. `cpu_frequency`
+            // is announced by the cpufreq core when a driver changes the
+            // frequency; a driver that lets the hardware choose it
+            // (`intel_pstate` and `amd-pstate-epp` in their active modes)
+            // announces nothing, and a guest has no cpufreq at all.
+            Word::CpufreqTransitions => probe_cpufreq_transitions(Path::new(
+                "/sys/devices/system/cpu/cpu0/cpufreq/scaling_driver",
+            )),
             Word::Btf => match self.environment.kernel_btf {
                 Access::Readable => Probe::Available,
                 Access::Restricted => {
@@ -1257,6 +1265,28 @@ fn probe_rdt(feature: &str) -> Probe {
         )
     } else {
         Probe::Missing("this cpu has no memory bandwidth monitoring (no `cqm_mbm` flag)".into())
+    }
+}
+
+/// Whether the cpufreq driver announces frequency changes: the
+/// `cpufreq:transitions` requirement.
+fn probe_cpufreq_transitions(driver: &Path) -> Probe {
+    let name = match std::fs::read_to_string(driver) {
+        Ok(name) => name.trim().to_owned(),
+        Err(_) => {
+            return Probe::Missing(format!(
+                "{} cannot be read: this machine has no cpufreq driver, so the kernel sets no \
+                 frequency and announces none",
+                driver.display()
+            ))
+        }
+    };
+    match name.as_str() {
+        "intel_pstate" | "amd-pstate-epp" => Probe::Missing(format!(
+            "the `{name}` driver lets the hardware choose the frequency, so the kernel announces \
+             no change on `power:cpu_frequency`; the `pmu` backend reads what the cpu ran at"
+        )),
+        _ => Probe::Available,
     }
 }
 

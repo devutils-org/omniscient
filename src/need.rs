@@ -96,6 +96,9 @@ pub enum Word {
     Damon,
     /// `so_timestamping`: the socket option that stamps packets.
     SoTimestamping,
+    /// `cpufreq:transitions`: a cpufreq driver that sets the frequency, and
+    /// so announces each change on `power:cpu_frequency`.
+    CpufreqTransitions,
 }
 
 /// Builds a requirement from what follows its prefix.
@@ -145,6 +148,7 @@ impl Word {
             "dynamic-linking" => Word::DynamicLinking,
             "damon" => Word::Damon,
             "so_timestamping" => Word::SoTimestamping,
+            "cpufreq:transitions" => Word::CpufreqTransitions,
             _ => return None,
         })
     }
@@ -252,6 +256,7 @@ impl fmt::Display for Need {
                 Word::DynamicLinking => "dynamic-linking",
                 Word::Damon => "damon",
                 Word::SoTimestamping => "so_timestamping",
+                Word::CpufreqTransitions => "cpufreq:transitions",
             }),
             Need::Gpu(text) | Need::Unprobed(text) => f.write_str(text),
         }

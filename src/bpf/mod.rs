@@ -57,6 +57,7 @@ mod net_qdisc;
 mod net_retransmit;
 mod net_softirq;
 mod offcpu;
+mod power_idle;
 // The `cpu` stream's: `cpu.oncpu_time` through `sched_switch`, per thread.
 mod oncpu;
 // The kernel's ids for what `omn` names, when it runs in a container.
@@ -103,6 +104,7 @@ pub use net_retransmit::{Retransmit, RetransmitProgram};
 pub use net_softirq::{SoftIrq, SoftIrqDrain, SoftIrqProgram};
 pub use offcpu::{DrainLosses, OffCpu, OffCpuProgram};
 pub use oncpu::{OnCpu, OnCpuProgram};
+pub use power_idle::{IdleEdge, IdleProgram, EXIT as IDLE_EXIT};
 pub use proc_calls::{Call, CallsNarrowing, CallsProgram, PathCall, PATH_CALLS};
 pub use proc_events::{Exec, ExecProgram, Exit, ExitProgram, Signal, SignalProgram};
 pub use proc_renames::Renames;

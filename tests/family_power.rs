@@ -496,3 +496,67 @@ fn the_record_beside_the_numbers_carries_the_machine_it_was_taken_on() {
     );
     std::fs::remove_dir_all(&directory).ok();
 }
+
+/// Each idle period the tracepoint pairs is cpuidle's time, one period at a
+/// time: over a window, the idle time `power.cstate` traces on a cpu is the
+/// share cpuidle's own `time` counters give for it, read around the run. The
+/// counters cover the command and the trace its window, so the shares are
+/// compared, not the totals; a pairing that dropped exits or doubled entries
+/// would move the traced share and not the counters'.
+#[test]
+fn the_traced_idle_periods_add_up_to_cpuidle_s_own_residency() {
+    let listed = stdout(&run(&["list", "power.cstate"]));
+    if !listed.contains("usable through `bpf:raw_tp`") {
+        eprintln!("skipped: power.cstate is not usable through bpf:raw_tp here");
+        return;
+    }
+    let cpu = 1;
+    let states = format!("/sys/devices/system/cpu/cpu{cpu}/cpuidle");
+    let residency = || -> u64 {
+        std::fs::read_dir(&states)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| entry.file_name().to_string_lossy().starts_with("state"))
+                    .filter_map(|entry| std::fs::read_to_string(entry.path().join("time")).ok())
+                    .filter_map(|text| text.trim().parse::<u64>().ok())
+                    .sum::<u64>()
+                    * 1_000
+            })
+            .unwrap_or(0)
+    };
+    let clock = std::time::Instant::now();
+    let before = residency();
+    let output = run(&[
+        "power.cstate",
+        "-m",
+        "trace",
+        "-e",
+        "summary",
+        "--cpu",
+        &cpu.to_string(),
+        "-d",
+        "3s",
+        "--format",
+        "json",
+    ]);
+    let after = residency();
+    let elapsed_ns = clock.elapsed().as_nanos() as f64;
+    assert!(output.status.success(), "{}", stderr(&output));
+    let document: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("json");
+    let fields = &document["results"][0]["fields"];
+    let traced = fields["idle_total_ns"]
+        .as_u64()
+        .expect("the traced idle time") as f64;
+    assert!(fields["periods"].as_u64().unwrap_or(0) > 0, "{fields}");
+    if after == before {
+        eprintln!("skipped: cpu{cpu} has no cpuidle counters to hold the trace to");
+        return;
+    }
+    let traced_share = traced / 3e9;
+    let counted_share = (after - before) as f64 / elapsed_ns;
+    assert!(
+        (traced_share - counted_share).abs() < 0.05,
+        "traced {traced_share:.3} of the window idle, cpuidle counted {counted_share:.3}"
+    );
+}
