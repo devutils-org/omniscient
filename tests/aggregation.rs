@@ -386,16 +386,19 @@ fn a_format_refuses_an_emit_it_cannot_express_before_collecting_anything() {
     );
 }
 
-/// Until a collector captures one, `--emit stack` on the heap is refused
-/// before the program runs, with the reason.
+/// `--emit stack` on the heap is served by the backend that captures one, or
+/// refused before the program runs, with the reason.
 ///
 /// The shim captures no stack, and its backend says so in the catalog
-/// (`emits: [hist, topk, raw, summary]`): the resolver passes it over, so the
-/// refusal names what `preload` emits and comes before the launch, where it
-/// used to come after the program had run with nothing to write (heap 1). When
-/// stacks arrive this test changes shape; it must not quietly keep passing.
+/// (`emits: [hist, topk, raw, summary]`): the resolver passes it over. Behind
+/// it, `bpf:uprobe` times `malloc` with the caller's stack; since the
+/// twenty-sixth wave its `symbols:malloc` requirement is answered rather than
+/// unverified, so where this process may place a uprobe the stacks arrive,
+/// and where it may not the refusal names what `preload` emits and comes
+/// before the launch, where it used to come after the program had run with
+/// nothing to write (heap 1).
 #[test]
-fn a_stack_emit_no_backend_captures_is_refused_before_the_program_runs() {
+fn a_stack_emit_on_the_heap_is_served_by_the_uprobe_or_refused_before_the_program_runs() {
     if !has_python() {
         eprintln!("skipped: this machine has no python3 to launch");
         return;
@@ -408,7 +411,15 @@ fn a_stack_emit_no_backend_captures_is_refused_before_the_program_runs() {
         "json",
     ));
     let message = stderr(&output);
-    assert!(!output.status.success(), "{message}");
+    if output.status.success() {
+        assert!(message.contains("bpf:uprobe"), "{message}");
+        assert!(
+            stdout(&output).contains("\"stack\""),
+            "a stack emit served with no stack in it: {}",
+            stdout(&output)
+        );
+        return;
+    }
     assert!(
         !stdout(&output).contains("launched"),
         "the program ran before the refusal: {}",
@@ -420,7 +431,8 @@ fn a_stack_emit_no_backend_captures_is_refused_before_the_program_runs() {
     );
 }
 
-/// A profile format handed a run with no profile in it refuses.
+/// A profile format handed a run with no profile in it refuses; one handed a
+/// profile writes it.
 ///
 /// An empty collapsed-stack file is a valid file: it opens as an empty flame
 /// graph, which reads as a program that spent no time anywhere. Refusing with
@@ -432,14 +444,30 @@ fn a_collapsed_stack_file_is_refused_rather_than_written_empty() {
         return;
     }
 
-    let output = run_session(&session("mem.heap.alloc", "stack", "pass", "folded"));
-    assert!(
-        !output.status.success(),
-        "an empty folded file was written: {:?}",
-        stdout(&output)
-    );
-    // Refused before the run now, since no backend of the heap captures a
-    // stack (heap 1); the refusal says why either way.
+    let output = run_session(&session(
+        "mem.heap.alloc",
+        "stack",
+        "x = [bytearray(1000) for _ in range(1000)]",
+        "folded",
+    ));
+    if output.status.success() {
+        // The uprobe served it: every line is a stack and a count.
+        let folded = stdout(&output);
+        assert!(
+            !folded.trim().is_empty(),
+            "an empty folded file was written"
+        );
+        assert!(
+            folded
+                .lines()
+                .filter(|line| !line.is_empty())
+                .all(|line| line
+                    .rsplit_once(' ')
+                    .is_some_and(|(_, n)| n.parse::<u64>().is_ok())),
+            "{folded}"
+        );
+        return;
+    }
     let message = stderr(&output);
     assert!(
         message.contains("no event carried one") || message.contains("not `stack`"),
