@@ -85,7 +85,7 @@ pub struct FutexCollector {
     /// Each process's parent, for the rows' `ppid`.
     parents: super::Parents,
     losses: Losses,
-    /// The program\'s loss counters, as last read (`collect::kernel`).
+    /// The program's loss counters, as last read (`collect::kernel`).
     counts: KernelCounts,
     notes: Vec<String>,
     stacks: BTreeMap<u64, Vec<String>>,

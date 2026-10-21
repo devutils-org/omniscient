@@ -76,7 +76,7 @@ impl Prepared for Prepare {
 pub struct WritebackCollector {
     mode: Mode,
     program: Option<WritebackProgram>,
-    /// The program\'s loss counters, as last read (`collect::kernel`).
+    /// The program's loss counters, as last read (`collect::kernel`).
     counts: KernelCounts,
     losses: Losses,
     dropped_open: u64,

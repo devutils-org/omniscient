@@ -61,7 +61,7 @@ pub struct RunqLen {
     /// The ticks at the last drain, `[length][cpu]`.
     previous: Vec<Vec<u64>>,
     losses: Losses,
-    /// The program\'s loss counters, as last read (`collect::kernel`).
+    /// The program's loss counters, as last read (`collect::kernel`).
     counts: KernelCounts,
 }
 

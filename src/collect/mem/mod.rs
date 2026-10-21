@@ -26,11 +26,6 @@ use crate::bpf::{Allocator, Stall};
 use footprint::{Metric, Source};
 use heap::Which;
 
-/// The collectors this family provides.
-///
-/// Adding a source means adding a line here and a module beside it. No file
-/// outside this directory changes, which is what lets the families be worked on
-/// independently.
 /// `mem.page_alloc` where no program can be loaded: the pages the allocator
 /// handed out, by zone, from `/proc/vmstat`.
 const PAGES_ALLOCATED: crate::collect::counter_file::Spec = crate::collect::counter_file::Spec {
@@ -54,6 +49,11 @@ const PAGES_ALLOCATED: crate::collect::counter_file::Spec = crate::collect::coun
     what: "pages allocated",
 };
 
+/// The collectors this family provides.
+///
+/// Adding a source means adding a line here and a module beside it. No file
+/// outside this directory changes, which is what lets the families be worked on
+/// independently.
 pub fn factories() -> Vec<Factory> {
     vec![
         Factory::new("mem.page_alloc", "fs:proc", |resolved| {

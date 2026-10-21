@@ -49,7 +49,7 @@ const RING_BYTES: usize = 256 * 1024;
 /// The bookkeeping every streaming collector in this file does the same way.
 struct Streaming {
     losses: Losses,
-    /// The program\'s loss counters, as last read (`collect::kernel`).
+    /// The program's loss counters, as last read (`collect::kernel`).
     counts: KernelCounts,
 }
 

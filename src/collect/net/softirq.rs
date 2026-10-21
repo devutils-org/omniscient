@@ -109,7 +109,7 @@ pub struct SoftIrqCollector {
     /// `count` is the single measurement of one window.
     mode: Mode,
     program: Option<SoftIrqProgram>,
-    /// The program\'s loss counters, as last read (`collect::kernel`).
+    /// The program's loss counters, as last read (`collect::kernel`).
     counts: KernelCounts,
     losses: Losses,
     notes: Vec<String>,

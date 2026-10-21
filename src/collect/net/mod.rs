@@ -15,7 +15,7 @@ mod interfaces;
 mod lifetime;
 mod netlink;
 mod packet;
-mod procfs;
+pub(crate) mod procfs;
 mod qdisc;
 mod request;
 mod retransmit;
@@ -54,7 +54,6 @@ pub fn probe(requirement: &str) -> Option<Result<(), String>> {
     }
 }
 
-/// The collectors this family provides.
 /// `net.tcp.retransmit` where no program can be loaded: TCP's own count of
 /// the segments it sent again, from `/proc/net/snmp`.
 const SEGMENTS_RETRANSMITTED: crate::collect::counter_file::Spec =
@@ -67,6 +66,7 @@ const SEGMENTS_RETRANSMITTED: crate::collect::counter_file::Spec =
         what: "TCP segments retransmitted",
     };
 
+/// The collectors this family provides.
 pub fn factories() -> Vec<Factory> {
     vec![
         Factory::new("net.tcp.retransmit", "fs:proc", |resolved| {

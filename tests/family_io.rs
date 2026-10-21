@@ -489,7 +489,11 @@ fn the_diskstats_latency_is_the_block_layer_s_mean_under_a_known_load() {
         ])
         .output()
         .expect("omn runs");
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let document: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("a results document");
     let fio: serde_json::Value =

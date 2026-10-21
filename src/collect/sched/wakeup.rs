@@ -104,7 +104,7 @@ pub struct WakeupCollector {
     filter: Whose,
     program: Option<WakeupProgram>,
     losses: Losses,
-    /// The program\'s loss counters, as last read (`collect::kernel`).
+    /// The program's loss counters, as last read (`collect::kernel`).
     counts: KernelCounts,
     /// Read from the program's counter at `stop`, when the map is still open.
     dropped: u64,

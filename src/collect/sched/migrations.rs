@@ -75,7 +75,7 @@ pub struct MigrationCollector {
     mode: Mode,
     program: Option<MigrationProgram>,
     losses: Losses,
-    /// The program\'s loss counters, as last read (`collect::kernel`).
+    /// The program's loss counters, as last read (`collect::kernel`).
     counts: KernelCounts,
     /// The program's counter is cumulative, so what is new is the difference.
     dropped: u64,

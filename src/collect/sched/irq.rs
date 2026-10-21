@@ -81,7 +81,7 @@ pub struct IrqCollector {
     mode: Mode,
     program: Option<IrqProgram>,
     losses: Losses,
-    /// The program\'s loss counters, as last read (`collect::kernel`).
+    /// The program's loss counters, as last read (`collect::kernel`).
     counts: KernelCounts,
     notes: Vec<String>,
     dropped: IrqDrops,
@@ -190,13 +190,12 @@ impl IrqCollector {
                 if counting { run_window_ns } else { window_ns },
                 seq + index as u64,
             );
-            let kept = self
+            if !self
                 .predicate
-                .expression()
-                .is_none_or(|predicate| matches_half(predicate, &event, row.kind));
-            self.predicate
-                .tally(u64::from(kept) * row.count, u64::from(!kept) * row.count);
-            if !kept {
+                .keep_with(&event, row.count, |predicate, event| {
+                    matches_half(predicate, event, row.kind)
+                })
+            {
                 continue;
             }
             if counting {

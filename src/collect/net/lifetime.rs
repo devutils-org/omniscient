@@ -91,7 +91,7 @@ impl Prepared for Prepare {
 
 pub struct LifetimeCollector {
     program: Option<TcpLifetimeProgram>,
-    /// The program\'s loss counters, as last read (`collect::kernel`).
+    /// The program's loss counters, as last read (`collect::kernel`).
     counts: KernelCounts,
     losses: Losses,
     notes: Vec<String>,

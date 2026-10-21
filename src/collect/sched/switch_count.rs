@@ -56,7 +56,7 @@ pub struct SwitchCountCollector {
     whose: Whose,
     program: Option<SwitchCountProgram>,
     losses: Losses,
-    /// The program\'s loss counters, as last read (`collect::kernel`).
+    /// The program's loss counters, as last read (`collect::kernel`).
     counts: KernelCounts,
     /// The program's own drop counter, cumulative, as last read.
     dropped: u64,

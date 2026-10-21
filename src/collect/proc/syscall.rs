@@ -213,7 +213,7 @@ pub struct SyscallCollector {
     mode: Mode,
     program: Option<SyscallProgram>,
     losses: Losses,
-    /// The program\'s loss counters, as last read (`collect::kernel`).
+    /// The program's loss counters, as last read (`collect::kernel`).
     counts: KernelCounts,
     /// Processes the target started that were not followed, so far.
     unfollowed: u64,

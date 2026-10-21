@@ -66,7 +66,7 @@ pub struct OnCpuThreads {
     program: Option<OnCpuProgram>,
     predicate: Option<FilterExpr>,
     losses: Losses,
-    /// The program\'s loss counters, as last read (`collect::kernel`).
+    /// The program's loss counters, as last read (`collect::kernel`).
     counts: KernelCounts,
     dropped: u64,
     /// When the last drain happened, which is where the next poll's window

@@ -126,6 +126,27 @@ impl UserFilter {
         }
     }
 
+    /// Whether `event` passes by the collector's own `matches` -- one half of
+    /// a pair, a kind the predicate names -- counting it as `weight`
+    /// occurrences as [`UserFilter::keep`] does.
+    pub fn keep_with(
+        &mut self,
+        event: &Event,
+        weight: u64,
+        matches: impl FnOnce(&FilterExpr, &Event) -> bool,
+    ) -> bool {
+        let Some(predicate) = &self.predicate else {
+            return true;
+        };
+        if matches(predicate, event) {
+            self.kept += weight;
+            true
+        } else {
+            self.removed += weight;
+            false
+        }
+    }
+
     /// The predicate itself, for a collector that decides with more than
     /// [`UserFilter::keep`] does: one half of a pair, a field a program reads.
     pub fn expression(&self) -> Option<&FilterExpr> {

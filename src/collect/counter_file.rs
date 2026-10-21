@@ -65,6 +65,15 @@ const CPU_COLUMNS: [&str; 10] = [
 ];
 
 impl Spec {
+    /// Whether the spec reads this counter of the file: what it sums into an
+    /// attribute. Every other line -- a gauge that goes down, a counter of
+    /// something else -- is no business of this source.
+    fn reads(&self, name: &str) -> bool {
+        self.counters
+            .iter()
+            .any(|(_, summed)| summed.contains(&name))
+    }
+
     /// Every counter the file holds, by name (and by cpu, for per-cpu files).
     fn read(&self) -> Result<Reading<(Option<u32>, String), u64>, SampleError> {
         let text = std::fs::read_to_string(self.path)
@@ -82,26 +91,13 @@ impl Spec {
                 }
             }
             Layout::Paired => {
-                let mut lines = text.lines();
-                while let (Some(names), Some(values)) = (lines.next(), lines.next()) {
-                    let (Some((section, names)), Some((same, values))) =
-                        (names.split_once(':'), values.split_once(':'))
-                    else {
-                        continue;
-                    };
-                    if section != same {
-                        continue;
-                    }
-                    for (name, value) in names.split_whitespace().zip(values.split_whitespace()) {
-                        if let Ok(value) = value.parse::<u64>() {
-                            counters.insert((None, format!("{section}:{name}")), value);
-                        }
-                    }
+                for (name, value) in crate::collect::net::procfs::named_counters(self.path)? {
+                    counters.insert((None, name), value);
                 }
             }
             Layout::CpuTicks => {
                 // USER_HZ, which `/proc/stat` counts in on every architecture.
-                let tick_ns = 1_000_000_000 / clock_ticks();
+                let tick_ns = 1_000_000_000 / crate::collect::overhead::ticks_per_second();
                 for line in text.lines() {
                     let mut fields = line.split_whitespace();
                     let Some(cpu) = fields
@@ -165,16 +161,6 @@ impl Spec {
     }
 }
 
-fn clock_ticks() -> u64 {
-    // SAFETY: `sysconf` reads a constant of the running system.
-    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-    if ticks > 0 {
-        ticks as u64
-    } else {
-        100
-    }
-}
-
 pub struct Prepare {
     spec: Spec,
     mode: Mode,
@@ -220,17 +206,47 @@ pub struct CounterFile {
 
 impl CounterFile {
     fn events(&mut self, interval: Interval<(Option<u32>, String), u64>, seq: u64) -> Vec<Event> {
-        for (_, name) in &interval.went_back {
-            self.losses.failed_reads += 1;
+        // A counter the spec reads that went backwards was replaced, and one
+        // that appeared has nothing to be measured against: either leaves a
+        // sum short, so that cpu's (or the machine's) interval is not
+        // reported, and the loss says which counter.
+        let mut short = std::collections::BTreeSet::new();
+        for ((cpu, name), went) in interval
+            .went_back
+            .iter()
+            .map(|key| (key, "went backwards, so what it counts was replaced"))
+            .chain(interval.appeared.iter().map(|key| {
+                (
+                    key,
+                    "appeared during the run, so it has nothing to be measured against",
+                )
+            }))
+        {
+            if !self.spec.reads(name) {
+                continue;
+            }
+            short.insert(*cpu);
+            self.losses.undecoded += 1;
             self.losses.note_times(
                 format!(
-                    "`{name}` in {} went backwards, so that interval is not measured",
+                    "`{name}`{} in {} {went}; that interval is not reported",
+                    cpu.map(|cpu| format!(" of cpu{cpu}")).unwrap_or_default(),
                     self.spec.path
                 ),
                 1,
             );
         }
-        self.spec.events(&interval, seq)
+        let mut events = self.spec.events(&interval, seq);
+        if !short.is_empty() {
+            events.retain(|event| {
+                let cpu = event
+                    .attr("cpu")
+                    .and_then(|cpu| cpu.as_f64())
+                    .map(|cpu| cpu as u32);
+                !short.contains(&cpu)
+            });
+        }
+        events
     }
 }
 
@@ -349,6 +365,25 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].attr("handler_ns").unwrap().as_f64(), Some(30.0));
         assert_eq!(events[1].attr("handler_ns").unwrap().as_f64(), Some(5.0));
+    }
+
+    #[test]
+    fn a_counter_the_spec_does_not_read_is_no_loss_and_one_it_reads_voids_its_sum() {
+        let mut file = CounterFile {
+            spec: PAGES,
+            poll: CounterPoll::new(Mode::Count),
+            losses: Losses::default(),
+        };
+        let mut gauge_went_down = interval(vec![((None, "pgalloc_normal"), 40)]);
+        gauge_went_down.went_back = vec![(None, "nr_free_pages".to_owned())];
+        let events = file.events(gauge_went_down, 0);
+        assert_eq!(events.len(), 1);
+        assert!(file.losses.is_clean(), "{:?}", file.losses);
+
+        let mut zone_replaced = interval(vec![((None, "pgalloc_dma"), 2)]);
+        zone_replaced.went_back = vec![(None, "pgalloc_normal".to_owned())];
+        assert!(file.events(zone_replaced, 0).is_empty());
+        assert_eq!(file.losses.undecoded, 1);
     }
 
     #[test]

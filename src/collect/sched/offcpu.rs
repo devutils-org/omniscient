@@ -103,7 +103,7 @@ pub struct OffCpuCollector {
     /// Each process's parent, for the rows' `ppid`.
     parents: super::Parents,
     losses: Losses,
-    /// The program\'s loss counters, as last read (`collect::kernel`).
+    /// The program's loss counters, as last read (`collect::kernel`).
     counts: KernelCounts,
     notes: Vec<String>,
     /// The names tasks took at exec, applied to the rows of the window.

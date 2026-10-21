@@ -656,6 +656,18 @@ struct DeviceId {
     name: String,
 }
 
+/// The increase of a column the kernel prints as 32 bits (the milliseconds
+/// columns, `(unsigned int)div_u64(nsecs, NSEC_PER_MSEC)`): one that went
+/// past `u32::MAX` wrapped, and the increase is modulo 2^32. A value above
+/// 32 bits, or a drop no wrap explains, is a replaced device.
+fn thirty_two_bit(after: u64, before: u64) -> Option<u64> {
+    if after >= before {
+        return Some(after - before);
+    }
+    (before <= u64::from(u32::MAX) && after <= u64::from(u32::MAX))
+        .then(|| after + (1u64 << 32) - before)
+}
+
 fn difference(after: Option<u64>, before: Option<u64>) -> Option<u64> {
     match (after, before) {
         (Some(after), Some(before)) => after.checked_sub(before),
@@ -775,8 +787,8 @@ impl DeviceCounters {
             reads: self.reads.checked_sub(before.reads)?,
             reads_merged: self.reads_merged.checked_sub(before.reads_merged)?,
             sectors_read: self.sectors_read.checked_sub(before.sectors_read)?,
-            read_ms: self.read_ms.checked_sub(before.read_ms)?,
-            write_ms: self.write_ms.checked_sub(before.write_ms)?,
+            read_ms: thirty_two_bit(self.read_ms, before.read_ms)?,
+            write_ms: thirty_two_bit(self.write_ms, before.write_ms)?,
             writes: self.writes.checked_sub(before.writes)?,
             writes_merged: self.writes_merged.checked_sub(before.writes_merged)?,
             sectors_written: self.sectors_written.checked_sub(before.sectors_written)?,
@@ -784,7 +796,7 @@ impl DeviceCounters {
             // the field says what it said.
             in_flight: self.in_flight,
             io_ticks_ms: self.io_ticks_ms.checked_sub(before.io_ticks_ms)?,
-            weighted_ms: self.weighted_ms.checked_sub(before.weighted_ms)?,
+            weighted_ms: thirty_two_bit(self.weighted_ms, before.weighted_ms)?,
             discards: difference(self.discards, before.discards),
             sectors_discarded: difference(self.sectors_discarded, before.sectors_discarded),
             flushes: difference(self.flushes, before.flushes),
@@ -868,6 +880,13 @@ mod tests {
         format!(
             "   8       0 {name} {reads} 0 {sectors_read} 0 {writes} 0 {sectors_written} 0 3 0 0"
         )
+    }
+
+    #[test]
+    fn a_milliseconds_column_that_wrapped_is_its_increase_modulo_two_to_the_32() {
+        assert_eq!(thirty_two_bit(300, 4_294_967_000), Some(596));
+        assert_eq!(thirty_two_bit(500, 200), Some(300));
+        assert_eq!(thirty_two_bit(1, 1 << 40), None);
     }
 
     #[test]

@@ -133,7 +133,7 @@ pub struct StallCollector {
     cgroups: Option<BTreeSet<u64>>,
     program: Option<StallProgram>,
     losses: Losses,
-    /// The program\'s loss counters, as last read (`collect::kernel`).
+    /// The program's loss counters, as last read (`collect::kernel`).
     counts: KernelCounts,
     /// The programs' counters are cumulative, so what is new is the difference.
     dropped: StallDrops,

@@ -86,7 +86,7 @@ pub struct CallsCollector {
     /// Processes the target started that were not followed, so far.
     unfollowed: u64,
     dropped_ring: u64,
-    /// The program\'s loss counters, as last read (`collect::kernel`).
+    /// The program's loss counters, as last read (`collect::kernel`).
     counts: KernelCounts,
     /// `openat` calls whose path could not be read out of the caller.
     unread_paths: u64,

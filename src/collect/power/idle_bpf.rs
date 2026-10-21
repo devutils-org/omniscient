@@ -102,6 +102,12 @@ pub struct IdlePeriods {
     counts: KernelCounts,
     /// Exits whose entry came before the window opened.
     before_window: u64,
+    /// Announcements the full ring lost, as last read: once any is lost, an
+    /// unpaired announcement may be its consequence rather than a window's
+    /// edge or another loss, and is counted as such.
+    ring_lost: u64,
+    /// Unpaired announcements while the ring was losing some.
+    unpaired_after_ring: u64,
     /// Announcements for cpus outside a `--cpu` target.
     off_target: u64,
     periods: u64,
@@ -118,6 +124,8 @@ impl IdlePeriods {
             losses: Losses::default(),
             counts: KernelCounts::default(),
             before_window: 0,
+            ring_lost: 0,
+            unpaired_after_ring: 0,
             off_target: 0,
             periods: 0,
             idle_total_ns: 0,
@@ -141,6 +149,11 @@ impl IdlePeriods {
                 .insert(edge.cpu, (edge.state, edge.ts_ns))
                 .is_some()
             {
+                // An exit the full ring lost is already counted there.
+                if self.ring_lost > 0 {
+                    self.unpaired_after_ring += 1;
+                    return None;
+                }
                 self.losses.dropped += 1;
                 self.losses.note(
                     "a cpu announced an idle entry while a period was still open on it: the exit \
@@ -150,7 +163,11 @@ impl IdlePeriods {
             return None;
         }
         let Some((state, entered_ns)) = self.open.remove(&edge.cpu) else {
-            self.before_window += 1;
+            if self.ring_lost > 0 {
+                self.unpaired_after_ring += 1;
+            } else {
+                self.before_window += 1;
+            }
             return None;
         };
         let idle_ns = edge.ts_ns.saturating_sub(entered_ns);
@@ -199,6 +216,7 @@ impl IdlePeriods {
             ),
         ];
         self.counts.absorb(&mut self.losses, lost);
+        self.ring_lost = self.counts.read("ring");
         let mut events = Vec::new();
         for edge in edges {
             if let Some(mut event) = self.edge(edge) {
@@ -278,6 +296,23 @@ impl Collector for IdlePeriods {
                 },
             ));
         }
+        if self.unpaired_after_ring > 0 {
+            notes.push(format!(
+                "{} announcement{} found no partner after the ring lost some, and {} in no \
+                 event: the lost one is counted among the losses, once",
+                self.unpaired_after_ring,
+                if self.unpaired_after_ring == 1 {
+                    ""
+                } else {
+                    "s"
+                },
+                if self.unpaired_after_ring == 1 {
+                    "is"
+                } else {
+                    "are"
+                },
+            ));
+        }
         if self.off_target > 0 {
             notes.push(format!(
                 "{} announcements came from cpus outside the target and were set aside",
@@ -308,6 +343,18 @@ mod tests {
         assert!(event.attrs.iter().any(|attr| attr.name == "state_name"));
         assert_eq!(periods.open.len(), 1, "cpu 0 is still idle");
         assert_eq!(periods.idle_total_ns, 300);
+    }
+
+    #[test]
+    fn an_announcement_the_ring_lost_is_counted_once() {
+        let mut periods = IdlePeriods::new(None, BTreeMap::new());
+        periods.ring_lost = 1;
+        periods.edge(edge(20, 1, 0));
+        // The exit between these two was the one the ring lost.
+        periods.edge(edge(30, 2, 0));
+        assert_eq!(periods.losses.dropped, 0, "the ring counted it already");
+        assert_eq!(periods.before_window, 0);
+        assert_eq!(periods.unpaired_after_ring, 1);
     }
 
     #[test]

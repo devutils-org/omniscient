@@ -252,7 +252,7 @@ pub struct SlicesCollector {
     pairing: Pairing,
     parents: super::Parents,
     losses: Losses,
-    /// The program\'s loss counters, as last read (`collect::kernel`).
+    /// The program's loss counters, as last read (`collect::kernel`).
     counts: KernelCounts,
     dropped: u64,
     predicate: UserFilter,

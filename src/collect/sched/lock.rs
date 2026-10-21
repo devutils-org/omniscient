@@ -83,7 +83,7 @@ pub struct LockCollector {
     filter: Whose,
     program: Option<LockProgram>,
     losses: Losses,
-    /// The program\'s loss counters, as last read (`collect::kernel`).
+    /// The program's loss counters, as last read (`collect::kernel`).
     counts: KernelCounts,
     notes: Vec<String>,
     /// Every stack the run resolved, by the id the kernel gave it.
@@ -209,13 +209,12 @@ impl LockCollector {
             // process's mappings for nothing.
             // `kind` is the lock's, which `topk:N@kind` ranks by, as
             // `perf lock contention` groups by type; see `super::matches_as`.
-            let kept = self
+            if !self
                 .predicate
-                .expression()
-                .is_none_or(|predicate| super::matches_as(predicate, &event, &row.kind()));
-            self.predicate
-                .tally(u64::from(kept) * row.count, u64::from(!kept) * row.count);
-            if !kept {
+                .keep_with(&event, row.count, |predicate, event| {
+                    super::matches_as(predicate, event, &row.kind())
+                })
+            {
                 continue;
             }
             if let Some(id) = self.resolve_stack(&row) {

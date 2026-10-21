@@ -296,7 +296,6 @@ pub(crate) fn refresh_followed_symbols(
     }
 }
 
-/// The collectors this family provides.
 /// `sched.irq` where no program can be loaded: each cpu's time in hard and
 /// soft interrupt handlers, from `/proc/stat`'s tick accounting.
 const HANDLER_TIME: crate::collect::counter_file::Spec = crate::collect::counter_file::Spec {
@@ -312,6 +311,7 @@ const HANDLER_TIME: crate::collect::counter_file::Spec = crate::collect::counter
     what: "time in interrupt handlers",
 };
 
+/// The collectors this family provides.
 pub fn factories() -> Vec<Factory> {
     vec![
         Factory::new("sched.irq", "fs:proc", |resolved| {

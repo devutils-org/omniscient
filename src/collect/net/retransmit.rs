@@ -94,7 +94,7 @@ pub struct RetransmitCollector {
     /// measurement of one window, totalled per series.
     mode: Mode,
     program: Option<RetransmitProgram>,
-    /// The program\'s loss counters, as last read (`collect::kernel`).
+    /// The program's loss counters, as last read (`collect::kernel`).
     counts: KernelCounts,
     losses: Losses,
     /// The program's counter is cumulative, so what is new is the difference.

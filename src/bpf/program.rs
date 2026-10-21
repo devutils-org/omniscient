@@ -31,19 +31,7 @@ pub fn load(prog_type: u32, instructions: &[Insn], name: &str) -> Result<OwnedFd
 
 /// Loads a raw tracepoint program.
 pub fn load_raw_tracepoint(instructions: &[Insn], name: &str) -> Result<OwnedFd, String> {
-    syscall::prog_load(
-        syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
-        instructions,
-        name,
-        LICENSE,
-    )
-    .map_err(|error| {
-        if error.is_permission() {
-            super::permission_advice("loading a raw tracepoint program")
-        } else {
-            format!("the kernel refused the `{name}` program: {error}")
-        }
-    })
+    load(syscall::BPF_PROG_TYPE_RAW_TRACEPOINT, instructions, name)
 }
 
 /// Attaches a loaded raw tracepoint program to `tracepoint`; the link it

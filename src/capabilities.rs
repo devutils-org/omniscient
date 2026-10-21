@@ -1273,10 +1273,18 @@ fn probe_rdt(feature: &str) -> Probe {
 fn probe_cpufreq_transitions(driver: &Path) -> Probe {
     let name = match std::fs::read_to_string(driver) {
         Ok(name) => name.trim().to_owned(),
-        Err(_) => {
+        // Only an absent file says there is no driver; a file that cannot be
+        // read (a sandbox, an offline cpu0) says nothing either way.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Probe::Missing(format!(
-                "{} cannot be read: this machine has no cpufreq driver, so the kernel sets no \
+                "{} does not exist: this machine has no cpufreq driver, so the kernel sets no \
                  frequency and announces none",
+                driver.display()
+            ))
+        }
+        Err(error) => {
+            return Probe::Unknown(format!(
+                "{} cannot be read ({error}), so which cpufreq driver runs is not known",
                 driver.display()
             ))
         }

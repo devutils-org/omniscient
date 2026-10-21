@@ -144,7 +144,7 @@ pub struct NumaCollector {
     program: Option<NumaProgram>,
     nodes: NodeMap,
     losses: Losses,
-    /// The program\'s loss counters, as last read (`collect::kernel`).
+    /// The program's loss counters, as last read (`collect::kernel`).
     counts: KernelCounts,
     dropped: NumaDrops,
     window_opened_ns: u64,

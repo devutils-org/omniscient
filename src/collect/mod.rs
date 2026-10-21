@@ -262,7 +262,7 @@ impl CollectError {
 mod ask;
 mod drive;
 mod outcome;
-mod overhead;
+pub(crate) mod overhead;
 mod recording;
 mod run;
 mod spending;

@@ -628,7 +628,7 @@ pub(super) fn rusage_ns(who: libc::c_int) -> u64 {
 }
 
 /// The kernel's tick, which is what `/proc` reports cpu time in.
-pub(super) fn ticks_per_second() -> u64 {
+pub(crate) fn ticks_per_second() -> u64 {
     // SAFETY: `sysconf` takes an integer and returns one.
     match unsafe { libc::sysconf(libc::_SC_CLK_TCK) } {
         ticks if ticks > 0 => ticks as u64,

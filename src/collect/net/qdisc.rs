@@ -72,7 +72,7 @@ pub struct QdiscCollector {
     /// The interface a `--iface` target named, compared inside the program.
     iface: Option<(u32, String)>,
     program: Option<QdiscProgram>,
-    /// The program\'s loss counters, as last read (`collect::kernel`).
+    /// The program's loss counters, as last read (`collect::kernel`).
     counts: KernelCounts,
     losses: Losses,
     /// The programs' counters are cumulative, so what is new is the difference.
