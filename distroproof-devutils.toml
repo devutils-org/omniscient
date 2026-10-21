@@ -1,21 +1,29 @@
 # Cross-tool installed-artifact campaign, using only disposable QEMU guests.
 # sh scripts/distroproof/devutils-build.sh
-# distroproof up -f distroproof-devutils.toml --no-tui --jobs 1 --json target/matrix/devutils.json
-# One cell at a time, as distroproof-reference.toml: cpu.cache_misses,
-# runqlat and every other pair read across the machine missed their band with
-# three guests sharing the host's cache and cpus (2026-10-19).
+# distroproof up -f distroproof-devutils.toml --no-tui --pin-cache --jobs 4 --json target/matrix/devutils.json
+# Each VM gets an L3 cache of its own (--pin-cache): with VMs sharing the
+# host's cache and cpus, cpu.cache_misses, runqlat and every other pair read
+# across the machine missed their band (2026-10-19); pinned to one domain each
+# of the 3900X's four, they failed no more pairs than one VM at a time
+# (2026-10-21). Longest first, so the queue ends together: Ubuntu 18.04's
+# pairs run until their 2400 s timeout, then Fedora and Gentoo.
 [defaults]
 memory = "3G"
 cpus = 2
 timeout = "60m"
 
 [[target]]
-name = "chain-debian-12"
-image = "debian-12"
+name = "chain-ubuntu-18.04"
+image = "ubuntu-18.04"
 
 [[target]]
-name = "chain-debian-13"
-image = "debian-13"
+name = "chain-fedora-latest"
+image = "fedora-latest"
+
+[[target]]
+name = "chain-gentoo"
+image = "gentoo"
+timeout = "120m"
 
 [[target]]
 name = "chain-ubuntu-24.04"
@@ -26,25 +34,20 @@ name = "chain-rocky-9"
 image = "rocky-9"
 
 [[target]]
-name = "chain-fedora-latest"
-image = "fedora-latest"
+name = "chain-debian-13"
+image = "debian-13"
+
+[[target]]
+name = "chain-debian-12"
+image = "debian-12"
 
 [[target]]
 name = "chain-arch"
 image = "arch"
 
 [[target]]
-name = "chain-ubuntu-18.04"
-image = "ubuntu-18.04"
-
-[[target]]
 name = "chain-alpine"
 image = "alpine"
-
-[[target]]
-name = "chain-gentoo"
-image = "gentoo"
-timeout = "120m"
 
 [run]
 setup = "sh scripts/distroproof/witnesses.sh"
