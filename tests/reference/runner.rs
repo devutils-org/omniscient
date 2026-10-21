@@ -1126,10 +1126,8 @@ const REFUSALS: &[&str] = &[
     // `sudo -n` refusing a command the sudoers file does not grant without a
     // password: `sudo -l` cannot tell, since it lists rules that need one too.
     "sudo: a password is required",
-    // A witness this machine has but cannot start: Gentoo's binary bpftrace
-    // linked against another LLVM build than the one installed beside it.
-    "symbol lookup error",
-    "error while loading shared libraries",
+    // A witness this machine has but cannot start (a library that does not
+    // load) is `BROKEN`, read before any refusal.
     // A bpftrace whose distribution ships its scripts apart (under.sh).
     "tool script",
 ];
