@@ -59,6 +59,28 @@ reference pairs -- Omniscient against `perf`, `bpftrace`, `strace`, the bcc
 tools, on the same workload, within a declared tolerance -- on six
 distributions with the witnesses their own packages carry.
 
+## After the twenty-sixth wave
+
+Swept on 2026-10-22 with `claude/w26` at `2c15697` (release archives, both
+architectures), 28 of 28 targets passed. Usable sources per cell, of 123,
+against the table below (the 2026-10-20 sweep) and, for the three root cells
+the wave added, against the binary of `bd09424` swept the same day:
+
+| Cell | Before | After | What moved it |
+|---|---|---|---|
+| `rocky-8` | 59 | **85** | `bpf_map:ringbuf` asked by creating one: RHEL's 4.18 backports the ring buffer, which `kernel>=5.8` refused |
+| `rocky-8-root` | 62 | **87** | the same |
+| `debian-10`, `ubuntu-18.04`, `ubuntu-20.04` | 36, 36, 39 | 40, 40, 43 | the counter-file fallbacks and `io.latency` through diskstats, where no program loads |
+| `debian-10-root`, `ubuntu-20.04-root` | 52, 55 | 57, 60 | the same |
+| `debian-11` | 41 | 45 | the same |
+| `fedora-latest-lockdown` | 55 | 60 | the same: lockdown refuses every eBPF program |
+| every other cell | | +1 | `power.cstate` through `cpu_idle`, which fires in a guest without a cpuidle driver |
+
+`power.freq`'s tracepoint rows, counted +18 by the brief's table, gained
+nothing: in a guest there is no cpufreq, and `cpufreq:transitions` now says
+the tracepoint never fires there. The `setcap` refusals on the kernels before
+5.8 (`cap_last_cap 37`) are those kernels having no `CAP_BPF`, as before.
+
 ## The matrix
 
 | Target | Kernel | Configuration | Sources listed usable (of 123) |

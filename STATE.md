@@ -123,8 +123,9 @@ wave.
 capabilities on the binary. Before it, at `bd09424`: 146 of 238. The six are
 `power.cstate` through `bpf:raw_tp`, `io.latency` through `/proc/diskstats`,
 and the four fallbacks of `collect::counter_file`; the four new rows are those
-fallbacks'. What the cells of the distribution matrix serve is in
-`docs/distroproof.md`. The paragraphs below are the earlier waves' record.)
+fallbacks'. The matrix after the wave (`docs/distroproof.md`, "After the
+twenty-sixth wave"): Rocky 8 from 59 to 85 usable, the cells where no program
+loads +4 or +5, every other cell +1. The paragraphs below are the earlier waves' record.)
 
 ```
 102 sources: 95 usable here, 0 unverified, 7 out of reach on this machine.
