@@ -14512,3 +14512,24 @@ entitled to treat as unchanging.
 
 `cases::every_case_names_its_known_cause_both_ways`, in the flaky tally, failed
 once in `make check` the same evening and passed alone.
+
+### Twelve targets (2026-10-22)
+
+The chain with Rocky 8, Ubuntu 20.04 and Ubuntu 22.04 added (Debian 11 left,
+7c75ab8), four pinned VMs: 11 of 12 targets pass all eleven checks, in 38
+minutes. Rocky 8's witnesses install through xpac and DNF4 now (`python36` by
+the `a|b` alternative). Rocky 8 fails `omn-reference-pairs` only, on three
+pairs, open:
+
+- `perfrecord/hot-functions` and `stripped-library`: `perf record -p` then
+  `perf report` exit 255 with an empty stderr (Rocky 8's perf, kernel 4.18).
+  Not yet read.
+- `perfsched/strace-c-vfs-read`, one held run now: omn 20190 against strace's
+  20185 read and pread64 calls -- the same five as with alternate runs, so not
+  the interpreter's startup moving. Five `vfs_read` calls on 4.18 that are no
+  read(2) or pread64(2) of the program: the first suspect is a syscall strace
+  was not asked about (readv, or a read the kernel makes on the task's behalf),
+  to be read with `strace -f` unfiltered against omn `-k op,syscall`.
+
+Debian 13's `runqlat` (p90) held this time; it missed by four buckets once in
+the previous run (2097152 against 256000 ns). One miss in three runs: watched.
