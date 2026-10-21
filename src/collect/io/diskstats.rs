@@ -35,6 +35,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::clock::monotonic_ns;
+use crate::collect::poll::{CounterPoll, Cumulative, Interval};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Direction, Event, KeyValue};
 use crate::request::{KeyKind, Mode, Target};
@@ -270,15 +271,8 @@ pub struct Diskstats {
     /// What each device name turned out to be, cached: the classification
     /// reads `/sys`, and the answer only changes when hardware appears.
     roles: BTreeMap<String, Role>,
-    /// The reading the next delta is measured against.
-    previous: Option<Reading>,
-    /// The reading a `count` request measures its total against: taken before
-    /// the observed program starts, so the total covers the whole run.
-    baseline: Option<Reading>,
-    /// A polled run's first tick, which the runner takes as soon as the
-    /// program is released, is passed over: its interval since the baseline
-    /// would be microseconds long. The next tick measures from the baseline.
-    pass_first_tick: bool,
+    /// The baseline and each interval's reading (`collect::poll`).
+    poll: CounterPoll<DeviceId, DeviceCounters>,
     /// One event per direction, keyed `dir`, rather than one per device.
     by_direction: bool,
     losses: Losses,
@@ -293,9 +287,7 @@ impl Diskstats {
             sys_block: PathBuf::from("/sys/block"),
             unread_sysfs: BTreeMap::new(),
             roles: BTreeMap::new(),
-            previous: None,
-            baseline: None,
-            pass_first_tick: false,
+            poll: CounterPoll::new(mode),
             by_direction: false,
             losses: Losses::default(),
         }
@@ -365,7 +357,7 @@ impl Diskstats {
 
         Ok(Reading {
             ts_ns: monotonic_ns(),
-            devices,
+            counters: devices,
         })
     }
 
@@ -378,43 +370,45 @@ impl Diskstats {
     /// interval for every device, on the grounds that the sum was no longer
     /// one machine's worth of I/O -- which was right about the sum and is not a
     /// reason to drop the devices that were there throughout.
-    fn delta_events(&mut self, before: &Reading, after: &Reading, seq: u64) -> Vec<Event> {
-        let interval_ns = after.ts_ns.saturating_sub(before.ts_ns);
+    fn delta_events(
+        &mut self,
+        interval: Interval<DeviceId, DeviceCounters>,
+        seq: u64,
+    ) -> Vec<Event> {
+        let interval_ns = interval.interval_ns;
         let mut events = Vec::new();
         let mut index = seq;
-        for (device, counters) in &after.devices {
-            let Some(earlier) = before.devices.get(device) else {
-                // Counted, not only noted. An interval of this device's I/O is
-                // missing from the run, and a reason without a count leaves
-                // `Losses::is_clean` true -- so the run would print `no loss`
-                // while a device's first interval was quietly absent. The
-                // category is the one the line below uses for the same shape of
-                // gap: a reading the collector could not turn into an interval.
-                self.losses.undecoded += 1;
-                self.losses.note_times(
-                    format!(
+        for device in &interval.appeared {
+            // Counted, not only noted. An interval of this device's I/O is
+            // missing from the run, and a reason without a count leaves
+            // `Losses::is_clean` true -- so the run would print `no loss`
+            // while a device's first interval was quietly absent. The
+            // category is the one the line below uses for the same shape of
+            // gap: a reading the collector could not turn into an interval.
+            self.losses.undecoded += 1;
+            self.losses.note_times(
+                format!(
                     "`{}` appeared during the run, so this interval has nothing to measure its \
                      counters against",
                     device.name
                 ),
-                    1,
-                );
-                continue;
-            };
-            let Some(delta) = counters.since(earlier) else {
-                self.losses.undecoded += 1;
-                self.losses.note_times(
-                    format!(
+                1,
+            );
+        }
+        for device in &interval.went_back {
+            self.losses.undecoded += 1;
+            self.losses.note_times(
+                format!(
                     "a counter for `{}` in /proc/diskstats went backwards, which happens when a \
                      device is removed and re-added; this interval cannot be attributed",
                     device.name
                 ),
-                    1,
-                );
-                continue;
-            };
+                1,
+            );
+        }
+        for (device, delta) in &interval.moved {
             if self.by_direction {
-                for (direction, value) in self.metric.directions(&delta) {
+                for (direction, value) in self.metric.directions(delta) {
                     let mut attrs = vec![
                         Attr::uint(self.metric.value_attr(), value),
                         Attr::uint("interval_ns", interval_ns),
@@ -424,7 +418,7 @@ impl Diskstats {
                         attrs.push(Attr::uint("sector_bytes", SECTOR_BYTES));
                     }
                     events.push(Event {
-                        ts_ns: after.ts_ns,
+                        ts_ns: interval.ts_ns,
                         ts_err_ns: 0,
                         kind: self.metric.source_id().to_owned(),
                         keys: vec![
@@ -442,13 +436,13 @@ impl Diskstats {
                 }
                 continue;
             }
-            let Some(mut attrs) = self.metric.attrs(&delta, interval_ns) else {
+            let Some(mut attrs) = self.metric.attrs(delta, interval_ns) else {
                 return Vec::new();
             };
             attrs.push(Attr::uint("interval_ns", interval_ns));
             attrs.push(Attr::text("dev", device.name.clone()));
             events.push(Event {
-                ts_ns: after.ts_ns,
+                ts_ns: interval.ts_ns,
                 ts_err_ns: 0,
                 kind: self.metric.source_id().to_owned(),
                 keys: vec![KeyValue::Dev {
@@ -487,7 +481,7 @@ impl Diskstats {
     /// away.
     fn gauge_events(&mut self, reading: &Reading, seq: u64) -> Vec<Event> {
         reading
-            .devices
+            .counters
             .iter()
             .enumerate()
             .map(|(offset, (device, counters))| {
@@ -542,74 +536,40 @@ impl Collector for Diskstats {
     /// That tick produces no event and moves nothing, so the bytes between
     /// the release and it are in the next interval rather than lost.
     fn start(&mut self) -> Result<(), String> {
-        if self.metric.is_gauge() || matches!(self.mode, Mode::Snapshot) {
+        if self.metric.is_gauge() {
             return Ok(());
         }
-        let reading = self
-            .read()
-            .map_err(|error| format!("cannot read {}: {error:?}", self.path.display()))?;
-        if self.mode == Mode::Count {
-            self.baseline = Some(reading);
-        } else {
-            self.previous = Some(reading);
-            self.pass_first_tick = true;
-        }
-        Ok(())
+        let path = self.path.display().to_string();
+        let mut poll = std::mem::replace(&mut self.poll, CounterPoll::new(self.mode));
+        let started = poll.start(|| self.read());
+        self.poll = poll;
+        started.map_err(|error| format!("cannot read {path}: {error:?}"))
     }
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
         if self.metric.is_gauge() {
             let reading = self.read()?;
-            let events = self.gauge_events(&reading, seq);
-            self.previous = Some(reading);
-            return Ok(events);
+            return Ok(self.gauge_events(&reading, seq));
         }
-        // A counted run reports one total at the end; reading the file every
-        // tick would cost something and answer nothing.
-        if self.mode == Mode::Count {
-            return Ok(Vec::new());
-        }
-        if std::mem::take(&mut self.pass_first_tick) {
-            // The first tick is the window's opening. A baseline older than
-            // one interval was taken while the rest of the run was still
-            // attaching -- up to 3.4 s of a live `omn top` loading its
-            // programs -- and its bytes are from before the window: the first
-            // event carried them all, a spike at offset zero. Measured from
-            // here instead. A baseline taken just before a launched program
-            // was released is younger than that, and keeps the bytes between
-            // the release and this tick.
-            let since = self.previous.as_ref().map(|previous| previous.ts_ns);
-            if let (Mode::Poll { interval }, Some(since)) = (self.mode, since) {
-                let now = self.read()?;
-                if now.ts_ns.saturating_sub(since) > interval.as_nanos() {
-                    self.previous = Some(now);
-                }
-            }
-            return Ok(Vec::new());
-        }
-        let after = self.read()?;
-        let before = self.previous.replace(after.clone());
-        Ok(before
-            .map(|before| self.delta_events(&before, &after, seq))
+        // A counted run reports one total at the end, and a polled run's first
+        // tick opens its window (`collect::poll`).
+        let mut poll = std::mem::replace(&mut self.poll, CounterPoll::new(self.mode));
+        let ticked = poll.tick(|| self.read());
+        self.poll = poll;
+        Ok(ticked?
+            .map(|interval| self.delta_events(interval, seq))
             .unwrap_or_default())
     }
 
     /// A counted run reports its one total here, measured from the baseline
-    /// taken before the observed program started.
-    ///
-    /// A polled run reports nothing here on purpose. The runner samples every
-    /// collector and *then* decides to stop, so a closing read would cover the
-    /// few microseconds since that last tick: a point in the series with a
-    /// window near zero, which says nothing and drags the summary with it.
+    /// taken before the observed program started; a polled run, nothing.
     fn stop(&mut self) -> Vec<Event> {
-        if self.mode != Mode::Count {
-            return Vec::new();
-        }
-        let Some(before) = self.baseline.clone() else {
-            return Vec::new();
-        };
-        match self.read() {
-            Ok(after) => self.delta_events(&before, &after, u64::MAX / 2),
+        let mut poll = std::mem::replace(&mut self.poll, CounterPoll::new(self.mode));
+        let stopped = poll.stop(|| self.read());
+        self.poll = poll;
+        match stopped {
+            Ok(Some(total)) => self.delta_events(total, u64::MAX / 2),
+            Ok(None) => Vec::new(),
             Err(error) => {
                 self.losses.failed_reads += 1;
                 self.losses.note_times(
@@ -652,14 +612,7 @@ impl Collector for Diskstats {
 /// single machine-wide number cannot answer at all. Keeping them apart is also
 /// what makes the sum available, since adding up series is something the emit
 /// layer can do and splitting one apart is not.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Reading {
-    ts_ns: u64,
-    /// Keyed by the major:minor the kernel writes, because a device name is a
-    /// symlink away from meaning something else and the numbers are what the
-    /// key carries.
-    devices: BTreeMap<DeviceId, DeviceCounters>,
-}
+type Reading = crate::collect::poll::Reading<DeviceId, DeviceCounters>;
 
 /// A block device as `/proc/diskstats` identifies it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -762,6 +715,12 @@ struct DeviceCounters {
     discards: Option<u64>,
     sectors_discarded: Option<u64>,
     flushes: Option<u64>,
+}
+
+impl Cumulative for DeviceCounters {
+    fn since(&self, earlier: &Self) -> Option<Self> {
+        DeviceCounters::since(self, earlier)
+    }
 }
 
 impl DeviceCounters {
@@ -1486,10 +1445,10 @@ mod tests {
             return;
         };
         assert!(
-            !reading.devices.is_empty(),
+            !reading.counters.is_empty(),
             "this machine has block devices"
         );
-        for device in reading.devices.keys() {
+        for device in reading.counters.keys() {
             let name = &device.name;
             let sysfs = Path::new("/sys/class/block").join(name);
             assert!(

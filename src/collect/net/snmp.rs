@@ -21,6 +21,7 @@
 use std::collections::BTreeMap;
 
 use crate::clock::monotonic_ns;
+use crate::collect::poll::{CounterPoll, Cumulative, Interval, Reading};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event};
 use crate::request::{Mode, Target};
@@ -50,6 +51,15 @@ fn is_gauge(name: &str) -> bool {
 struct Counter {
     section: String,
     value: i64,
+}
+
+impl Cumulative for Counter {
+    fn since(&self, earlier: &Self) -> Option<Self> {
+        Some(Counter {
+            section: self.section.clone(),
+            value: self.value.since(&earlier.value)?,
+        })
+    }
 }
 
 /// Reads the paired-line files (`snmp`, `netstat`): a line of names under a
@@ -121,8 +131,7 @@ impl Prepared for Prepare {
         match target {
             Target::System => Ok(Box::new(SnmpCollector {
                 mode: self.0,
-                previous: BTreeMap::new(),
-                pass_first_tick: false,
+                poll: CounterPoll::new(self.0),
                 losses: Losses::default(),
             })),
             other => Err(format!(
@@ -136,13 +145,17 @@ impl Prepared for Prepare {
 
 pub struct SnmpCollector {
     mode: Mode,
-    /// Each counter's reading the next increment is measured against.
-    previous: BTreeMap<String, i64>,
-    /// The first tick after the baseline taken at `start`: its interval is
-    /// the microseconds since the program's release, so it is passed over
-    /// and the next tick measures from the baseline.
-    pass_first_tick: bool,
+    /// The baseline and each interval's reading (`collect::poll`).
+    poll: CounterPoll<String, Counter>,
     losses: Losses,
+}
+
+/// Every counter, read now.
+fn reading() -> Result<Reading<String, Counter>, SampleError> {
+    Ok(Reading {
+        counters: read_all()?,
+        ts_ns: monotonic_ns(),
+    })
 }
 
 impl SnmpCollector {
@@ -171,40 +184,41 @@ impl SnmpCollector {
 
     /// The increments since the previous reading, of the counters that
     /// moved, and every gauge as it stands.
-    fn increments(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
-        let counters = read_all()?;
-        let ts_ns = monotonic_ns();
+    fn increments(&mut self, interval: Interval<String, Counter>, seq: u64) -> Vec<Event> {
+        let ts_ns = interval.ts_ns;
+        let moved: BTreeMap<&String, &Counter> = interval
+            .moved
+            .iter()
+            .map(|(name, moved)| (name, moved))
+            .collect();
         let mut events = Vec::new();
-        for (name, counter) in &counters {
-            let previous = self.previous.insert(name.clone(), counter.value);
-            if is_gauge(name) {
-                let value = Attr::int("value", counter.value);
-                events.push(self.event(name, counter, value, ts_ns, seq + events.len() as u64));
-                continue;
-            }
-            let Some(previous) = previous else {
-                // A counter that appeared since the baseline: its own baseline.
-                continue;
+        // In the files' order, as `nstat` prints them: each gauge as it stands,
+        // each counter by what it moved. A counter that appeared since the
+        // baseline is its own baseline, and says nothing until it moves.
+        for (name, counter) in &interval.after.counters {
+            let (counter, value) = if is_gauge(name) {
+                (counter, Attr::int("value", counter.value))
+            } else {
+                match moved.get(name) {
+                    Some(moved) if moved.value != 0 => {
+                        (*moved, Attr::uint("value", moved.value as u64))
+                    }
+                    _ => continue,
+                }
             };
-            if counter.value < previous {
-                self.losses.failed_reads += 1;
-                self.losses.note_times(
-                    format!(
-                        "`{name}` went backwards, so the namespace's counters were replaced; that \
-                     interval is not measured"
-                    ),
-                    1,
-                );
-                continue;
-            }
-            let moved = (counter.value - previous) as u64;
-            if moved == 0 {
-                continue;
-            }
-            let value = Attr::uint("value", moved);
             events.push(self.event(name, counter, value, ts_ns, seq + events.len() as u64));
         }
-        Ok(events)
+        for name in interval.went_back.iter().filter(|name| !is_gauge(name)) {
+            self.losses.failed_reads += 1;
+            self.losses.note_times(
+                format!(
+                    "`{name}` went backwards, so the namespace's counters were replaced; that \
+                     interval is not measured"
+                ),
+                1,
+            );
+        }
+        events
     }
 }
 
@@ -218,16 +232,9 @@ impl Collector for SnmpCollector {
 
     /// The baseline, before the observed program is released.
     fn start(&mut self) -> Result<(), String> {
-        if self.mode == Mode::Snapshot {
-            return Ok(());
-        }
-        let counters = read_all().map_err(|error| format!("{error:?}"))?;
-        self.previous = counters
-            .into_iter()
-            .map(|(name, counter)| (name, counter.value))
-            .collect();
-        self.pass_first_tick = matches!(self.mode, Mode::Poll { .. });
-        Ok(())
+        self.poll
+            .start(reading)
+            .map_err(|error| format!("{error:?}"))
     }
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
@@ -244,25 +251,22 @@ impl Collector for SnmpCollector {
                     })
                     .collect())
             }
-            // One total, at the close, measured from the baseline.
-            Mode::Count => Ok(Vec::new()),
-            _ => {
-                if std::mem::take(&mut self.pass_first_tick) {
-                    return Ok(Vec::new());
-                }
-                self.increments(seq)
-            }
+            // A counted run's one total is read at the close, and a polled
+            // run's first tick opens its window (`collect::poll`).
+            _ => Ok(self
+                .poll
+                .tick(reading)?
+                .map(|interval| self.increments(interval, seq))
+                .unwrap_or_default()),
         }
     }
 
     /// A count's one reading; a poll's last interval is the runner's last
     /// tick, and a snapshot has no window to close.
     fn stop(&mut self) -> Vec<Event> {
-        if self.mode != Mode::Count {
-            return Vec::new();
-        }
-        match self.increments(0) {
-            Ok(events) => events,
+        match self.poll.stop(reading) {
+            Ok(Some(total)) => self.increments(total, 0),
+            Ok(None) => Vec::new(),
             Err(error) => {
                 self.losses.failed_reads += 1;
                 self.losses.note_times(
