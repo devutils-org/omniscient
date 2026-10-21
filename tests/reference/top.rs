@@ -9,7 +9,7 @@
 //! read `omn`'s own JSON, for the values `omn` does not hold at one place
 //! (`compare.omn_parse`).
 
-use crate::common::{Parser, Values};
+use crate::common::{Parser, Values, INCOMPLETE};
 use serde_json::Value;
 
 pub fn parsers() -> Vec<Parser> {
@@ -364,6 +364,22 @@ fn slabtop_cache_size(stdout: &str, _stderr: &str) -> Result<Values, String> {
     if rows == 0 {
         return Err("slabtop printed no cache row".into());
     }
+    // `Active / Total Caches (% used) : 77 / 120`: procps-ng 3.3's slabtop
+    // stops at its screen's height even with `-o`, 16 of 120 caches on
+    // Ubuntu 18.04 (2026-10-21), and a sum of those is no machine's total.
+    let total = stdout
+        .lines()
+        .find(|l| l.contains("Total Caches"))
+        .and_then(|l| l.split(':').nth(1))
+        .and_then(|v| v.split('/').nth(1))
+        .and_then(|v| v.split_whitespace().next())
+        .and_then(|v| v.parse::<usize>().ok());
+    if let Some(total) = total.filter(|&t| rows < t) {
+        return Err(format!(
+            "{INCOMPLETE}slabtop printed {rows} of its {total} caches: an older slabtop \
+             stops at its screen's height"
+        ));
+    }
     Ok(vec![("cache_size".into(), kib * 1024.0)])
 }
 
@@ -418,6 +434,24 @@ fn smem_uss_pss_rss(stdout: &str, _stderr: &str) -> Result<Values, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_slabtop_cut_at_its_screen_is_incomplete() {
+        let head = " Active / Total Caches (% used)     : 2 / 3 (66.7%)\n  OBJS ACTIVE  USE OBJ SIZE  SLABS OBJ/SLAB CACHE SIZE NAME\n";
+        let rows = "16900  16722   0%    0.60K   1300       13     10400K inode_cache\n  1904   1722   0%    0.50K    119       16       952K kmalloc-512\n";
+        let cut = slabtop_cache_size(&format!("{head}{rows}"), "").unwrap_err();
+        assert!(
+            cut.starts_with(INCOMPLETE) && cut.contains("2 of its 3"),
+            "{cut}"
+        );
+        let all = format!(
+            "{head}{rows}    10     10 100%    0.10K      1       39         4K buffer_head\n"
+        );
+        assert_eq!(
+            slabtop_cache_size(&all, "").unwrap()[0].1,
+            (10400.0 + 952.0 + 4.0) * 1024.0
+        );
+    }
+
     use super::*;
 
     #[test]

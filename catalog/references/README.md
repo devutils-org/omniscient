@@ -54,6 +54,7 @@ family reads one table across them.
   run: separate                           # how the two sides run (below)
   runs: 1                                 # runs; medians are compared
   settle_ms: 500                          # attach, alongside: the observers' head start
+  omn_after_ms: 3000                      # attach, alongside: the tool starts first, omn this much later
   timeout_s: 120                          # per command
   setup: [sh, -c, "..."]                  # optional: an argv run before each side
   teardown: [sh, -c, "..."]               # optional: an argv run after each side, always

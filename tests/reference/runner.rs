@@ -45,6 +45,12 @@ pub struct Pair {
     /// the workload is let go.
     #[serde(default)]
     pub settle_ms: Option<u64>,
+    /// `attach` and `alongside`: the tool starts first and omn this long
+    /// after, so what the tool does to start (bcc's vfsstat compiling, tens
+    /// of thousands of reads it cannot count itself) is not in omn's window.
+    /// `settle_ms` then counts from omn's start.
+    #[serde(default)]
+    pub omn_after_ms: Option<u64>,
     /// Per command; 120 s when absent.
     #[serde(default)]
     pub timeout_s: Option<u64>,
@@ -379,6 +385,12 @@ impl Pair {
         }
         if self.reference.sudo.is_some() && !self.reference.privileged {
             out.push("`reference.sudo` only means something with `privileged: true`".into());
+        }
+        if self.omn_after_ms.is_some() && !matches!(self.run, RunMode::Attach | RunMode::Alongside)
+        {
+            out.push(
+                "`omn_after_ms` only means something with `run: attach` or `alongside`".into(),
+            );
         }
         if self.run == RunMode::Attach && self.workload.is_empty() {
             out.push("`run: attach` needs a workload to launch".into());
@@ -1690,14 +1702,23 @@ fn run_attached(pair: &Pair, omn: &Path, tmp: &Path) -> Result<RunResult, String
         _ => None,
     };
     let observers = (|| -> Result<(Child, Child), String> {
-        let o = spawn(&mut omn_command(pair, omn, tmp, &[], pid))?;
-        let t = spawn(&mut tool_command(
-            pair,
-            &pair.reference.command,
-            tmp,
-            pid,
-            false,
-        ))?;
+        let tool = || {
+            spawn(&mut tool_command(
+                pair,
+                &pair.reference.command,
+                tmp,
+                pid,
+                false,
+            ))
+        };
+        let (o, t) = match pair.omn_after_ms {
+            Some(ms) => {
+                let t = tool()?;
+                std::thread::sleep(Duration::from_millis(ms));
+                (spawn(&mut omn_command(pair, omn, tmp, &[], pid))?, t)
+            }
+            None => (spawn(&mut omn_command(pair, omn, tmp, &[], pid))?, tool()?),
+        };
         Ok((o, t))
     })();
     let (o, t) = match observers {
