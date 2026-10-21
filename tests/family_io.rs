@@ -431,3 +431,82 @@ fn the_numbers_and_the_record_of_how_they_were_taken_are_written_together() {
     );
     std::fs::remove_dir_all(&directory).ok();
 }
+
+/// `io.latency` through `/proc/diskstats` is the block layer's own account of
+/// how long the requests it completed were outstanding: under direct random
+/// reads, the per-device mean sits below what `fio` measures per call, which
+/// adds the system call and the wakeup, and not far below it. Measured: 40.3
+/// us against fio's 51.4 us, and the eBPF backend's issue-to-completion mean
+/// on the same load 40.4 us.
+#[test]
+fn the_diskstats_latency_is_the_block_layer_s_mean_under_a_known_load() {
+    if Command::new("fio").arg("--version").output().is_err() {
+        eprintln!("skipped: no fio to make a known load");
+        return;
+    }
+    let directory = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("diskstats-await");
+    std::fs::create_dir_all(&directory).unwrap();
+    let file = directory.join("load.dat");
+    // Incompressible, so a filesystem that compresses (btrfs) cannot turn the
+    // direct reads into cached ones.
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    let bytes: Vec<u8> = (0..(64usize << 20) / 8)
+        .flat_map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state.to_ne_bytes()
+        })
+        .collect();
+    std::fs::write(&file, bytes).unwrap();
+    let _ = Command::new("sync").status();
+    let fio_out = directory.join("fio.json");
+    let output = Command::new(BINARY)
+        .args([
+            "trace",
+            "io.latency",
+            "--system",
+            "-m",
+            "count",
+            "-e",
+            "summary",
+            "--backend",
+            "force:fs:proc",
+            "--format",
+            "json",
+            "--",
+            "fio",
+            "--name=r",
+            &format!("--filename={}", file.display()),
+            "--rw=randread",
+            "--bs=4k",
+            "--direct=1",
+            "--ioengine=psync",
+            "--runtime=2",
+            "--time_based",
+            "--output-format=json",
+            &format!("--output={}", fio_out.display()),
+        ])
+        .output()
+        .expect("omn runs");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let document: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("a results document");
+    let fio: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&fio_out).unwrap()).unwrap();
+    let per_call_ns = fio["jobs"][0]["read"]["clat_ns"]["mean"].as_f64().unwrap();
+    let series = document["results"][0]["outputs"][0]["series"]
+        .as_array()
+        .expect("series")
+        .clone();
+    // The busiest device is the file's.
+    let busiest = series
+        .iter()
+        .max_by_key(|series| series["count"].as_u64().unwrap_or(0))
+        .expect("a device served the reads");
+    let mean_ns = busiest["mean"].as_f64().unwrap();
+    assert!(
+        mean_ns <= per_call_ns * 1.05 && mean_ns >= per_call_ns * 0.3,
+        "diskstats says {mean_ns:.0} ns a request, fio {per_call_ns:.0} ns a call: {busiest}"
+    );
+}

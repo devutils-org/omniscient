@@ -55,6 +55,11 @@ pub enum Metric {
     /// The share of the window the device had a request outstanding: the
     /// io-ticks column, what `iostat -x` prints as `%util`.
     Util,
+    /// The mean time a request completed in the window was outstanding, from
+    /// the block layer's accounting to its completion: the milliseconds
+    /// reading and writing over the requests completed, what `iostat -x`
+    /// prints as `r_await` and `w_await`.
+    Await,
 }
 
 impl Metric {
@@ -118,6 +123,31 @@ impl Metric {
                     Attr::float("queue", share(weighted_ns)),
                 ]
             }
+            Metric::Await => {
+                let ops = delta.reads + delta.writes;
+                if ops == 0 {
+                    // No request completed: there is no time to average, and a
+                    // zero would claim requests that took none.
+                    return None;
+                }
+                let mean = |ms: u64, ops: u64| (ms * 1_000_000).checked_div(ops);
+                let mut attrs = vec![
+                    Attr::uint(
+                        "latency_ns",
+                        mean(delta.read_ms + delta.write_ms, ops).unwrap_or(0),
+                    ),
+                    Attr::uint("ops", ops),
+                    Attr::uint("count", ops),
+                    Attr::uint(crate::emit::WEIGHT_ATTR, ops),
+                ];
+                if let Some(read) = mean(delta.read_ms, delta.reads) {
+                    attrs.push(Attr::uint("read_await_ns", read));
+                }
+                if let Some(write) = mean(delta.write_ms, delta.writes) {
+                    attrs.push(Attr::uint("write_await_ns", write));
+                }
+                attrs
+            }
             Metric::Inflight => return None,
         };
         attrs.shrink_to_fit();
@@ -141,7 +171,7 @@ impl Metric {
                 (Direction::Read, delta.reads_merged),
                 (Direction::Write, delta.writes_merged),
             ],
-            Metric::Inflight | Metric::Util => return Vec::new(),
+            Metric::Inflight | Metric::Util | Metric::Await => return Vec::new(),
         };
         match self {
             Metric::Bytes => split.extend(
@@ -165,6 +195,7 @@ impl Metric {
             Metric::Merges => "io.merges",
             Metric::Inflight => "io.inflight",
             Metric::Util => "io.util",
+            Metric::Await => "io.latency",
         }
     }
 
@@ -177,6 +208,7 @@ impl Metric {
             Metric::Merges => "merges",
             Metric::Inflight => "inflight",
             Metric::Util => "util",
+            Metric::Await => "latency_ns",
         }
     }
 
@@ -436,8 +468,10 @@ impl Diskstats {
                 }
                 continue;
             }
+            // A gauge reports nothing here, and a device on which no request
+            // completed has no mean time to report.
             let Some(mut attrs) = self.metric.attrs(delta, interval_ns) else {
-                return Vec::new();
+                continue;
             };
             attrs.push(Attr::uint("interval_ns", interval_ns));
             attrs.push(Attr::text("dev", device.name.clone()));
@@ -702,6 +736,10 @@ struct DeviceCounters {
     reads: u64,
     reads_merged: u64,
     sectors_read: u64,
+    /// Milliseconds the completed reads and writes spent outstanding, summed
+    /// (columns 4 and 8).
+    read_ms: u64,
+    write_ms: u64,
     writes: u64,
     writes_merged: u64,
     sectors_written: u64,
@@ -737,6 +775,8 @@ impl DeviceCounters {
             reads: self.reads.checked_sub(before.reads)?,
             reads_merged: self.reads_merged.checked_sub(before.reads_merged)?,
             sectors_read: self.sectors_read.checked_sub(before.sectors_read)?,
+            read_ms: self.read_ms.checked_sub(before.read_ms)?,
+            write_ms: self.write_ms.checked_sub(before.write_ms)?,
             writes: self.writes.checked_sub(before.writes)?,
             writes_merged: self.writes_merged.checked_sub(before.writes_merged)?,
             sectors_written: self.sectors_written.checked_sub(before.sectors_written)?,
@@ -761,6 +801,8 @@ impl DeviceCounters {
             reads: numbers[0],
             reads_merged: numbers[1],
             sectors_read: numbers[2],
+            read_ms: numbers[3],
+            write_ms: numbers[7],
             writes: numbers[4],
             writes_merged: numbers[5],
             sectors_written: numbers[6],

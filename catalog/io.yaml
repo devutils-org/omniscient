@@ -22,9 +22,15 @@
       equivalent: true
     - {id: "fs:tracefs", requires: ["tracefs"], cost: med, targets: {system: native},
        degraded: "no per-task attribution, no pushed-down filter"}
-    - {id: "fs:proc", requires: ["/proc/diskstats"], cost: free,
-       targets: {system: native}, filter_fields: [dev],
-       degraded: "per device, not per request: no latency, no submitter"}
+    # The block layer's own account, read around the window: the mean time
+    # the requests it completed were outstanding, per device -- iostat's
+    # await -- for a machine where no program can be loaded.
+    - {id: "fs:proc", requires: ["/proc/diskstats"], cost: free, modes: [count],
+       emits: [summary, raw], targets: {system: native}, filter_fields: [dev], keys: [dev],
+       degraded: "per device and per window, not per request: the mean time the requests
+                  completed in the window were outstanding, counted from the block layer's
+                  accounting rather than from the issue, in milliseconds; no distribution and
+                  no submitter"}
   modes: [trace, count]
   emits: [hist, raw, rate, topk, summary]
   targets: {system: native, cgroup: native, pid: bpf_only, tid: bpf_only, launch: bpf_only, container: bpf_only}

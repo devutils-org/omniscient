@@ -102,6 +102,12 @@ pub fn factories() -> Vec<Factory> {
                 resolved.request.mode,
             )?))
         }),
+        Factory::new("io.latency", "fs:proc", |resolved| {
+            Ok(Box::new(diskstats::Prepare::new(
+                Metric::Await,
+                resolved.request.mode,
+            )?))
+        }),
         Factory::new("io.util", "fs:proc", |resolved| {
             Ok(Box::new(diskstats::Prepare::new(
                 Metric::Util,
