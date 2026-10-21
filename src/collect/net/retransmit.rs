@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::time::Duration as StdDuration;
 
 use crate::bpf::{Retransmit, RetransmitProgram};
-use crate::collect::kernel::UserFilter;
+use crate::collect::kernel::{KernelCounts, Lost, UserFilter};
 use crate::collect::{not_built, Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
@@ -94,8 +94,8 @@ pub struct RetransmitCollector {
     /// measurement of one window, totalled per series.
     mode: Mode,
     program: Option<RetransmitProgram>,
-    /// Runs of the programs the kernel skipped, as last read.
-    skipped: u64,
+    /// The program\'s loss counters, as last read (`collect::kernel`).
+    counts: KernelCounts,
     losses: Losses,
     /// The program's counter is cumulative, so what is new is the difference.
     dropped: u64,
@@ -121,7 +121,7 @@ impl RetransmitCollector {
             program: None,
             losses: Losses::default(),
             dropped: 0,
-            skipped: 0,
+            counts: KernelCounts::default(),
             counted: BTreeMap::new(),
             seen: 0,
             without_cookie: 0,
@@ -193,15 +193,8 @@ impl RetransmitCollector {
         let Some(program) = self.program.as_ref() else {
             return;
         };
-        let skipped = program.skipped();
-        if skipped > self.skipped {
-            self.losses.dropped += skipped - self.skipped;
-            self.losses.note_times(
-                "the kernel skipped a run of these programs because one was already running on \
-                 its cpu, so a retransmission went unseen; the count is the machine's, and an upper bound \
-                 on this target's", skipped - self.skipped);
-            self.skipped = skipped;
-        }
+        self.counts
+            .absorb(&mut self.losses, [Lost::skipped_runs(program.skipped())]);
         let dropped = program.dropped();
         if dropped > self.dropped {
             self.losses.dropped += dropped - self.dropped;

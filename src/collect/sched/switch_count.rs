@@ -19,7 +19,7 @@ use std::time::Duration as StdDuration;
 
 use crate::bpf::{Renames, SwitchCount, SwitchCountProgram, Whose};
 use crate::clock::monotonic_ns;
-use crate::collect::kernel::UserFilter;
+use crate::collect::kernel::{KernelCounts, Lost, UserFilter};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
@@ -56,8 +56,8 @@ pub struct SwitchCountCollector {
     whose: Whose,
     program: Option<SwitchCountProgram>,
     losses: Losses,
-    /// The kernel's skipped runs of the program, cumulative, as last read.
-    skipped: u64,
+    /// The program\'s loss counters, as last read (`collect::kernel`).
+    counts: KernelCounts,
     /// The program's own drop counter, cumulative, as last read.
     dropped: u64,
     /// When the window opened.
@@ -78,7 +78,7 @@ impl SwitchCountCollector {
             whose,
             program: None,
             losses: Losses::default(),
-            skipped: 0,
+            counts: KernelCounts::default(),
             dropped: 0,
             opened_ns: 0,
             counted: BTreeMap::new(),
@@ -163,17 +163,8 @@ impl SwitchCountCollector {
         let Some(program) = self.program.as_ref() else {
             return;
         };
-        let skipped = program.skipped();
-        if skipped > self.skipped {
-            self.losses.dropped += skipped - self.skipped;
-            self.losses.note_times(
-                "the kernel skipped a run of this program because one was already running on \
-                 that cpu, so a switch was never seen; the count is the machine's, an upper \
-                 bound on the target's share, and every total here is a lower bound",
-                skipped - self.skipped,
-            );
-            self.skipped = skipped;
-        }
+        self.counts
+            .absorb(&mut self.losses, [Lost::skipped_runs(program.skipped())]);
         let unfollowed = program.unfollowed();
         if unfollowed > 0 {
             self.losses.note(format!(

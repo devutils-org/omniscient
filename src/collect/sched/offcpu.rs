@@ -31,7 +31,7 @@ use std::time::Duration as StdDuration;
 
 use crate::bpf::{OffCpu, OffCpuProgram, Renames, Whose};
 use crate::clock::monotonic_ns;
-use crate::collect::kernel::UserFilter;
+use crate::collect::kernel::{KernelCounts, Lost, UserFilter};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::emit::STACK_ID_ATTR;
 use crate::event::{Attr, CollectorId, Event, KeyValue};
@@ -103,8 +103,8 @@ pub struct OffCpuCollector {
     /// Each process's parent, for the rows' `ppid`.
     parents: super::Parents,
     losses: Losses,
-    /// The kernel's skipped runs of the program, cumulative, as last read.
-    skipped: u64,
+    /// The program\'s loss counters, as last read (`collect::kernel`).
+    counts: KernelCounts,
     notes: Vec<String>,
     /// The names tasks took at exec, applied to the rows of the window.
     renames: Option<Renames>,
@@ -171,7 +171,7 @@ impl OffCpuCollector {
             program: None,
             parents: super::Parents::default(),
             losses: Losses::default(),
-            skipped: 0,
+            counts: KernelCounts::default(),
             notes: Vec::new(),
             renames: None,
             dropped_in_flight: 0,
@@ -465,17 +465,8 @@ impl OffCpuCollector {
         // program's can hold. It is the machine's -- the program runs on every
         // occurrence and narrows to the target after -- so it is an upper
         // bound on what the target lost, and the reason says so.
-        let skipped = program.skipped();
-        if skipped > self.skipped {
-            self.losses.dropped += skipped - self.skipped;
-            self.losses.note_times(
-                "the kernel skipped a run of this program because one was already running on \
-                 that cpu, so an occurrence was never seen; the count is the machine's, an \
-                 upper bound on the target's share, and every total here is a lower bound",
-                skipped - self.skipped,
-            );
-            self.skipped = skipped;
-        }
+        self.counts
+            .absorb(&mut self.losses, [Lost::skipped_runs(program.skipped())]);
         // A process the target started that the map of them had no room for
         // is a process none of whose blocks is here, and nothing else says so.
         let unfollowed = program.unfollowed();

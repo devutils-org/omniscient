@@ -11,6 +11,7 @@
 
 use crate::bpf::{OnCpu, OnCpuProgram, Whose};
 use crate::clock::monotonic_ns;
+use crate::collect::kernel::{KernelCounts, Lost};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
@@ -65,8 +66,8 @@ pub struct OnCpuThreads {
     program: Option<OnCpuProgram>,
     predicate: Option<FilterExpr>,
     losses: Losses,
-    /// The program's counters, cumulative, as last read.
-    skipped: u64,
+    /// The program\'s loss counters, as last read (`collect::kernel`).
+    counts: KernelCounts,
     dropped: u64,
     /// When the last drain happened, which is where the next poll's window
     /// begins.
@@ -81,7 +82,7 @@ impl OnCpuThreads {
             program: None,
             predicate,
             losses: Losses::default(),
-            skipped: 0,
+            counts: KernelCounts::default(),
             dropped: 0,
             last_ns: 0,
             filtered_out: 0,
@@ -145,16 +146,8 @@ impl OnCpuThreads {
         let Some(program) = self.program.as_ref() else {
             return;
         };
-        let skipped = program.skipped();
-        if skipped > self.skipped {
-            self.losses.dropped += skipped - self.skipped;
-            self.losses.note_times(
-                "the kernel skipped a run of this program because one was already running on \
-                 that cpu, so an increment of a thread's time is in no row",
-                skipped - self.skipped,
-            );
-            self.skipped = skipped;
-        }
+        self.counts
+            .absorb(&mut self.losses, [Lost::skipped_runs(program.skipped())]);
         let unfollowed = program.unfollowed();
         if unfollowed > 0 {
             self.losses.note(format!(

@@ -39,6 +39,7 @@ use super::vfs::{narrowing, Mounts};
 use crate::bpf::io_vfs;
 use crate::bpf::{PageCacheNarrowing, PageCacheProgram, PageCacheRow};
 use crate::clock::monotonic_ns;
+use crate::collect::kernel::{KernelCounts, Lost};
 use crate::collect::{cannot_mean_anything, Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
@@ -113,7 +114,8 @@ pub struct PageCacheCollector {
     losses: Losses,
     /// The program's counters are cumulative, so what is new is the difference.
     dropped: u64,
-    skipped: u64,
+    /// The program\'s loss counters, as last read (`collect::kernel`).
+    counts: KernelCounts,
     unfollowed: u64,
     unnamed: u64,
     untracked: u64,
@@ -153,7 +155,7 @@ impl PageCacheCollector {
             mounts: Mounts::read(),
             losses: Losses::default(),
             dropped: 0,
-            skipped: 0,
+            counts: KernelCounts::default(),
             unfollowed: 0,
             unnamed: 0,
             untracked: 0,
@@ -285,17 +287,8 @@ impl PageCacheCollector {
             );
             self.dropped = dropped;
         }
-        let skipped = program.skipped();
-        if skipped > self.skipped {
-            self.losses.dropped += skipped - self.skipped;
-            self.losses.note_times(
-                "the kernel skipped a run of these programs because one was already running on \
-                 that cpu, so a lookup or a fill was never counted and every total here is a \
-                 lower bound",
-                skipped - self.skipped,
-            );
-            self.skipped = skipped;
-        }
+        self.counts
+            .absorb(&mut self.losses, [Lost::skipped_runs(program.skipped())]);
         let unfollowed = program.unfollowed();
         if unfollowed > self.unfollowed {
             self.losses.note(format!(

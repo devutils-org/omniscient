@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use std::time::Duration as StdDuration;
 
 use crate::bpf::{SwitchCountProgram, Whose};
-use crate::collect::kernel::UserFilter;
+use crate::collect::kernel::{KernelCounts, Lost, UserFilter};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
@@ -252,7 +252,8 @@ pub struct SlicesCollector {
     pairing: Pairing,
     parents: super::Parents,
     losses: Losses,
-    skipped: u64,
+    /// The program\'s loss counters, as last read (`collect::kernel`).
+    counts: KernelCounts,
     dropped: u64,
     predicate: UserFilter,
     slices: u64,
@@ -266,7 +267,7 @@ impl SlicesCollector {
             pairing: Pairing::default(),
             parents: super::Parents::default(),
             losses: Losses::default(),
-            skipped: 0,
+            counts: KernelCounts::default(),
             dropped: 0,
             predicate: UserFilter::new(predicate, "slices"),
             slices: 0,
@@ -327,16 +328,8 @@ impl SlicesCollector {
         let Some(program) = self.program.as_ref() else {
             return;
         };
-        let skipped = program.skipped();
-        if skipped > self.skipped {
-            self.losses.dropped += skipped - self.skipped;
-            self.losses.note_times(
-                "the kernel skipped a run of this program because one was already running on \
-                 that cpu, so a switch was never seen",
-                skipped - self.skipped,
-            );
-            self.skipped = skipped;
-        }
+        self.counts
+            .absorb(&mut self.losses, [Lost::skipped_runs(program.skipped())]);
         let dropped = program.dropped();
         if dropped > self.dropped {
             self.losses.dropped += dropped - self.dropped;

@@ -25,7 +25,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration as StdDuration;
 
 use crate::bpf::{DropProgram, PacketDrop};
-use crate::collect::kernel::UserFilter;
+use crate::collect::kernel::{KernelCounts, Lost, UserFilter};
 use crate::collect::{not_built, Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
@@ -82,8 +82,8 @@ pub struct DropCollector {
     /// window, totalled per series.
     mode: Mode,
     program: Option<DropProgram>,
-    /// Runs of the programs the kernel skipped, as last read.
-    skipped: u64,
+    /// The program\'s loss counters, as last read (`collect::kernel`).
+    counts: KernelCounts,
     losses: Losses,
     notes: Vec<String>,
     /// The program's counter is cumulative, so what is new is the difference.
@@ -124,7 +124,7 @@ impl DropCollector {
             losses: Losses::default(),
             notes: Vec::new(),
             dropped: 0,
-            skipped: 0,
+            counts: KernelCounts::default(),
             counted: BTreeMap::new(),
             without_socket: 0,
             seen: 0,
@@ -277,15 +277,8 @@ impl DropCollector {
         let Some(program) = self.program.as_ref() else {
             return;
         };
-        let skipped = program.skipped();
-        if skipped > self.skipped {
-            self.losses.dropped += skipped - self.skipped;
-            self.losses.note_times(
-                "the kernel skipped a run of these programs because one was already running on \
-                 its cpu, so a packet drop went unseen; the count is the machine's, and an upper bound \
-                 on this target's", skipped - self.skipped);
-            self.skipped = skipped;
-        }
+        self.counts
+            .absorb(&mut self.losses, [Lost::skipped_runs(program.skipped())]);
         let dropped = program.dropped();
         if dropped > self.dropped {
             self.losses.dropped += dropped - self.dropped;

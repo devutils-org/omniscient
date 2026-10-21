@@ -11,6 +11,7 @@ use std::time::Duration as StdDuration;
 use super::syscall::{numbers_read_as_nr, pushed_down_syscall};
 use super::syscall_names;
 use crate::bpf::{Call, CallsNarrowing, CallsProgram, PathCall, Whose, PATH_CALLS};
+use crate::collect::kernel::{KernelCounts, Lost};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
@@ -65,7 +66,7 @@ impl Prepared for Prepare {
             dropped_pending: 0,
             unfollowed: 0,
             dropped_ring: 0,
-            skipped: 0,
+            counts: KernelCounts::default(),
             unread_paths: 0,
             truncated_paths: 0,
             filtered_out: 0,
@@ -85,7 +86,8 @@ pub struct CallsCollector {
     /// Processes the target started that were not followed, so far.
     unfollowed: u64,
     dropped_ring: u64,
-    skipped: u64,
+    /// The program\'s loss counters, as last read (`collect::kernel`).
+    counts: KernelCounts,
     /// `openat` calls whose path could not be read out of the caller.
     unread_paths: u64,
     truncated_paths: u64,
@@ -203,16 +205,8 @@ impl CallsCollector {
         let Some(program) = self.program.as_ref() else {
             return;
         };
-        let skipped = program.skipped();
-        if skipped > self.skipped {
-            self.losses.dropped += skipped - self.skipped;
-            self.losses.note_times(
-                "the kernel skipped a run of a call program because one was already running on \
-                 that cpu, so a call was never seen; the count is the machine's",
-                skipped - self.skipped,
-            );
-            self.skipped = skipped;
-        }
+        self.counts
+            .absorb(&mut self.losses, [Lost::skipped_runs(program.skipped())]);
         let unfollowed = program.unfollowed();
         if unfollowed > self.unfollowed {
             self.losses.dropped += unfollowed - self.unfollowed;

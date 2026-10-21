@@ -11,6 +11,7 @@ use std::time::Duration as StdDuration;
 
 use crate::bpf::{RunqLenProgram, RUNQ_LENGTHS};
 use crate::clock::monotonic_ns;
+use crate::collect::kernel::{KernelCounts, Lost};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::emit::WEIGHT_ATTR;
 use crate::event::{Attr, CollectorId, Event, KeyValue};
@@ -48,7 +49,7 @@ impl Prepared for Prepare {
             program: None,
             previous: Vec::new(),
             losses: Losses::default(),
-            skipped: 0,
+            counts: KernelCounts::default(),
         }))
     }
 }
@@ -60,7 +61,8 @@ pub struct RunqLen {
     /// The ticks at the last drain, `[length][cpu]`.
     previous: Vec<Vec<u64>>,
     losses: Losses,
-    skipped: u64,
+    /// The program\'s loss counters, as last read (`collect::kernel`).
+    counts: KernelCounts,
 }
 
 /// One event per cpu and length whose ticks grew, from two readings of the
@@ -114,16 +116,8 @@ impl RunqLen {
             return Vec::new();
         };
         let after = program.ticks();
-        let skipped = program.skipped();
-        if skipped > self.skipped {
-            self.losses.dropped += skipped - self.skipped;
-            self.losses.note_times(
-                "the kernel skipped a tick of the run queue program because one was already \
-                 running on that cpu",
-                skipped - self.skipped,
-            );
-            self.skipped = skipped;
-        }
+        self.counts
+            .absorb(&mut self.losses, [Lost::skipped_runs(program.skipped())]);
         let events = events(
             &self.previous,
             &after,

@@ -25,7 +25,7 @@ use std::time::Duration as StdDuration;
 
 use crate::bpf::{NumaDrops, NumaProgram, NumaStick};
 use crate::clock::monotonic_ns;
-use crate::collect::kernel::UserFilter;
+use crate::collect::kernel::{KernelCounts, Lost, UserFilter};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
@@ -144,8 +144,8 @@ pub struct NumaCollector {
     program: Option<NumaProgram>,
     nodes: NodeMap,
     losses: Losses,
-    /// The kernel's skipped runs of the program, cumulative, as last read.
-    skipped: u64,
+    /// The program\'s loss counters, as last read (`collect::kernel`).
+    counts: KernelCounts,
     dropped: NumaDrops,
     window_opened_ns: u64,
     run_opened_ns: u64,
@@ -160,7 +160,7 @@ impl NumaCollector {
             program: None,
             nodes: NodeMap::default(),
             losses: Losses::default(),
-            skipped: 0,
+            counts: KernelCounts::default(),
             dropped: NumaDrops::default(),
             window_opened_ns: 0,
             run_opened_ns: 0,
@@ -247,17 +247,8 @@ impl NumaCollector {
         // program's can hold. It is the machine's -- the program runs on every
         // occurrence and narrows to the target after -- so it is an upper
         // bound on what the target lost, and the reason says so.
-        let skipped = program.skipped();
-        if skipped > self.skipped {
-            self.losses.dropped += skipped - self.skipped;
-            self.losses.note_times(
-                "the kernel skipped a run of this program because one was already running on \
-                 that cpu, so an occurrence was never seen; the count is the machine's, an \
-                 upper bound on the target's share, and every total here is a lower bound",
-                skipped - self.skipped,
-            );
-            self.skipped = skipped;
-        }
+        self.counts
+            .absorb(&mut self.losses, [Lost::skipped_runs(program.skipped())]);
         let now = program.dropped();
         for (fresh, before, reason) in [
             (

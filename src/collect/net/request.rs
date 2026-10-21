@@ -25,6 +25,7 @@ use std::time::Duration as StdDuration;
 
 use crate::bpf::usdt::{self, Site};
 use crate::bpf::{request_key, RequestCounts, RequestProgram, RequestRecord};
+use crate::collect::kernel::{KernelCounts, Lost};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
@@ -148,7 +149,8 @@ pub struct RequestCollector {
     losses: Losses,
     predicate: Option<FilterExpr>,
     counts: RequestCounts,
-    skipped: u64,
+    /// The programs' loss counters, as last read (`collect::kernel`).
+    kernel: KernelCounts,
     /// Requests born and not yet ended, by id, with the thread and the birth.
     ///
     /// The thread as this process's namespace numbers it, translated at the
@@ -326,7 +328,7 @@ impl RequestCollector {
             losses: Losses::default(),
             predicate,
             counts: RequestCounts::default(),
-            skipped: 0,
+            kernel: KernelCounts::default(),
             open: BTreeMap::new(),
             awaiting: BTreeMap::new(),
             drains: BTreeMap::new(),
@@ -474,16 +476,15 @@ impl RequestCollector {
             );
         }
         self.counts = counts;
-        let skipped = program.skipped();
-        if skipped > self.skipped {
-            self.losses.dropped += skipped - self.skipped;
-            self.losses.note_times(
+        self.kernel.absorb(
+            &mut self.losses,
+            [Lost::dropped(
+                "skipped",
+                program.skipped(),
                 "the kernel skipped a run of these programs on a cpu where one was already \
                  running: a switch nobody saw is a stretch whose state is unknown",
-                skipped - self.skipped,
-            );
-            self.skipped = skipped;
-        }
+            )],
+        );
     }
 }
 

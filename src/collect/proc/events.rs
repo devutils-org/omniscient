@@ -27,6 +27,7 @@ use std::collections::BTreeMap;
 use std::time::Duration as StdDuration;
 
 use crate::bpf::{Exec, ExecProgram, Exit, ExitProgram, Signal, SignalProgram, Whose};
+use crate::collect::kernel::{KernelCounts, Lost};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
@@ -48,18 +49,15 @@ const RING_BYTES: usize = 256 * 1024;
 /// The bookkeeping every streaming collector in this file does the same way.
 struct Streaming {
     losses: Losses,
-    /// The program's counter is cumulative, so what is new is the difference.
-    dropped: u64,
-    /// The kernel's skipped runs, cumulative in the same way.
-    skipped: u64,
+    /// The program\'s loss counters, as last read (`collect::kernel`).
+    counts: KernelCounts,
 }
 
 impl Streaming {
     fn new() -> Self {
         Self {
             losses: Losses::default(),
-            dropped: 0,
-            skipped: 0,
+            counts: KernelCounts::default(),
         }
     }
 
@@ -81,25 +79,19 @@ impl Streaming {
     /// was already running on that cpu, which no counter of the program's can
     /// hold. It is the machine's, and the reason says so.
     fn absorb_drops(&mut self, dropped: u64, skipped: u64, what: &str) {
-        if skipped > self.skipped {
-            self.losses.dropped += skipped - self.skipped;
-            self.losses.note_times(
-                format!(
-                "the kernel skipped a run of the {what} program because one was already running \
-                 on that cpu, so an event was never seen; the count is the machine's"
-            ),
-                skipped - self.skipped,
-            );
-            self.skipped = skipped;
-        }
-        if dropped > self.dropped {
-            self.losses.dropped += dropped - self.dropped;
-            self.losses.note_times(
-                format!("the {what} ring was full: events happened faster than they were drained"),
-                dropped - self.dropped,
-            );
-            self.dropped = dropped;
-        }
+        self.counts.absorb(
+            &mut self.losses,
+            [
+                Lost::skipped_runs(skipped),
+                Lost::dropped(
+                    "ring",
+                    dropped,
+                    format!(
+                        "the {what} ring was full: events happened faster than they were drained"
+                    ),
+                ),
+            ],
+        );
     }
 }
 

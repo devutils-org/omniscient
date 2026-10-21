@@ -14,6 +14,7 @@
 use std::time::Duration as StdDuration;
 
 use crate::bpf::{Victim, VictimProgram, Whose, NO_UID};
+use crate::collect::kernel::{KernelCounts, Lost};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
@@ -46,8 +47,7 @@ impl Prepared for Prepare {
             filter: self.filter,
             program: None,
             losses: Losses::default(),
-            dropped: 0,
-            skipped: 0,
+            counts: KernelCounts::default(),
             removed: 0,
             kills: 0,
         }))
@@ -59,8 +59,8 @@ pub struct Victims {
     filter: Option<FilterExpr>,
     program: Option<VictimProgram>,
     losses: Losses,
-    dropped: u64,
-    skipped: u64,
+    /// The program's loss counters, as last read (`collect::kernel`).
+    counts: KernelCounts,
     /// Victims the predicate left out.
     removed: u64,
     kills: u64,
@@ -156,23 +156,15 @@ impl Victims {
             self.losses
                 .note("a record in the OOM victim ring was shorter than one victim".to_owned());
         }
-        let (dropped, skipped) = (program.dropped(), program.skipped());
-        if skipped > self.skipped {
-            self.losses.dropped += skipped - self.skipped;
-            self.losses.note_times(
-                "the kernel skipped a run of the OOM victim program because one was already \
-                 running on that cpu, so a victim was never seen; the count is the machine's"
-                    .to_owned(),
-                skipped - self.skipped,
-            );
-            self.skipped = skipped;
-        }
-        if dropped > self.dropped {
-            self.losses.dropped += dropped - self.dropped;
-            self.losses
-                .note("the OOM victim ring was full: victims were not drained in time".to_owned());
-            self.dropped = dropped;
-        }
+        let lost = [
+            Lost::skipped_runs(program.skipped()),
+            Lost::dropped(
+                "ring",
+                program.dropped(),
+                "the OOM victim ring was full: victims were not drained in time",
+            ),
+        ];
+        self.counts.absorb(&mut self.losses, lost);
     }
 }
 
