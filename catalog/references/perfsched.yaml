@@ -37,26 +37,32 @@
 - id: strace-c-vfs-read
   source: io.vfs
   tool: strace -c
-  use: "strace -c -f -e trace=read,pread64 -- prog  (how many reads a program makes)"
+  use: "strace -c -f -e trace=read,pread64 -p PID  (how many reads a program makes)"
   workload: [python3, tests/reference/workloads/bpftrace/act.py, vfsread, "20000"]
-  omn: [trace, io.vfs, -m, count, -k, op, -e, summary, --format, json, -o, "{out}"]
+  # One run both count: held stopped until strace and omn are attached to its
+  # pid. Alternate runs differed by the interpreter's own startup reads, a
+  # few, and Rocky 8's Python 3.6 by five against three allowed (2026-10-21).
+  run: attach
+  settle_ms: 1500
+  omn: [trace, io.vfs, --pid, "{pid}", -d, 30s, -m, count, -k, op, -e, summary, --format, json, -o, "{out}"]
   reference:
-    command: [strace, -c, -f, -e, "trace=read,pread64", --]
+    # As root: Ubuntu's yama.ptrace_scope 1 refuses attaching to a process
+    # this user did not start.
+    command: [sh, -c, '$SUDO strace -c -f -e trace=read,pread64 -p "$1"', sh, "{pid}"]
     parse: strace_c
-    requires: [strace]
-    privileged: false
+    requires: [strace, sh]
+    privileged: true
+    sudo: strace
   compare:
     key: total.calls
     omn: results[source=io.vfs].outputs[emit=summary].series[key=op:vfs_read].total
     tolerance: {abs: 3}
-    why: "alternate runs of a deterministic workload: 20000 pread64 of one
-      byte and python3's own reads at startup. read(2) and pread64(2) each
-      call vfs_read once, so strace's total of the two is omn's vfs_read
-      count of the launched program: 20191 against 20191 here, two runs. A
-      read refused before it reaches the VFS (a bad descriptor) would be on
-      strace's side alone; the workload makes none. The interpreter's own
-      startup reads move by a few between alternate runs: Fedora 44 +2,
-      Gentoo -1 (distroproof, 2026-10-19), the 20000 exact every time"
+    why: "one run: 20000 pread64 of one byte and python3's own reads at
+      startup, both attached before the program's first instruction. read(2)
+      and pread64(2) each call vfs_read once, so strace's total of the two is
+      omn's vfs_read count of the program: 20191 against 20191 in alternate
+      runs before. A read refused before it reaches the VFS (a bad
+      descriptor) would be on strace's side alone; the workload makes none"
 
 - id: strace-c-latency
   source: proc.syscall
@@ -275,8 +281,9 @@
     # A perf built without its BPF skeletons has no `-b` (Debian 12's 6.1):
     # the tool this machine has, refused, not a pair that failed. A perf
     # older than `contention` (Ubuntu 18.04's 4.15) prints its usage, whose
-    # list of subcommands ends at `info`.
-    refused_when: ["not built-in because no BUILD_BPF_SKEL", "{record|report|script|info}"]
+    # list of subcommands ends at `info`; Ubuntu 20.04's 5.4 and 22.04's 5.15
+    # print ` Usage: (null)` and their options (2026-10-21).
+    refused_when: ["not built-in because no BUILD_BPF_SKEL", "{record|report|script|info}", "Usage: (null)"]
     privileged: true
   compare:
     key: comm:omnref-lock.contended
@@ -303,7 +310,7 @@
     command: [perf, lock, contention, -b, -t, -Y, "rwsem:W", --]
     parse: perf_lock_contention
     requires: [perf]
-    refused_when: ["not built-in because no BUILD_BPF_SKEL", "{record|report|script|info}"]
+    refused_when: ["not built-in because no BUILD_BPF_SKEL", "{record|report|script|info}", "Usage: (null)"]
     privileged: true
   compare:
     key: comm:omnref-lock.contended

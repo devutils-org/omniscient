@@ -95,9 +95,17 @@ def main():
             for required, packages in [(True, selection['required']), (False, selection['optional'])]:
                 for package in packages:
                     package = package.replace('KERNEL', platform.release())
+                    # `a|b`: the first name this distribution has (Rocky 8's
+                    # Python 3 is `python36`, its `python3` no package's name).
+                    names = package.split('|')
+                    for package in names:
+                        native, available, query_ok = candidate(provider, package)
+                        if available or not query_ok:
+                            break
                     entry = {'package': package, 'required': required, 'status': 'failed', 'engine': report['engine']}
+                    if len(names) > 1:
+                        entry['alternatives'] = names
                     report['packages'].append(entry)
-                    native, available, query_ok = candidate(provider, package)
                     entry['candidate'] = native
                     if not query_ok:
                         entry['reason'] = 'native candidate query failed'

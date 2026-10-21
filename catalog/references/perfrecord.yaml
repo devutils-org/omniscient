@@ -68,7 +68,8 @@
     parse: perf_report_dso
     requires: [perf, python3]
   compare:
-    key: libcrypto.so.3
+    # The library, not its release: OpenSSL 1.1's libcrypto.so.1 on Rocky 8.
+    key: libcrypto.so
     omn_parse: omn_topk_share
     tolerance: {abs: 0.05}
     why: "60 % of the wall time hashes in libcrypto: the share is the object's on both sides, perf's by dso and omn's keyed by each sample's object, so a library whose functions are named (Fedora keeps libcrypto's symbols, found with distroproof) and one stripped (Arch) are compared alike; one run, cycles against cpu-clock"

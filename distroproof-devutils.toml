@@ -6,7 +6,9 @@
 # across the machine missed their band (2026-10-19); pinned to one domain each
 # of the 3900X's four, they failed no more pairs than one VM at a time
 # (2026-10-21). Longest first, so the queue ends together: Ubuntu 18.04's
-# pairs run until their 2400 s timeout, then Fedora and Gentoo.
+# pairs run until their 2400 s timeout, then Fedora and Gentoo. Debian 11 is
+# not here: past its end of life its security archive answered 404 for
+# packages its index still listed (2026-10-21).
 [defaults]
 memory = "3G"
 cpus = 2
@@ -26,6 +28,14 @@ image = "gentoo"
 timeout = "120m"
 
 [[target]]
+name = "chain-rocky-8"
+image = "rocky-8"
+
+[[target]]
+name = "chain-ubuntu-22.04"
+image = "ubuntu-22.04"
+
+[[target]]
 name = "chain-ubuntu-24.04"
 image = "ubuntu-24.04"
 
@@ -40,6 +50,10 @@ image = "debian-13"
 [[target]]
 name = "chain-debian-12"
 image = "debian-12"
+
+[[target]]
+name = "chain-ubuntu-20.04"
+image = "ubuntu-20.04"
 
 [[target]]
 name = "chain-arch"

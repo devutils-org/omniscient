@@ -1204,6 +1204,9 @@ const BROKEN: &[&str] = &[
     "undefined symbol",
     "symbol lookup error",
     "error while loading shared libraries",
+    // Ubuntu 22.04's bpftrace 0.14, a stripped binary, cannot find its own
+    // BEGIN probe and starts no script at all (2026-10-21).
+    "Could not resolve symbol: /proc/self/exe:BEGIN_trigger",
 ];
 
 /// A skip quoting why the witness did not run, unless the workload fails on

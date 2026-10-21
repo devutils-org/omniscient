@@ -82,6 +82,18 @@ fn function_key(object: &str, symbol: &str) -> String {
 /// process mapped, which is `libcrypto.so.3` on Arch and the symlink's target
 /// `libcrypto.so.3.5.5` on Fedora (found with distroproof), so a pair keyed
 /// by one held on one distribution only.
+/// An object's share under its soname and, for a versioned library, under
+/// its name with no version too: `libcrypto.so` is OpenSSL 3's `.so.3` on
+/// most distributions and 1.1's `.so.1` on Rocky 8 (2026-10-21), and a pair
+/// about where the time went names the library, not its release.
+fn add_object(values: &mut Values, object: &str, share: f64) {
+    let name = soname(object);
+    if let Some((base, _)) = name.split_once(".so.") {
+        add(values, &format!("{base}.so"), share);
+    }
+    add(values, &name, share);
+}
+
 fn soname(object: &str) -> String {
     match object.split_once(".so.") {
         Some((base, versions)) => {
@@ -137,7 +149,7 @@ fn perf_report_dso(stdout: &str, _stderr: &str) -> Result<Values, String> {
         let Some(share) = percent(share) else {
             continue;
         };
-        add(&mut values, &soname(object.trim()), share / 100.0);
+        add_object(&mut values, object.trim(), share / 100.0);
     }
     if values.is_empty() {
         return Err("no row with an overhead in perf report's output".into());
@@ -298,19 +310,20 @@ fn omn_topk_share(stdout: &str, _stderr: &str) -> Result<Values, String> {
     let mut values = Values::new();
     for row in rows {
         let key = row["key"].as_str().unwrap_or("");
-        let key = match key.strip_prefix("object:") {
-            Some(object) => soname(object),
-            None => key
-                .strip_prefix("mem:[")
-                .and_then(|k| k.split(',').next())
-                .unwrap_or(key)
-                .to_string(),
-        };
         let share = row["events"].as_f64().unwrap_or(0.0) / total;
         if values.is_empty() {
             values.push(("top".into(), share));
         }
-        add(&mut values, &key, share);
+        match key.strip_prefix("object:") {
+            Some(object) => add_object(&mut values, object, share),
+            None => add(
+                &mut values,
+                key.strip_prefix("mem:[")
+                    .and_then(|k| k.split(',').next())
+                    .unwrap_or(key),
+                share,
+            ),
+        }
     }
     Ok(values)
 }
