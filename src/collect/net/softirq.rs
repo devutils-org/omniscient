@@ -25,6 +25,7 @@ use std::time::Duration as StdDuration;
 use super::softirqs::Vectors;
 use crate::bpf::{SoftIrq, SoftIrqProgram};
 use crate::clock::monotonic_ns;
+use crate::collect::kernel::UserFilter;
 use crate::collect::{not_built, Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
@@ -137,9 +138,7 @@ pub struct SoftIrqCollector {
     kernel_runs_at_start: BTreeMap<u32, u64>,
     kernel_runs_at_stop: BTreeMap<u32, u64>,
     /// The request's predicate, applied to each row as it is drained.
-    predicate: Option<FilterExpr>,
-    filtered_in: u64,
-    filtered_out: u64,
+    predicate: UserFilter,
 }
 
 impl SoftIrqCollector {
@@ -169,9 +168,7 @@ impl SoftIrqCollector {
             off_target: 0,
             kernel_runs_at_start: BTreeMap::new(),
             kernel_runs_at_stop: BTreeMap::new(),
-            predicate,
-            filtered_in: 0,
-            filtered_out: 0,
+            predicate: UserFilter::new(predicate, "handler runs"),
         }
     }
 
@@ -282,14 +279,12 @@ impl SoftIrqCollector {
                     continue;
                 }
             }
-            if let Some(predicate) = &self.predicate {
+            if self.predicate.expression().is_some() {
                 let candidate =
                     self.event(&row, window_ns, Self::stamp(row.first_ns, closed_ns), seq);
-                if !crate::filter::matches(predicate, &candidate) {
-                    self.filtered_out += row.count;
+                if !self.predicate.keep(&candidate, row.count) {
                     continue;
                 }
-                self.filtered_in += row.count;
             }
             self.handlers += row.count;
             self.rows += 1;
@@ -477,14 +472,7 @@ impl Collector for SoftIrqCollector {
                 self.off_target,
             ));
         }
-        if self.filtered_out > 0 || self.filtered_in > 0 {
-            notes.push(format!(
-                "the filter kept {} handler runs and removed {}; it ran here, over the drained \
-                 rows, not in the kernel, so the removed ones were counted before they were \
-                 dropped",
-                self.filtered_in, self.filtered_out,
-            ));
-        }
+        notes.extend(self.predicate.note());
         notes
     }
 

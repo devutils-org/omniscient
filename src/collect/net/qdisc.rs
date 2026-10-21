@@ -27,6 +27,7 @@ use std::time::Duration as StdDuration;
 use super::interfaces;
 use crate::bpf::{QdiscProgram, QdiscWait};
 use crate::clock::monotonic_ns;
+use crate::collect::kernel::UserFilter;
 use crate::collect::{not_built, Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
@@ -83,9 +84,7 @@ pub struct QdiscCollector {
     /// How many packets this run has bucketed, which is not the event count.
     packets: u64,
     rows: u64,
-    predicate: Option<FilterExpr>,
-    filtered_in: u64,
-    filtered_out: u64,
+    predicate: UserFilter,
 }
 
 impl QdiscCollector {
@@ -102,9 +101,7 @@ impl QdiscCollector {
             window_opened_ns: 0,
             packets: 0,
             rows: 0,
-            predicate,
-            filtered_in: 0,
-            filtered_out: 0,
+            predicate: UserFilter::new(predicate, "packets"),
         }
     }
 
@@ -183,12 +180,8 @@ impl QdiscCollector {
                 Self::stamp(row.first_ns, closed_ns),
                 seq + index,
             );
-            if let Some(predicate) = &self.predicate {
-                if !crate::filter::matches(predicate, &candidate) {
-                    self.filtered_out += row.count;
-                    continue;
-                }
-                self.filtered_in += row.count;
+            if !self.predicate.keep(&candidate, row.count) {
+                continue;
             }
             self.packets += row.count;
             self.rows += 1;
@@ -346,13 +339,7 @@ impl Collector for QdiscCollector {
                 self.still_queued,
             ));
         }
-        if self.filtered_out > 0 || self.filtered_in > 0 {
-            notes.push(format!(
-                "the filter kept {} packets and removed {}; it ran here, over the drained rows, \
-                 not in the kernel",
-                self.filtered_in, self.filtered_out,
-            ));
-        }
+        notes.extend(self.predicate.note());
         if self.packets > 0 {
             notes.push(format!(
                 "{} packet waits are reported as {} rows of a kernel-side log2 histogram, each \

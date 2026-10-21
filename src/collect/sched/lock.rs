@@ -22,6 +22,7 @@ use std::time::Duration as StdDuration;
 
 use crate::bpf::{LockDrops, LockProgram, LockWait, Whose};
 use crate::clock::monotonic_ns;
+use crate::collect::kernel::UserFilter;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::emit::{STACK_ID_ATTR, WEIGHT_ATTR};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
@@ -115,13 +116,9 @@ pub struct LockCollector {
     /// The end of the last interval, which is the start of this one.
     window_opened_ns: u64,
     /// The request's predicate, applied to each row as it is drained.
-    predicate: Option<FilterExpr>,
+    predicate: UserFilter,
     /// Each waiting process's parent, for `ppid`.
     parents: super::Parents,
-    /// Waits the predicate removed, and waits it kept. Counted in waits rather
-    /// than in rows, because a row is not one measurement here.
-    filtered_out: u64,
-    filtered_in: u64,
 }
 
 impl LockCollector {
@@ -145,10 +142,8 @@ impl LockCollector {
             dropped: LockDrops::default(),
             skipped_idle: 0,
             window_opened_ns: 0,
-            predicate,
+            predicate: UserFilter::new(predicate, "lock waits"),
             parents: super::Parents::default(),
-            filtered_out: 0,
-            filtered_in: 0,
         }
     }
 
@@ -214,12 +209,14 @@ impl LockCollector {
             // process's mappings for nothing.
             // `kind` is the lock's, which `topk:N@kind` ranks by, as
             // `perf lock contention` groups by type; see `super::matches_as`.
-            if let Some(predicate) = &self.predicate {
-                if !super::matches_as(predicate, &event, &row.kind()) {
-                    self.filtered_out += row.count;
-                    continue;
-                }
-                self.filtered_in += row.count;
+            let kept = self
+                .predicate
+                .expression()
+                .is_none_or(|predicate| super::matches_as(predicate, &event, &row.kind()));
+            self.predicate
+                .tally(u64::from(kept) * row.count, u64::from(!kept) * row.count);
+            if !kept {
+                continue;
             }
             if let Some(id) = self.resolve_stack(&row) {
                 event.attrs.push(Attr::uint(STACK_ID_ATTR, id));
@@ -584,13 +581,7 @@ impl Collector for LockCollector {
                     .to_owned(),
             );
         }
-        if self.filtered_out > 0 || self.filtered_in > 0 {
-            notes.push(format!(
-                "the filter kept {} lock waits and removed {}; it is applied to drained rows \
-                 rather than in the program, so the cost of the ones it removed was still paid",
-                self.filtered_in, self.filtered_out
-            ));
-        }
+        notes.extend(self.predicate.note());
         if self.skipped_idle > 0 {
             notes.push(format!(
                 "{} lock waits of the per-cpu idle task were not measured: every cpu's idle task \

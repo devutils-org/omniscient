@@ -19,6 +19,7 @@ use std::time::Duration as StdDuration;
 
 use crate::bpf::{Writeback, WritebackProgram};
 use crate::clock::monotonic_ns;
+use crate::collect::kernel::UserFilter;
 use crate::collect::{not_built, Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
@@ -90,9 +91,7 @@ pub struct WritebackCollector {
     counted_total: u64,
     counted_pages: i64,
     opened_ns: u64,
-    predicate: Option<FilterExpr>,
-    filtered_out: u64,
-    filtered_in: u64,
+    predicate: UserFilter,
 }
 
 impl WritebackCollector {
@@ -112,9 +111,7 @@ impl WritebackCollector {
             counted_total: 0,
             counted_pages: 0,
             opened_ns: 0,
-            predicate,
-            filtered_out: 0,
-            filtered_in: 0,
+            predicate: UserFilter::new(predicate, "rounds"),
         }
     }
 
@@ -186,12 +183,8 @@ impl WritebackCollector {
                 self.no_super_block += 1;
             }
             let event = self.event(&record, seq + index as u64);
-            if let Some(predicate) = &self.predicate {
-                if !crate::filter::matches(predicate, &event) {
-                    self.filtered_out += 1;
-                    continue;
-                }
-                self.filtered_in += 1;
+            if !self.predicate.keep(&event, 1) {
+                continue;
             }
             if self.mode == Mode::Count {
                 self.counted += 1;
@@ -329,13 +322,7 @@ impl Collector for WritebackCollector {
                 if self.still_running == 1 { "" } else { "s" }
             ));
         }
-        if self.filtered_out > 0 || self.filtered_in > 0 {
-            notes.push(format!(
-                "the filter kept {} rounds and removed {}; it ran here, over the drained \
-                 records, not in the kernel",
-                self.filtered_in, self.filtered_out
-            ));
-        }
+        notes.extend(self.predicate.note());
         notes
     }
 }

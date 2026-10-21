@@ -25,6 +25,7 @@ use std::time::Duration as StdDuration;
 
 use crate::bpf::{FutexDrops, FutexProgram, FutexWait, Whose};
 use crate::clock::monotonic_ns;
+use crate::collect::kernel::UserFilter;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::emit::{STACK_ID_ATTR, WEIGHT_ATTR};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
@@ -99,9 +100,7 @@ pub struct FutexCollector {
     evicted_stacks: u64,
     dropped: FutexDrops,
     window_opened_ns: u64,
-    predicate: Option<FilterExpr>,
-    filtered_out: u64,
-    filtered_in: u64,
+    predicate: UserFilter,
 }
 
 impl FutexCollector {
@@ -122,9 +121,7 @@ impl FutexCollector {
             evicted_stacks: 0,
             dropped: FutexDrops::default(),
             window_opened_ns: 0,
-            predicate,
-            filtered_out: 0,
-            filtered_in: 0,
+            predicate: UserFilter::new(predicate, "futex waits"),
         }
     }
 
@@ -193,12 +190,8 @@ impl FutexCollector {
                 collector_id: CollectorId::unstamped(),
                 seq: seq + index as u64,
             };
-            if let Some(predicate) = &self.predicate {
-                if !crate::filter::matches(predicate, &event) {
-                    self.filtered_out += row.count;
-                    continue;
-                }
-                self.filtered_in += row.count;
+            if !self.predicate.keep(&event, row.count) {
+                continue;
             }
             let mut event = event;
             if let Some(ppid) = self.parents.of(row.tgid) {
@@ -450,13 +443,7 @@ impl Collector for FutexCollector {
 
     fn notes(&self) -> Vec<String> {
         let mut notes = self.notes.clone();
-        if self.filtered_out > 0 || self.filtered_in > 0 {
-            notes.push(format!(
-                "the filter kept {} futex waits and removed {}; it is applied to drained rows \
-                 rather than in the program, so the cost of the ones it removed was still paid",
-                self.filtered_in, self.filtered_out
-            ));
-        }
+        notes.extend(self.predicate.note());
         if self.unwalkable > 0 {
             notes.push(format!(
                 "{} futex waits had no user stack to walk, which is what a program built without \

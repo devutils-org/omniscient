@@ -18,6 +18,7 @@ use std::time::Duration as StdDuration;
 
 use crate::bpf::{Migration, MigrationProgram, Renames, Whose};
 use crate::clock::monotonic_ns;
+use crate::collect::kernel::UserFilter;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
@@ -52,7 +53,7 @@ impl Prepared for Prepare {
         }
         let filter = super::whose(target, "a migration happens to a task")?;
         let mut collector = MigrationCollector::new(filter, self.mode);
-        collector.predicate = self.filter;
+        collector.predicate = UserFilter::new(self.filter, "migrations");
         Ok(Box::new(collector))
     }
 }
@@ -85,11 +86,9 @@ pub struct MigrationCollector {
     /// The totals a `count` run accumulates, by the pair that keys a series.
     counted: BTreeMap<(u32, u32), Migration>,
     /// The request's predicate, and the migrations it kept and removed.
-    predicate: Option<FilterExpr>,
+    predicate: UserFilter,
     /// Each process's parent, for the rows' `ppid`.
     parents: std::cell::RefCell<super::Parents>,
-    filtered_in: u64,
-    filtered_out: u64,
     /// The names tasks took at exec, applied to the rows of the window.
     renames: Option<Renames>,
     /// Why they could not be, when the exec program was refused.
@@ -108,10 +107,8 @@ impl MigrationCollector {
             window_opened_ns: 0,
             run_opened_ns: 0,
             counted: BTreeMap::new(),
-            predicate: None,
+            predicate: UserFilter::new(None, "migrations"),
             parents: Default::default(),
-            filtered_in: 0,
-            filtered_out: 0,
             renames: None,
             exec_note: None,
         }
@@ -144,16 +141,11 @@ impl MigrationCollector {
 
     /// Whether the predicate keeps a row, counting what it keeps and removes.
     fn keeps(&mut self, row: &Migration, window_ns: u64) -> bool {
-        let Some(predicate) = &self.predicate else {
+        if self.predicate.expression().is_none() {
             return true;
-        };
-        let kept = crate::filter::matches(predicate, &self.event(row, 0, window_ns, 0));
-        if kept {
-            self.filtered_in += row.count;
-        } else {
-            self.filtered_out += row.count;
         }
-        kept
+        let event = self.event(row, 0, window_ns, 0);
+        self.predicate.keep(&event, row.count)
     }
 
     /// Whether this run reports one measurement at the end rather than a
@@ -361,13 +353,7 @@ impl Collector for MigrationCollector {
 
     fn notes(&self) -> Vec<String> {
         let mut notes: Vec<String> = self.exec_note.iter().cloned().collect();
-        if self.filtered_in > 0 || self.filtered_out > 0 {
-            notes.push(format!(
-                "the filter kept {} migrations and removed {}; it ran here, over the drained \
-                 rows, not in the kernel",
-                self.filtered_in, self.filtered_out,
-            ));
-        }
+        notes.extend(self.predicate.note());
         if self.counting() {
             notes.push(
                 "`count` reports one total per (task, cpu) over the whole window, so there is \

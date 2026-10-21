@@ -126,6 +126,22 @@ impl UserFilter {
         }
     }
 
+    /// The predicate itself, for a collector that decides with more than
+    /// [`UserFilter::keep`] does: one half of a pair, a field a program reads.
+    pub fn expression(&self) -> Option<&FilterExpr> {
+        self.predicate.as_ref()
+    }
+
+    /// Counts verdicts reached elsewhere -- inside a drain's closure, which
+    /// cannot hold this filter mutably -- as `kept` and `removed` occurrences.
+    /// A filter with no predicate counts nothing, as `keep` does not.
+    pub fn tally(&mut self, kept: u64, removed: u64) {
+        if self.predicate.is_some() {
+            self.kept += kept;
+            self.removed += removed;
+        }
+    }
+
     /// What the filter kept and removed, once it saw anything.
     pub fn note(&self) -> Option<String> {
         (self.kept > 0 || self.removed > 0).then(|| {

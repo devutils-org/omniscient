@@ -19,6 +19,7 @@ use std::time::Duration as StdDuration;
 
 use crate::bpf::{Renames, SwitchCount, SwitchCountProgram, Whose};
 use crate::clock::monotonic_ns;
+use crate::collect::kernel::UserFilter;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
@@ -63,12 +64,10 @@ pub struct SwitchCountCollector {
     opened_ns: u64,
     /// The window's totals, by `(tid, voluntary)`.
     counted: BTreeMap<(u32, bool), SwitchCount>,
-    predicate: Option<FilterExpr>,
+    predicate: UserFilter,
     /// Each process's parent, for the rows' `ppid`: asked from `event`,
     /// which only reads the collector.
     parents: std::cell::RefCell<super::Parents>,
-    filtered_in: u64,
-    filtered_out: u64,
     renames: Option<Renames>,
     exec_note: Option<String>,
 }
@@ -83,10 +82,8 @@ impl SwitchCountCollector {
             dropped: 0,
             opened_ns: 0,
             counted: BTreeMap::new(),
-            predicate,
+            predicate: UserFilter::new(predicate, "switches"),
             parents: Default::default(),
-            filtered_in: 0,
-            filtered_out: 0,
             renames: None,
             exec_note: None,
         }
@@ -109,16 +106,11 @@ impl SwitchCountCollector {
     }
 
     fn keeps(&mut self, row: &SwitchCount, window_ns: u64) -> bool {
-        let Some(predicate) = &self.predicate else {
+        if self.predicate.expression().is_none() {
             return true;
-        };
-        let kept = crate::filter::matches(predicate, &self.event(row, 0, window_ns, 0));
-        if kept {
-            self.filtered_in += row.count;
-        } else {
-            self.filtered_out += row.count;
         }
-        kept
+        let event = self.event(row, 0, window_ns, 0);
+        self.predicate.keep(&event, row.count)
     }
 
     fn drain(&mut self) {
@@ -286,13 +278,7 @@ impl Collector for SwitchCountCollector {
 
     fn notes(&self) -> Vec<String> {
         let mut notes: Vec<String> = self.exec_note.iter().cloned().collect();
-        if self.filtered_in > 0 || self.filtered_out > 0 {
-            notes.push(format!(
-                "the filter kept {} switches and removed {}; it ran here, over the drained \
-                 rows, not in the kernel",
-                self.filtered_in, self.filtered_out,
-            ));
-        }
+        notes.extend(self.predicate.note());
         notes
     }
 }

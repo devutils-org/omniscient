@@ -28,6 +28,7 @@ use super::allocations::descendants;
 use super::cgroup::Cgroup;
 use crate::bpf::{Stall, StallDrops, StallProgram, StallRow, SCOPE_CGROUP};
 use crate::clock::monotonic_ns;
+use crate::collect::kernel::UserFilter;
 use crate::collect::{cannot_mean_anything, not_built, Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
@@ -147,9 +148,7 @@ pub struct StallCollector {
     /// The request's predicate. The resolver credits a `bpf` backend with
     /// filtering in the kernel from its *name*, so a collector that ignores the
     /// predicate returns everything and nothing says the filter never ran.
-    predicate: Option<FilterExpr>,
-    filtered_out: u64,
-    filtered_in: u64,
+    predicate: UserFilter,
     /// Episodes still in progress when the run ended, which is a fact about the
     /// window rather than a loss.
     still_inside: usize,
@@ -185,9 +184,7 @@ impl StallCollector {
             episodes: 0,
             rows: 0,
             outside: 0,
-            predicate,
-            filtered_out: 0,
-            filtered_in: 0,
+            predicate: UserFilter::new(predicate, "episodes"),
             still_inside: 0,
             absent: Vec::new(),
             global: 0,
@@ -261,12 +258,8 @@ impl StallCollector {
                 collector_id: CollectorId::unstamped(),
                 seq: seq + index,
             };
-            if let Some(predicate) = &self.predicate {
-                if !crate::filter::matches(predicate, &event) {
-                    self.filtered_out += row.count;
-                    continue;
-                }
-                self.filtered_in += row.count;
+            if !self.predicate.keep(&event, row.count) {
+                continue;
             }
             self.episodes += row.count;
             if row.scope == SCOPE_CGROUP {
@@ -528,13 +521,7 @@ impl Collector for StallCollector {
                 self.outside,
             ));
         }
-        if self.filtered_out > 0 || self.filtered_in > 0 {
-            notes.push(format!(
-                "the filter kept {} episodes and removed {}; it ran here, over the drained rows, \
-                 not in the kernel, so the removed ones were counted before they were dropped",
-                self.filtered_in, self.filtered_out,
-            ));
-        }
+        notes.extend(self.predicate.note());
         if self.counting() {
             notes.push(
                 "`count` reports one total per row over the whole window, so there is no series \

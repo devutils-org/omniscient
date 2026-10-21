@@ -31,6 +31,7 @@ use std::time::Duration as StdDuration;
 
 use crate::bpf::{OffCpu, OffCpuProgram, Renames, Whose};
 use crate::clock::monotonic_ns;
+use crate::collect::kernel::UserFilter;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::emit::STACK_ID_ATTR;
 use crate::event::{Attr, CollectorId, Event, KeyValue};
@@ -85,7 +86,7 @@ impl Prepared for Prepare {
         }
         let filter = super::whose(target, "blocked time is attributed per task")?;
         let mut collector = OffCpuCollector::new(filter, self.wants_stacks);
-        collector.predicate = self.filter;
+        collector.predicate = UserFilter::new(self.filter, "blocks");
         // Refused here, before the target has run an instruction, rather than
         // discovered at the first stack: the same refusal `cpu.profile` gives.
         if self.debuginfod {
@@ -160,9 +161,7 @@ pub struct OffCpuCollector {
     /// Whether the frames behind a stack id will be read by anyone.
     wants_stacks: bool,
     /// The request's predicate, and the blocks it kept and removed.
-    predicate: Option<FilterExpr>,
-    filtered_in: u64,
-    filtered_out: u64,
+    predicate: UserFilter,
 }
 
 impl OffCpuCollector {
@@ -195,9 +194,7 @@ impl OffCpuCollector {
             unstamped: 0,
             debuginfod: None,
             wants_stacks,
-            predicate: None,
-            filtered_in: 0,
-            filtered_out: 0,
+            predicate: UserFilter::new(None, "blocks"),
         }
     }
 
@@ -282,12 +279,8 @@ impl OffCpuCollector {
                 collector_id: CollectorId::unstamped(),
                 seq: seq + index as u64,
             };
-            if let Some(predicate) = &self.predicate {
-                if !crate::filter::matches(predicate, &event) {
-                    self.filtered_out += entry.blocks;
-                    continue;
-                }
-                self.filtered_in += entry.blocks;
+            if !self.predicate.keep(&event, entry.blocks) {
+                continue;
             }
             events.push(event);
         }
@@ -741,13 +734,7 @@ impl Collector for OffCpuCollector {
                 OffCpuProgram::STACK_SLOTS,
             ));
         }
-        if self.filtered_in > 0 || self.filtered_out > 0 {
-            notes.push(format!(
-                "the filter kept {} blocks and removed {}; it ran here, over the drained rows, \
-                 not in the kernel",
-                self.filtered_in, self.filtered_out,
-            ));
-        }
+        notes.extend(self.predicate.note());
         if self.evicted_stacks > 0 {
             notes.push(format!(
                 "{} blocks named a stack the kernel had already evicted from its stack map, so \

@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 use std::time::Duration as StdDuration;
 
 use crate::bpf::{SwitchCountProgram, Whose};
+use crate::collect::kernel::UserFilter;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
@@ -253,9 +254,7 @@ pub struct SlicesCollector {
     losses: Losses,
     skipped: u64,
     dropped: u64,
-    predicate: Option<FilterExpr>,
-    filtered_in: u64,
-    filtered_out: u64,
+    predicate: UserFilter,
     slices: u64,
 }
 
@@ -269,9 +268,7 @@ impl SlicesCollector {
             losses: Losses::default(),
             skipped: 0,
             dropped: 0,
-            predicate,
-            filtered_in: 0,
-            filtered_out: 0,
+            predicate: UserFilter::new(predicate, "slices"),
             slices: 0,
         }
     }
@@ -317,12 +314,8 @@ impl SlicesCollector {
             if let Some(ppid) = self.parents.of(slice.pid) {
                 event.attrs.push(Attr::uint("ppid", u64::from(ppid)));
             }
-            if let Some(predicate) = &self.predicate {
-                if !crate::filter::matches(predicate, &event) {
-                    self.filtered_out += 1;
-                    continue;
-                }
-                self.filtered_in += 1;
+            if !self.predicate.keep(&event, 1) {
+                continue;
             }
             self.slices += 1;
             index += 1;
@@ -430,13 +423,7 @@ impl Collector for SlicesCollector {
 
     fn notes(&self) -> Vec<String> {
         let mut notes = Vec::new();
-        if self.filtered_in > 0 || self.filtered_out > 0 {
-            notes.push(format!(
-                "the filter kept {} slices and removed {}; it ran here, over the drained \
-                 switches, not in the kernel",
-                self.filtered_in, self.filtered_out,
-            ));
-        }
+        notes.extend(self.predicate.note());
         notes
     }
 }

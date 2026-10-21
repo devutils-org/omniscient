@@ -13,6 +13,7 @@
 use std::time::Duration as StdDuration;
 
 use crate::bpf::{Wakeup, WakeupProgram, Whose};
+use crate::collect::kernel::UserFilter;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
@@ -53,7 +54,7 @@ impl Prepared for Prepare {
         // target keeps the ones it takes part in, at either end.
         let filter = super::whose(target, "wakeups are kept by the task at either end")?;
         let mut collector = WakeupCollector::new(filter);
-        collector.predicate = self.filter;
+        collector.predicate = UserFilter::new(self.filter, "wakeups");
         Ok(Box::new(collector))
     }
 }
@@ -108,11 +109,9 @@ pub struct WakeupCollector {
     /// Read from the program's counter at `stop`, when the map is still open.
     dropped: u64,
     /// The request's predicate, and what it kept and removed.
-    predicate: Option<FilterExpr>,
+    predicate: UserFilter,
     /// Each woken process's parent, for `ppid`.
     parents: super::Parents,
-    filtered_in: u64,
-    filtered_out: u64,
     /// Wakeups issued from an interrupt, whose waker is the interrupt.
     from_interrupts: u64,
     /// Set once the program is loaded on a kernel whose preempt count it could
@@ -131,10 +130,8 @@ impl WakeupCollector {
             losses: Losses::default(),
             skipped: 0,
             dropped: 0,
-            predicate: None,
+            predicate: UserFilter::new(None, "wakeups"),
             parents: super::Parents::default(),
-            filtered_in: 0,
-            filtered_out: 0,
             from_interrupts: 0,
             interrupts_blind: false,
             interrupts_unnamed: None,
@@ -147,7 +144,7 @@ impl WakeupCollector {
         };
         let mut index = seq;
         let mut undecoded = 0;
-        let predicate = self.predicate.as_ref();
+        let predicate = self.predicate.expression();
         let parents = &mut self.parents;
         let (mut kept, mut removed, mut from_interrupts) = (0u64, 0u64, 0u64);
         program.drain(
@@ -183,8 +180,7 @@ impl WakeupCollector {
             },
             &mut undecoded,
         );
-        self.filtered_in += kept;
-        self.filtered_out += removed;
+        self.predicate.tally(kept, removed);
         self.from_interrupts += from_interrupts;
         if undecoded > 0 {
             self.losses.undecoded += undecoded;
@@ -302,13 +298,7 @@ impl Collector for WakeupCollector {
                  interrupt a cpu is in were not loaded ({reason})"
             ));
         }
-        if self.filtered_in > 0 || self.filtered_out > 0 {
-            notes.push(format!(
-                "the filter kept {} wakeups and removed {}; it ran here, over the drained \
-                 records, not in the kernel",
-                self.filtered_in, self.filtered_out,
-            ));
-        }
+        notes.extend(self.predicate.note());
         notes
     }
 }

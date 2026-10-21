@@ -23,6 +23,7 @@ use std::time::Duration as StdDuration;
 
 use crate::bpf::{IrqDrops, IrqProgram, IrqRun, KIND_SOFT};
 use crate::clock::monotonic_ns;
+use crate::collect::kernel::UserFilter;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::emit::WEIGHT_ATTR;
 use crate::event::{Attr, CollectorId, Event, KeyValue};
@@ -89,9 +90,7 @@ pub struct IrqCollector {
     run_opened_ns: u64,
     /// The totals a `count` run accumulates, by the triple that keys a series.
     counted: BTreeMap<(u32, u32, u32, u32), IrqRun>,
-    predicate: Option<FilterExpr>,
-    filtered_out: u64,
-    filtered_in: u64,
+    predicate: UserFilter,
     /// Handler runs this run declined to report because their cpu was not the
     /// one asked about. Not a loss: they were measured and set aside.
     off_target: u64,
@@ -110,9 +109,7 @@ impl IrqCollector {
             window_opened_ns: 0,
             run_opened_ns: 0,
             counted: BTreeMap::new(),
-            predicate,
-            filtered_out: 0,
-            filtered_in: 0,
+            predicate: UserFilter::new(predicate, "handler runs"),
             off_target: 0,
         }
     }
@@ -193,12 +190,14 @@ impl IrqCollector {
                 if counting { run_window_ns } else { window_ns },
                 seq + index as u64,
             );
-            if let Some(predicate) = &self.predicate {
-                if !matches_half(predicate, &event, row.kind) {
-                    self.filtered_out += row.count;
-                    continue;
-                }
-                self.filtered_in += row.count;
+            let kept = self
+                .predicate
+                .expression()
+                .is_none_or(|predicate| matches_half(predicate, &event, row.kind));
+            self.predicate
+                .tally(u64::from(kept) * row.count, u64::from(!kept) * row.count);
+            if !kept {
+                continue;
             }
             if counting {
                 // The map is still drained -- leaving it to fill would lose
@@ -405,13 +404,7 @@ impl Collector for IrqCollector {
                 self.off_target
             ));
         }
-        if self.filtered_out > 0 || self.filtered_in > 0 {
-            notes.push(format!(
-                "the filter kept {} handler runs and removed {}; it is applied to drained rows \
-                 rather than in the program, so the cost of the ones it removed was still paid",
-                self.filtered_in, self.filtered_out
-            ));
-        }
+        notes.extend(self.predicate.note());
         if self.counting() {
             notes.push(
                 "`count` reports one total per (cpu, irq, bucket) over the whole window, so \

@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 use std::time::Duration as StdDuration;
 
 use crate::bpf::{Retransmit, RetransmitProgram};
+use crate::collect::kernel::UserFilter;
 use crate::collect::{not_built, Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
@@ -104,9 +105,7 @@ pub struct RetransmitCollector {
     without_cookie: u64,
     /// Whether this kernel's tracepoint says what the send returned.
     has_error: bool,
-    predicate: Option<FilterExpr>,
-    filtered_in: u64,
-    filtered_out: u64,
+    predicate: UserFilter,
 }
 
 /// One series' retransmissions over a counted window.
@@ -127,9 +126,7 @@ impl RetransmitCollector {
             seen: 0,
             without_cookie: 0,
             has_error: true,
-            predicate,
-            filtered_in: 0,
-            filtered_out: 0,
+            predicate: UserFilter::new(predicate, "retransmissions"),
         }
     }
 
@@ -168,12 +165,8 @@ impl RetransmitCollector {
         let mut index = 0;
         for again in batch {
             let candidate = self.event(&again, 1, seq + index);
-            if let Some(predicate) = &self.predicate {
-                if !crate::filter::matches(predicate, &candidate) {
-                    self.filtered_out += 1;
-                    continue;
-                }
-                self.filtered_in += 1;
+            if !self.predicate.keep(&candidate, 1) {
+                continue;
             }
             self.seen += 1;
             if again.cookie == 0 {
@@ -314,13 +307,7 @@ impl Collector for RetransmitCollector {
                 self.without_cookie, self.seen,
             ));
         }
-        if self.filtered_out > 0 || self.filtered_in > 0 {
-            notes.push(format!(
-                "the filter kept {} retransmissions and removed {}; it ran here, over the \
-                 drained records, not in the kernel",
-                self.filtered_in, self.filtered_out,
-            ));
-        }
+        notes.extend(self.predicate.note());
         notes
     }
 }

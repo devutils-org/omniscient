@@ -28,6 +28,7 @@ use std::time::Duration as StdDuration;
 
 use crate::bpf::{GpuJob, GpuJobDrops, GpuJobProgram};
 use crate::clock::monotonic_ns;
+use crate::collect::kernel::UserFilter;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
@@ -83,9 +84,7 @@ pub struct JobCollector {
     notes: Vec<String>,
     dropped: GpuJobDrops,
     window_opened_ns: u64,
-    predicate: Option<FilterExpr>,
-    filtered_out: u64,
-    filtered_in: u64,
+    predicate: UserFilter,
 }
 
 impl JobCollector {
@@ -97,9 +96,7 @@ impl JobCollector {
             notes: Vec::new(),
             dropped: GpuJobDrops::default(),
             window_opened_ns: 0,
-            predicate,
-            filtered_out: 0,
-            filtered_in: 0,
+            predicate: UserFilter::new(predicate, "jobs"),
         }
     }
 
@@ -150,12 +147,8 @@ impl JobCollector {
                 collector_id: CollectorId::unstamped(),
                 seq: seq + index as u64,
             };
-            if let Some(predicate) = &self.predicate {
-                if !crate::filter::matches(predicate, &event) {
-                    self.filtered_out += 1;
-                    continue;
-                }
-                self.filtered_in += 1;
+            if !self.predicate.keep(&event, 1) {
+                continue;
             }
             events.push(event);
         }
@@ -297,13 +290,7 @@ impl Collector for JobCollector {
              and this build's eBPF layer cannot read one"
                 .to_owned(),
         );
-        if self.filtered_out > 0 || self.filtered_in > 0 {
-            notes.push(format!(
-                "the filter kept {} jobs and removed {}; it is applied to drained rows rather \
-                 than in the program, so the cost of the ones it removed was still paid",
-                self.filtered_in, self.filtered_out
-            ));
-        }
+        notes.extend(self.predicate.note());
         notes
     }
 }

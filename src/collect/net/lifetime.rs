@@ -28,6 +28,7 @@
 use std::time::Duration as StdDuration;
 
 use crate::bpf::{TcpLifetime, TcpLifetimeProgram};
+use crate::collect::kernel::UserFilter;
 use crate::collect::{not_built, Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
@@ -104,9 +105,7 @@ pub struct LifetimeCollector {
     without_inode: u64,
     /// Connections still established when the run ended.
     still_open: usize,
-    predicate: Option<FilterExpr>,
-    filtered_in: u64,
-    filtered_out: u64,
+    predicate: UserFilter,
     /// A process target: the tree whose connections are kept.
     tree: Option<Tree>,
     /// A thread target, by its kernel id.
@@ -200,9 +199,7 @@ impl LifetimeCollector {
             without_cookie: 0,
             without_inode: 0,
             still_open: 0,
-            predicate,
-            filtered_in: 0,
-            filtered_out: 0,
+            predicate: UserFilter::new(predicate, "connections"),
             tree: None,
             thread: None,
             outside: 0,
@@ -248,12 +245,8 @@ impl LifetimeCollector {
                 continue;
             }
             let candidate = self.event(&closed, seq + index);
-            if let Some(predicate) = &self.predicate {
-                if !crate::filter::matches(predicate, &candidate) {
-                    self.filtered_out += 1;
-                    continue;
-                }
-                self.filtered_in += 1;
+            if !self.predicate.keep(&candidate, 1) {
+                continue;
             }
             self.closed += 1;
             if closed.cookie == 0 {
@@ -510,13 +503,7 @@ impl Collector for LifetimeCollector {
                 },
             ));
         }
-        if self.filtered_out > 0 || self.filtered_in > 0 {
-            notes.push(format!(
-                "the filter kept {} connections and removed {}; it ran here, over the drained \
-                 records, not in the kernel",
-                self.filtered_in, self.filtered_out,
-            ));
-        }
+        notes.extend(self.predicate.note());
         notes
     }
 }

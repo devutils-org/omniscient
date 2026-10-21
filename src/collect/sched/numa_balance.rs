@@ -25,6 +25,7 @@ use std::time::Duration as StdDuration;
 
 use crate::bpf::{NumaDrops, NumaProgram, NumaStick};
 use crate::clock::monotonic_ns;
+use crate::collect::kernel::UserFilter;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
@@ -149,9 +150,7 @@ pub struct NumaCollector {
     window_opened_ns: u64,
     run_opened_ns: u64,
     counted: BTreeMap<(u32, u32, u32), NumaStick>,
-    predicate: Option<FilterExpr>,
-    filtered_out: u64,
-    filtered_in: u64,
+    predicate: UserFilter,
 }
 
 impl NumaCollector {
@@ -166,9 +165,7 @@ impl NumaCollector {
             window_opened_ns: 0,
             run_opened_ns: 0,
             counted: BTreeMap::new(),
-            predicate,
-            filtered_out: 0,
-            filtered_in: 0,
+            predicate: UserFilter::new(predicate, "decisions"),
         }
     }
 
@@ -225,12 +222,8 @@ impl NumaCollector {
                 if counting { run_window_ns } else { window_ns },
                 seq + index as u64,
             );
-            if let Some(predicate) = &self.predicate {
-                if !crate::filter::matches(predicate, &event) {
-                    self.filtered_out += row.count;
-                    continue;
-                }
-                self.filtered_in += row.count;
+            if !self.predicate.keep(&event, row.count) {
+                continue;
             }
             if counting {
                 self.counted
@@ -379,13 +372,7 @@ impl Collector for NumaCollector {
                 self.nodes.nodes().max(1)
             ));
         }
-        if self.filtered_out > 0 || self.filtered_in > 0 {
-            notes.push(format!(
-                "the filter kept {} decisions and removed {}; it is applied to drained rows \
-                 rather than in the program, so the cost of the ones it removed was still paid",
-                self.filtered_in, self.filtered_out
-            ));
-        }
+        notes.extend(self.predicate.note());
         if self.counting() {
             notes.push(
                 "`count` reports one total per (task, source, destination) over the whole \

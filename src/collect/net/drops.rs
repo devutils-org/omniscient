@@ -25,6 +25,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration as StdDuration;
 
 use crate::bpf::{DropProgram, PacketDrop};
+use crate::collect::kernel::UserFilter;
 use crate::collect::{not_built, Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
@@ -95,9 +96,7 @@ pub struct DropCollector {
     /// Whether this kernel's tracepoint says which socket a received packet
     /// would have gone to.
     receive_socket: bool,
-    predicate: Option<FilterExpr>,
-    filtered_in: u64,
-    filtered_out: u64,
+    predicate: UserFilter,
     /// Stacks asked: each drop carries its kernel stack's id, and `function`,
     /// the symbol `location` is in.
     wants_stacks: bool,
@@ -130,9 +129,7 @@ impl DropCollector {
             without_socket: 0,
             seen: 0,
             receive_socket: true,
-            predicate,
-            filtered_in: 0,
-            filtered_out: 0,
+            predicate: UserFilter::new(predicate, "drops"),
             wants_stacks: false,
             symbolizer: None,
             stacks: BTreeMap::new(),
@@ -238,12 +235,8 @@ impl DropCollector {
         let mut index = 0;
         for dropped in batch {
             let mut candidate = self.event(&dropped, 1, u64::from(dropped.len), seq + index);
-            if let Some(predicate) = &self.predicate {
-                if !crate::filter::matches(predicate, &candidate) {
-                    self.filtered_out += 1;
-                    continue;
-                }
-                self.filtered_in += 1;
+            if !self.predicate.keep(&candidate, 1) {
+                continue;
             }
             self.seen += 1;
             if dropped.protocol().is_none() {
@@ -483,13 +476,7 @@ impl Collector for DropCollector {
              read from its BTF, and `reason_code` the number beside it"
                 .to_owned(),
         );
-        if self.filtered_out > 0 || self.filtered_in > 0 {
-            notes.push(format!(
-                "the filter kept {} drops and removed {}; it ran here, over the drained records, \
-                 not in the kernel, so the removed ones were counted before they were dropped",
-                self.filtered_in, self.filtered_out,
-            ));
-        }
+        notes.extend(self.predicate.note());
         notes
     }
 }
