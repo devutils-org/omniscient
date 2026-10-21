@@ -14425,3 +14425,27 @@ L3 cache of its own (`distroproof up --pin-cache --jobs 4`, longest first):
 Alpine), Ubuntu 18.04's timeout; of the load-sensitive pairs, `runqlat` again
 on Rocky and `bpftrace/biolatency` on Alpine, while Fedora's `perfstat` pairs
 held. Debian 12 and 13, Arch and Gentoo pass all eleven checks.
+
+Taken up the same day; every failure above was the harness's, omn counting
+right each time:
+
+- `tcplife-pid`: bcc's tcplife attaches in 1.7 to 2.7 s, after the 1.5 s the
+  workload waited (Ubuntu 24.04); Rocky's sudo `secure_path` leaves out
+  /usr/local/bin, where the witnesses are linked; Alpine's BusyBox `timeout`
+  refuses `--preserve-status`, so tcplife never started; and an empty output
+  read as zero sessions. On Ubuntu 18.04 the runner waited for a pipe that
+  tcplife, root under sudo, kept open: 42 minutes. Fixed in 30510e9.
+- `vfsstat-reads`: omn attaches its twelve fentry programs in about 1.7 s of
+  wall time on 6.8, so reads let go at 1 s fell before its window (Ubuntu
+  24.04); on Fedora, the 31000 reads of bcc compiling vfsstat were in omn's
+  window and not in vfsstat's. vfsstat now starts first (`omn_after_ms`).
+- `slabtop-cache-size`: procps-ng 3.3's slabtop prints 16 of 120 caches, a
+  screen's worth, even with `-o`; the pair skips it as incomplete. Fixed in
+  bac3b62.
+
+Rerun on all nine, four pinned VMs, 23 minutes: Debian 12 and 13, Ubuntu 18.04
+and 24.04, Arch, Alpine and Gentoo pass all eleven checks. Fedora missed
+`cpu.cache_misses` (median of five, -10.2 % against 10 %) and Rocky
+`bpftrace/biolatency` (median of three, two log2 buckets against one): the
+load-sensitive pairs, already compared as medians, which fail on a different
+target each run. Left as they are: a wider band would hide what they measure.
