@@ -1299,7 +1299,7 @@ impl InsideMeter {
 /// spent waiting for a core -- which on a loaded machine is what the monotonic
 /// clock mostly measured (the flaky tally, #12: 12.3 ms of "weighing" in a
 /// 605 ms run).
-fn thread_cpu_ns() -> u64 {
+pub(crate) fn thread_cpu_ns() -> u64 {
     let mut time = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
@@ -1307,6 +1307,12 @@ fn thread_cpu_ns() -> u64 {
     // SAFETY: `clock_gettime` writes a `timespec` this function owns.
     unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) };
     (time.tv_sec as u64) * 1_000_000_000 + (time.tv_nsec as u64)
+}
+
+/// This process's cpu, user and system, as `getrusage` gives it: the account
+/// every collection's cost is read from.
+pub(crate) fn process_cpu_ns() -> u64 {
+    rusage_ns(libc::RUSAGE_SELF)
 }
 
 /// User plus system cpu time of one `getrusage` account, in nanoseconds.

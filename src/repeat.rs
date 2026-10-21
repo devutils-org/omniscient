@@ -43,11 +43,11 @@ pub struct Spread {
 pub struct Repeated<'a> {
     pub repeat: u32,
     pub spread: &'a [Spread],
-    pub runs: &'a [omn::encode::RunOutput],
+    pub runs: &'a [crate::encode::RunOutput],
 }
 
 /// Why a repetition cannot mean anything here, if it cannot.
-pub fn refusal(session: &omn::request::Session, repeat: u32) -> Option<String> {
+pub fn refusal(session: &crate::request::Session, repeat: u32) -> Option<String> {
     if repeat == 0 {
         return Some("-r 0 runs nothing: ask for one run or more".to_owned());
     }
@@ -61,7 +61,7 @@ pub fn refusal(session: &omn::request::Session, repeat: u32) -> Option<String> {
     let summarized = session
         .requests
         .iter()
-        .any(|request| request.emit.contains(&omn::request::Emit::Summary));
+        .any(|request| request.emit.contains(&crate::request::Emit::Summary));
     (repeat > 1 && !summarized).then(|| {
         "-r reports each summary value's mean and spread across the runs, and no request asks \
          for a summary: add `-e summary`"
@@ -76,7 +76,7 @@ pub fn refusal(session: &omn::request::Session, repeat: u32) -> Option<String> {
 /// pid is replaced by its rank among the run's task keys -- `task:#1` is the
 /// lowest pid, the program itself when it started the others -- and the
 /// runs' series line up.
-pub fn spread(runs: &[omn::encode::RunOutput], launched: &[String]) -> Vec<Spread> {
+pub fn spread(runs: &[crate::encode::RunOutput], launched: &[String]) -> Vec<Spread> {
     // (label, source, key, field) -> values, in first-seen order.
     let mut seen: Vec<(Series, Vec<f64>)> = Vec::new();
     for run in runs {
@@ -199,7 +199,7 @@ pub fn text(repeat: u32, spread: &[Spread], lossy: &[usize]) -> String {
 /// the runs, and a run that dropped events feeds its values into it like any
 /// other, so each run's account is said where the run is, not only in the
 /// document or under `-o`.
-pub fn losses(run: &omn::encode::RunOutput) -> String {
+pub fn losses(run: &crate::encode::RunOutput) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     for results in &run.results {
@@ -239,7 +239,7 @@ pub fn losses(run: &omn::encode::RunOutput) -> String {
 /// The runs, numbered from 1, in which some request lost something: the line
 /// the spread ends with when there are any, so a mean that has a lossy run
 /// in it does not read as clean.
-pub fn lossy(runs: &[omn::encode::RunOutput]) -> Vec<usize> {
+pub fn lossy(runs: &[crate::encode::RunOutput]) -> Vec<usize> {
     runs.iter()
         .enumerate()
         .filter(|(_, run)| run.results.iter().any(|results| !results.losses.is_clean()))
@@ -268,7 +268,7 @@ fn number(value: f64) -> String {
 mod tests {
     use super::*;
 
-    fn run(mean: f64) -> omn::encode::RunOutput {
+    fn run(mean: f64) -> crate::encode::RunOutput {
         serde_json::from_value(serde_json::json!({
             "results": [{
                 "label": "cpu.instructions",
