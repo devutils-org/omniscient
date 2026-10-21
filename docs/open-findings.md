@@ -14379,3 +14379,11 @@ their first pass over the distributions; the question above is not Gentoo's
 alone. The same guest also misses `bpftrace/biolatency` by one bucket more
 than allowed (median 32768 against 16000 us, log2 buckets 15 against 13);
 one run, not yet repeated.
+
+Taken up the same day: a witness whose stderr names a failed compile, an
+undefined symbol or a library that does not load now skips its pair
+(`BROKEN`, tests/reference/runner.rs). Rerun with it, `chain-debian-13`
+(72 held, 59 skipped) and `chain-gentoo` (46 held, 85 skipped) pass all
+eleven checks with no pair failed; `vfsstat`, `tcplife` and Gentoo's
+bpftrace scripts skip as not running. `bpftrace/biolatency` held on Debian 13
+this time.
