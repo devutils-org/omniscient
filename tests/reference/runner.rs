@@ -1172,10 +1172,49 @@ fn judge_tool(pair: &Pair, side: &Side) -> Option<Outcome> {
             pair.tool
         )));
     }
+    // A witness that could not run measured nothing, whatever its exit
+    // status says: bcc's Python tools print the failure and may still
+    // exit 0 once interrupted, and an empty output would then read as a
+    // count of zero against omn's.
+    if let Some(broken) = broken(pair, side) {
+        return Some(broken);
+    }
     if side.status.success() {
         return None;
     }
     refusal(pair, side)
+}
+
+/// What a witness says when it cannot run on this machine at all: its
+/// library does not load, or it cannot build its program for this kernel.
+/// Debian 13's bcc failing to compile, Gentoo's bcc built against another
+/// LLVM than the one installed (docs/open-findings.md, 2026-10-21).
+const BROKEN: &[&str] = &[
+    "Failed to compile BPF module",
+    "undefined symbol",
+    "symbol lookup error",
+    "error while loading shared libraries",
+];
+
+/// A skip quoting why the witness did not run, unless the workload fails on
+/// its own.
+fn broken(pair: &Pair, side: &Side) -> Option<Outcome> {
+    let lines: Vec<String> = side
+        .stderr
+        .lines()
+        .filter(|l| BROKEN.iter().any(|b| l.contains(b)))
+        .map(|l| l.trim().to_string())
+        .take(8)
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    Some(workload_fails_alone(pair).unwrap_or_else(|| {
+        Outcome::Skip(
+            format!("`{}` does not run on this machine", pair.tool),
+            lines,
+        )
+    }))
 }
 
 fn tail(text: &str, n: usize) -> Vec<String> {
@@ -2368,6 +2407,29 @@ compare: {omn: a, omn_jq: ".a", tolerance: {abs: 0, side: above, band: 2}, why: 
             !matches!(run_pair(&p, &parsers(), Path::new(SH)), Outcome::Skip(..)),
             "a general phrase on stdout is no refusal"
         );
+    }
+
+    /// A witness that cannot run skips with its reason, whatever its exit
+    /// status, rather than reading as a measurement of nothing.
+    #[test]
+    fn a_witness_that_cannot_run_skips() {
+        let mut p = pair(BASE);
+        for (stderr, status) in [
+            ("Exception: Failed to compile BPF module <text>", 1),
+            (
+                "OSError: /usr/lib64/libbcc.so.0: undefined symbol: _ZN4llvm",
+                0,
+            ),
+        ] {
+            p.reference.command[2] = format!("echo '{stderr}' >&2; exit {status}");
+            match run_pair(&p, &parsers(), Path::new(SH)) {
+                Outcome::Skip(reason, quoted) => {
+                    assert!(reason.contains("does not run on this machine"), "{reason}");
+                    assert_eq!(quoted, [stderr]);
+                }
+                other => panic!("{stderr}: {other:?}"),
+            }
+        }
     }
 
     /// `alongside`: `attach` with no `{pid}`, the workload optional.
