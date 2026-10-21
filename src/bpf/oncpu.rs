@@ -274,7 +274,7 @@ impl OnCpuProgram {
     /// Runs the kernel skipped because this program was already running on
     /// that cpu.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::attach::fentry::skipped([&self.program])
+        crate::bpf::program::skipped([&self.program])
             + self.descendants.as_ref().map_or(0, Descendants::skipped)
     }
 

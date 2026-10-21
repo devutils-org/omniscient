@@ -9,9 +9,9 @@
 //! the same loss accounting, and a different description of what a row's
 //! object is.
 
-use crate::bpf::attach::fentry::{self, Row};
-use crate::bpf::attach::net_socket::Receives;
-use crate::bpf::attach::net_socket::{family_and_port, SocketProgram, OP_RECV, OP_SEND};
+use crate::bpf::fentry::{self, Row};
+use crate::bpf::net_socket::Receives;
+use crate::bpf::net_socket::{family_and_port, SocketProgram, OP_RECV, OP_SEND};
 use crate::collect::io::histogram::{Describe, HistogramCollector, Rows, Source};
 use crate::collect::io::vfs::narrowing;
 use crate::collect::{Collector, Prepared};

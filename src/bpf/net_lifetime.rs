@@ -38,7 +38,7 @@ use super::ring::{ring_bytes, RingBuffer};
 use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
 
 /// The prototype this program is written against.
-const SIGNATURE: [&str; 3] = ["sock *", "int", "int"];
+pub(super) const SIGNATURE: [&str; 3] = ["sock *", "int", "int"];
 
 /// Arguments of `inet_sock_set_state`, as byte offsets into the context.
 const ARG_SOCK: i16 = 0;
@@ -564,7 +564,7 @@ impl TcpLifetimeProgram {
     /// Runs of these programs the kernel skipped because one was already
     /// running on that cpu; see `BlockProgram::skipped`, where it was measured.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::attach::fentry::skipped([&self.program])
+        crate::bpf::program::skipped([&self.program])
     }
 
     /// What the program could not record, as `(connections the map had no room

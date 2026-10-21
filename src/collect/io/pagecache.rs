@@ -36,7 +36,7 @@ use std::collections::BTreeMap;
 use std::time::Duration as StdDuration;
 
 use super::vfs::{narrowing, Mounts};
-use crate::bpf::attach::io_vfs;
+use crate::bpf::io_vfs;
 use crate::bpf::{PageCacheNarrowing, PageCacheProgram, PageCacheRow};
 use crate::clock::monotonic_ns;
 use crate::collect::{cannot_mean_anything, Collector, Losses, Prepared, SampleError};

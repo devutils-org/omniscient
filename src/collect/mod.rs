@@ -38,6 +38,7 @@ mod sched;
 mod task;
 
 /// The one pressure-stall reader, which `cpu`, `io` and `mem` all read through.
+pub mod kernel;
 pub mod poll;
 pub mod psi;
 

@@ -27,8 +27,8 @@ use super::proc_events::{publish, EventStream};
 
 /// `mark_victim(task_struct *, uid_t)` since 6.8; the uid was added then, and
 /// before it the tracepoint was handed the task alone.
-const SIGNATURE: [&str; 2] = ["task_struct *", "uid_t"];
-const SIGNATURE_WITHOUT_UID: [&str; 1] = ["task_struct *"];
+pub(super) const SIGNATURE: [&str; 2] = ["task_struct *", "uid_t"];
+pub(super) const SIGNATURE_WITHOUT_UID: [&str; 1] = ["task_struct *"];
 
 const COMM_BYTES: usize = 16;
 

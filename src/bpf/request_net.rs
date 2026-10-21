@@ -82,7 +82,7 @@
 //! drain record the collector joins to the request by its id.
 
 use super::*;
-use crate::bpf::attach::fentry::{self, Link, Side, GET_SOCKET_COOKIE};
+use crate::bpf::fentry::{self, Link, Side, GET_SOCKET_COOKIE};
 use crate::bpf::insn::{read_field, read_narrow, read_pointer};
 
 /// `S_NETWAIT` values: which of the socket's waits the thread is in.

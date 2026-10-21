@@ -39,7 +39,7 @@ const BPF_MAP_TYPE_LRU_HASH: u32 = 9;
 const MAX_RENAMES: u32 = 4096;
 
 /// `sched_process_exec(task_struct *, pid_t, linux_binprm *)`.
-const SIGNATURE: [&str; 3] = ["task_struct *", "pid_t", "linux_binprm *"];
+pub(super) const SIGNATURE: [&str; 3] = ["task_struct *", "pid_t", "linux_binprm *"];
 
 const COMM_BYTES: usize = 16;
 
@@ -115,7 +115,7 @@ impl Renames {
     /// that cpu: an exec whose new name this run did not record, so the rows
     /// of that task keep the name they were made with.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::attach::fentry::skipped([&self.program])
+        crate::bpf::program::skipped([&self.program])
     }
 
     /// Loads and attaches it, narrowed to the same tasks as the program it

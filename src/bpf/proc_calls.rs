@@ -26,8 +26,8 @@
 
 use std::os::fd::{AsRawFd, OwnedFd};
 
-use super::btf::Btf;
-use super::insn::{count_drop, helper, read_field, Insn, Program, Whose};
+use super::context::Syscall;
+use super::insn::{count_drop, helper, Insn, Program, Whose};
 use super::insn::{BPF_DW, BPF_W, R10};
 use super::map::{map_failure, Counters, Hash};
 use super::ring::{ring_bytes, RingBuffer};
@@ -38,9 +38,6 @@ use crate::bpf::program::load_raw_tracepoint as load;
 /// `bpf_probe_read_user_str(dst, size, unsafe_ptr)`, which `insn::helper`
 /// does not name.
 const PROBE_READ_USER_STR: i32 = 114;
-
-const ENTER_SIGNATURE: [&str; 2] = ["pt_regs *", "long int"];
-const EXIT_SIGNATURE: [&str; 2] = ["pt_regs *", "long int"];
 
 /// How many threads can be inside a syscall at once and still be timed.
 const MAX_PENDING: u32 = 16384;
@@ -176,67 +173,14 @@ pub struct CallsNarrowing {
     pub paths: [Option<PathCall>; PATH_CALLS],
 }
 
-/// Where the two programs find what they read: the raw tracepoints hand over
-/// `(pt_regs *, long)`, the classic ones a record whose offsets tracefs
-/// publishes.
-#[derive(Clone, Copy)]
-enum Context<'a> {
-    /// `sys_enter(regs, id)`, `sys_exit(regs, ret)`: the arguments are read
-    /// out of the saved registers, where BTF says each one is.
-    Raw(&'a Btf),
-    /// `raw_syscalls:sys_enter`'s `id` and `args[6]`, `sys_exit`'s `ret`, at
-    /// these offsets of the record.
-    Classic {
-        id_at: i16,
-        args_at: i16,
-        ret_at: i16,
-    },
-}
-
-impl Context<'_> {
-    fn nr_at(self) -> i16 {
-        match self {
-            Context::Raw(_) => 8,
-            Context::Classic { id_at, .. } => id_at,
-        }
-    }
-
-    fn ret_at(self) -> i16 {
-        match self {
-            Context::Raw(_) => 8,
-            Context::Classic { ret_at, .. } => ret_at,
-        }
-    }
-
-    /// Writes argument `index` of the call into eight bytes of stack.
-    fn read_argument(self, program: &mut Program, index: usize, into: i16) -> bool {
-        match self {
-            Context::Raw(btf) => {
-                let Ok(offset) = btf.syscall_argument(index) else {
-                    return false;
-                };
-                program.push(Insn::ldx(BPF_DW, 7, 6, 0));
-                read_field(program, into, 8, 7, offset);
-            }
-            Context::Classic { args_at, .. } => {
-                program.push(Insn::ldx(BPF_DW, 1, 6, args_at + 8 * index as i16));
-                program.push(Insn::stx(BPF_DW, R10, into, 1));
-            }
-        }
-        true
-    }
-}
-
 fn enter_instructions(
-    context: Context,
+    context: Syscall,
     narrowing: CallsNarrowing,
     followed: &Followed,
     pending_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
-    if let Context::Raw(btf) = context {
-        crate::bpf::program::prototype(btf, "sys_enter", &[&ENTER_SIGNATURE], "its arguments")?;
-    }
+    context.check("sys_enter", "its arguments")?;
     const LABELS: [(&str, &str); PATH_CALLS] = [
         ("path_0", "path_0_done"),
         ("path_1", "path_1_done"),
@@ -323,14 +267,12 @@ fn enter_instructions(
 }
 
 fn exit_instructions(
-    context: Context,
+    context: Syscall,
     pending_fd: i32,
     ring_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
-    if let Context::Raw(btf) = context {
-        crate::bpf::program::prototype(btf, "sys_exit", &[&EXIT_SIGNATURE], "its arguments")?;
-    }
+    context.check("sys_exit", "its arguments")?;
 
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
@@ -414,24 +356,6 @@ fn exit_instructions(
     Ok(instructions)
 }
 
-/// The classic tracepoints' offsets, from tracefs: `id` and `args` of
-/// `sys_enter`, `ret` of `sys_exit`.
-fn classic_context() -> Result<Context<'static>, String> {
-    let enter = super::attach::tracepoint_layout("raw_syscalls", "sys_enter")?;
-    let exit = super::attach::tracepoint_layout("raw_syscalls", "sys_exit")?;
-    let at = |layout: &super::attach::Layout, field: &str, tracepoint: &str| {
-        layout
-            .get(field)
-            .map(|field| field.offset)
-            .ok_or_else(|| format!("`raw_syscalls:{tracepoint}` has no `{field}` field"))
-    };
-    Ok(Context::Classic {
-        id_at: at(&enter, "id", "sys_enter")?,
-        args_at: at(&enter, "args", "sys_enter")?,
-        ret_at: at(&exit, "ret", "sys_exit")?,
-    })
-}
-
 /// The two attached programs, their pending map, their ring and their drops.
 pub struct CallsProgram {
     ring: RingBuffer,
@@ -503,7 +427,7 @@ impl CallsProgram {
         let (pending_fd, ring_fd, drops_fd) =
             (pending.as_raw_fd(), ring_map.as_raw_fd(), drops.as_raw_fd());
         let attached = if classic {
-            let context = classic_context()?;
+            let context = Syscall::classic()?;
             let enter = enter_instructions(context, narrowing, &followed, pending_fd, drops_fd)?;
             let exit = exit_instructions(context, pending_fd, ring_fd, drops_fd)?;
             // Entry first, for the reason `proc_syscall.rs` gives. The
@@ -528,13 +452,13 @@ impl CallsProgram {
         } else {
             let btf = super::kernel_btf()?;
             let enter = enter_instructions(
-                Context::Raw(btf),
+                Syscall::Raw(btf),
                 narrowing,
                 &followed,
                 pending_fd,
                 drops_fd,
             )?;
-            let exit = exit_instructions(Context::Raw(btf), pending_fd, ring_fd, drops_fd)?;
+            let exit = exit_instructions(Syscall::Raw(btf), pending_fd, ring_fd, drops_fd)?;
             let enter_program = load(&enter, "omn_call_enter")?;
             let exit_program = load(&exit, "omn_call_exit")?;
             // Entry first, for the reason `proc_syscall.rs` gives.
@@ -591,9 +515,9 @@ impl CallsProgram {
                     enter_program,
                     exit_program,
                     ..
-                } => crate::bpf::attach::fentry::skipped([enter_program, exit_program]),
+                } => crate::bpf::program::skipped([enter_program, exit_program]),
                 Attached::Classic { enter, exit } => {
-                    crate::bpf::attach::fentry::skipped([enter.program(), exit.program()])
+                    crate::bpf::program::skipped([enter.program(), exit.program()])
                 }
             }
     }
@@ -607,6 +531,7 @@ impl CallsProgram {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bpf::btf::Btf;
 
     #[test]
     fn the_record_is_the_size_the_program_writes() {
@@ -692,7 +617,7 @@ mod tests {
             whose: narrowing.whose,
             descendants: Some(9),
         };
-        let enter = enter_instructions(Context::Raw(&btf), narrowing, &followed, 3, 4)
+        let enter = enter_instructions(Syscall::Raw(&btf), narrowing, &followed, 3, 4)
             .expect("the entry program");
         // The two execs read their path at the entry; the four opens do not.
         let reads = enter
@@ -700,10 +625,10 @@ mod tests {
             .filter(|insn| insn.code == 0x85 && insn.imm == PROBE_READ_USER_STR)
             .count();
         assert_eq!(reads, 2);
-        let exit = exit_instructions(Context::Raw(&btf), 3, 4, 5).expect("the exit program");
+        let exit = exit_instructions(Syscall::Raw(&btf), 3, 4, 5).expect("the exit program");
         // The classic road, at the offsets every kernel's `raw_syscalls`
         // format has published (`id` at 8, `args` at 16, `ret` at 16).
-        let classic = Context::Classic {
+        let classic = Syscall::Classic {
             id_at: 8,
             args_at: 16,
             ret_at: 16,

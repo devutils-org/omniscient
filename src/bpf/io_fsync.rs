@@ -41,8 +41,8 @@
 
 use std::os::fd::AsRawFd;
 
-use crate::bpf::attach::fentry::{self, Function, Link, Narrowing, Side, BPF_H, SKIP};
 use crate::bpf::btf::Btf;
+use crate::bpf::fentry::{self, Function, Link, Narrowing, Side, BPF_H, SKIP};
 use crate::bpf::insn::{
     self, count_drop, helper, read_field, read_narrow, read_pointer, Insn, Program, BPF_DW, BPF_W,
     R10,

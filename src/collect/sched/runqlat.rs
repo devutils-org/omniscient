@@ -29,6 +29,7 @@ use std::time::Duration as StdDuration;
 
 use crate::bpf::{Renames, RunqLat, RunqLatProgram, Whose};
 use crate::clock::monotonic_ns;
+use crate::collect::kernel::{drain_rows, Drains, KernelCounts, UserFilter};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
@@ -90,16 +91,13 @@ pub struct RunqLatCollector {
     off_target: u64,
     program: Option<RunqLatProgram>,
     losses: Losses,
-    /// The kernel's skipped runs of the program, cumulative, as last read.
-    skipped: u64,
+    /// The program's loss counters, as last read (`collect::kernel`).
+    counts: KernelCounts,
     notes: Vec<String>,
     /// Waits the kernel held no queue stamp for, as last read.
     unstamped: u64,
     /// The names tasks took at exec, applied to the rows of the window.
     renames: Option<Renames>,
-    /// The program's counters are cumulative, so what is new is the difference.
-    dropped_queued: u64,
-    dropped_rows: u64,
     /// The end of the last interval, which is the start of this one.
     window_opened_ns: u64,
     /// How many waits this run has bucketed, which is what the event count is
@@ -114,12 +112,10 @@ pub struct RunqLatCollector {
     wake_to_run_total_ns: u64,
     /// Each process's parent, for the rows' `ppid`.
     parents: super::Parents,
-    /// The request's predicate, applied to each row as it is drained.
-    predicate: Option<FilterExpr>,
-    /// Waits the predicate removed, and waits it kept. Counted in waits rather
-    /// than in rows, because a row is not one measurement here.
-    filtered_out: u64,
-    filtered_in: u64,
+    /// The request's predicate, applied to each row as it is drained, its
+    /// account kept in waits rather than in rows, because a row is not one
+    /// measurement here.
+    predicate: UserFilter,
 }
 
 impl RunqLatCollector {
@@ -130,21 +126,17 @@ impl RunqLatCollector {
             off_target: 0,
             program: None,
             losses: Losses::default(),
-            skipped: 0,
+            counts: KernelCounts::default(),
             notes: Vec::new(),
             unstamped: 0,
             renames: None,
-            dropped_queued: 0,
-            dropped_rows: 0,
             window_opened_ns: 0,
             waits: 0,
             rows: 0,
             wait_total_ns: 0,
             wake_to_run_total_ns: 0,
             parents: super::Parents::default(),
-            predicate,
-            filtered_out: 0,
-            filtered_in: 0,
+            predicate: UserFilter::new(predicate, "waits"),
         }
     }
 
@@ -154,16 +146,8 @@ impl RunqLatCollector {
         };
         let closed_ns = monotonic_ns();
         let window_ns = closed_ns.saturating_sub(self.window_opened_ns);
-        let (mut rows, drain_losses) = match program.drain() {
-            Ok(drained) => drained,
-            Err(reason) => {
-                // A drain that failed is a window whose rows are still in the
-                // map: they are not lost, they arrive with the next one. What
-                // is lost is knowing which window they belonged to.
-                self.losses.failed_reads += 1;
-                self.losses.note_times(reason, 1);
-                return;
-            }
+        let Some(mut rows) = drain_rows(program, &mut self.losses, "a run queue row") else {
+            return;
         };
         self.window_opened_ns = closed_ns;
         self.parents.absorb(program.parents());
@@ -176,16 +160,6 @@ impl RunqLatCollector {
                     row.comm.clone_from(name);
                 }
             }
-        }
-
-        if drain_losses.vanished > 0 {
-            self.losses.undecoded += drain_losses.vanished;
-            self.losses
-                .note("a run queue row was gone between being listed and being read");
-        }
-        if drain_losses.truncated {
-            self.losses
-                .note("the run queue histogram held more rows than one drain can walk");
         }
 
         for (index, row) in rows.into_iter().enumerate() {
@@ -225,12 +199,8 @@ impl RunqLatCollector {
             if let Some(ppid) = self.parents.of(row.tgid) {
                 event.attrs.push(Attr::uint("ppid", u64::from(ppid)));
             }
-            if let Some(predicate) = &self.predicate {
-                if !crate::filter::matches(predicate, &event) {
-                    self.filtered_out += row.count;
-                    continue;
-                }
-                self.filtered_in += row.count;
+            if !self.predicate.keep(&event, row.count) {
+                continue;
             }
             self.waits += row.count;
             self.rows += 1;
@@ -249,21 +219,7 @@ impl RunqLatCollector {
         let Some(program) = self.program.as_ref() else {
             return;
         };
-        // The kernel's own count of runs it skipped, which no counter of the
-        // program's can hold. It is the machine's -- the program runs on every
-        // occurrence and narrows to the target after -- so it is an upper
-        // bound on what the target lost, and the reason says so.
-        let skipped = program.skipped();
-        if skipped > self.skipped {
-            self.losses.dropped += skipped - self.skipped;
-            self.losses.note_times(
-                "the kernel skipped a run of this program because one was already running on \
-                 that cpu, so an occurrence was never seen; the count is the machine's, an \
-                 upper bound on the target's share, and every total here is a lower bound",
-                skipped - self.skipped,
-            );
-            self.skipped = skipped;
-        }
+        self.counts.absorb(&mut self.losses, program.lost());
         let unfollowed = program.unfollowed();
         if unfollowed > 0 {
             self.losses.note(format!(
@@ -275,25 +231,6 @@ impl RunqLatCollector {
             ));
         }
         self.unstamped = program.unstamped();
-        let (queued, rows) = program.dropped();
-        if queued > self.dropped_queued {
-            self.losses.dropped += queued - self.dropped_queued;
-            self.losses.note_times(
-                "more tasks were waiting for a cpu at once than the run queue map holds, so \
-                 their waits were never timed",
-                queued - self.dropped_queued,
-            );
-            self.dropped_queued = queued;
-        }
-        if rows > self.dropped_rows {
-            self.losses.dropped += rows - self.dropped_rows;
-            self.losses.note_times(
-                "more distinct (task, cpu, priority, bucket) rows appeared in one interval than \
-                 the histogram holds, so their waits were never counted",
-                rows - self.dropped_rows,
-            );
-            self.dropped_rows = rows;
-        }
     }
 }
 
@@ -480,17 +417,7 @@ impl Collector for RunqLatCollector {
                 self.off_target
             ));
         }
-        // What the predicate removed. The runner's own `Filtered` report is not
-        // produced for a backend credited with kernel-side filtering, so
-        // without this a request whose filter matched nothing looks exactly
-        // like a machine that never queued.
-        if self.filtered_out > 0 || self.filtered_in > 0 {
-            notes.push(format!(
-                "the filter kept {} waits and removed {}; it ran here, over the drained rows, \
-                 not in the kernel, so the removed ones were counted before they were dropped",
-                self.filtered_in, self.filtered_out,
-            ));
-        }
+        notes.extend(self.predicate.note());
         if self.waits > 0 {
             // Said in the run's own output rather than left in documentation,
             // because every other source in this tool makes one event one
@@ -686,9 +613,19 @@ mod tests {
     /// run that filtered has to say what the filter did.
     #[test]
     fn a_filter_that_removed_waits_says_how_many_it_removed() {
-        let mut collector = RunqLatCollector::new(Whose::Any, None);
-        collector.filtered_in = 4;
-        collector.filtered_out = 11;
+        let mut collector =
+            RunqLatCollector::new(Whose::Any, Some("comm == 'kept'".parse().unwrap()));
+        let row = |comm: &str| Event {
+            ts_ns: 1,
+            ts_err_ns: 0,
+            kind: "sched.runqlat".to_owned(),
+            keys: Vec::new(),
+            attrs: vec![Attr::text("comm", comm)],
+            collector_id: CollectorId::unstamped(),
+            seq: 0,
+        };
+        assert!(collector.predicate.keep(&row("kept"), 4));
+        assert!(!collector.predicate.keep(&row("other"), 11));
         let notes = collector.notes().join(" ");
         assert!(notes.contains("kept 4 waits and removed 11"), "{notes}");
         assert!(

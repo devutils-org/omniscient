@@ -45,6 +45,7 @@ use super::sched_common::{
     Descendants, Followed, KernelClock,
 };
 use crate::bpf::program::load_raw_tracepoint as load;
+use crate::collect::kernel::{Drained, Drains, Lost};
 
 /// Arguments of `sched_switch`, in the raw tracepoint's context.
 const ARG_PREV: i16 = 8;
@@ -57,8 +58,9 @@ const ARG_PREV_STATE: i16 = 24;
 /// carried one since it existed; both are checked before an instruction is
 /// built, because reading a `task_struct *` out of a slot that holds an integer
 /// does not fail, it produces a number.
-const SWITCH_SIGNATURE: [&str; 4] = ["bool", "task_struct *", "task_struct *", "unsigned int"];
-const WAKEUP_SIGNATURE: [&str; 1] = ["task_struct *"];
+pub(super) const SWITCH_SIGNATURE: [&str; 4] =
+    ["bool", "task_struct *", "task_struct *", "unsigned int"];
+pub(super) const WAKEUP_SIGNATURE: [&str; 1] = ["task_struct *"];
 
 /// `TASK_RUNNING`: the task left the cpu still runnable, which is preemption.
 /// Here that is not a case to drop -- it is a second way onto the run queue.
@@ -606,15 +608,6 @@ pub struct RunqLatProgram {
     _switch_link: OwnedFd,
 }
 
-/// What one drain found, beside the measurements.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct DrainLosses {
-    /// Rows the walk returned and the read no longer found.
-    pub vanished: u64,
-    /// The walk stopped at the map's capacity rather than at its end.
-    pub truncated: bool,
-}
-
 impl RunqLatProgram {
     /// Runs the kernel skipped because one of these programs was already
     /// running on that cpu -- an interrupt re-entering it, since a raw
@@ -622,7 +615,7 @@ impl RunqLatProgram {
     /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
     /// program's own counters can say an occurrence was never seen.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::attach::fentry::skipped([&self.wakeup_program, &self.switch_program])
+        crate::bpf::program::skipped([&self.wakeup_program, &self.switch_program])
             + self.descendants.as_ref().map_or(0, Descendants::skipped)
     }
 
@@ -724,33 +717,6 @@ impl RunqLatProgram {
         })
     }
 
-    /// Takes every row the kernel has accumulated since the last drain.
-    ///
-    /// Each row is a delta over the interval between two drains: the rows are
-    /// removed as they are read, so what comes back next time is what happened
-    /// in between.
-    pub fn drain(&self) -> Result<(Vec<RunqLat>, DrainLosses), String> {
-        let drained = self
-            .rows
-            .drain()
-            .map_err(|error| format!("cannot read the run queue histogram: {error}"))?;
-        let mut losses = DrainLosses {
-            vanished: drained.vanished,
-            truncated: drained.truncated,
-        };
-        let mut rows = Vec::with_capacity(drained.entries.len());
-        for (key, value) in &drained.entries {
-            match RunqLat::decode(key, value) {
-                Some(row) => rows.push(row),
-                // A record the wrong size means this reader and the program
-                // disagree about the layout, which is a bug rather than a
-                // machine condition -- but counting it beats reinterpreting it.
-                None => losses.vanished += 1,
-            }
-        }
-        Ok((rows, losses))
-    }
-
     /// How many tasks were on a run queue and had not been given a cpu.
     ///
     /// Their wait is real and is in no bucket, because it has no end yet. On a
@@ -759,11 +725,57 @@ impl RunqLatProgram {
     pub fn still_queued(&self) -> usize {
         self.queued.len().unwrap_or(0)
     }
+}
 
-    /// Waits the programs could not record because a map was full, as
-    /// `(queued, rows)`.
-    pub fn dropped(&self) -> (u64, u64) {
-        (self.drops.read(DROP_QUEUED), self.drops.read(DROP_ROWS))
+impl Drains for RunqLatProgram {
+    type Row = RunqLat;
+
+    /// Takes every row the kernel has accumulated since the last drain.
+    ///
+    /// Each row is a delta over the interval between two drains: the rows are
+    /// removed as they are read, so what comes back next time is what happened
+    /// in between.
+    fn drain(&self) -> Result<Drained<RunqLat>, String> {
+        let drained = self
+            .rows
+            .drain()
+            .map_err(|error| format!("cannot read the run queue histogram: {error}"))?;
+        let mut vanished = drained.vanished;
+        let mut rows = Vec::with_capacity(drained.entries.len());
+        for (key, value) in &drained.entries {
+            match RunqLat::decode(key, value) {
+                Some(row) => rows.push(row),
+                // A record the wrong size means this reader and the program
+                // disagree about the layout, which is a bug rather than a
+                // machine condition -- but counting it beats reinterpreting it.
+                None => vanished += 1,
+            }
+        }
+        Ok(Drained {
+            rows,
+            vanished,
+            truncated: drained.truncated,
+        })
+    }
+
+    /// The runs the kernel skipped, and the waits the programs could not
+    /// record because a map was full.
+    fn lost(&self) -> Vec<Lost> {
+        vec![
+            Lost::skipped_runs(self.skipped()),
+            Lost::dropped(
+                "queued",
+                self.drops.read(DROP_QUEUED),
+                "more tasks were waiting for a cpu at once than the run queue map holds, so \
+                 their waits were never timed",
+            ),
+            Lost::dropped(
+                "rows",
+                self.drops.read(DROP_ROWS),
+                "more distinct (task, cpu, priority, bucket) rows appeared in one interval than \
+                 the histogram holds, so their waits were never counted",
+            ),
+        ]
     }
 }
 

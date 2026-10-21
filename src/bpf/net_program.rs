@@ -35,7 +35,7 @@ use super::syscall;
 /// out of a `sock`, an `sk_buff`, a `Qdisc` or a `net_device` through it. The
 /// declaration covers the instruction streams in the `net_*.rs` files, which is
 /// what the kernel is asking about; `omn` itself stays under its own license.
-pub(super) const LICENSE: &str = "Dual MIT/GPL";
+pub(super) use crate::bpf::program::LICENSE;
 
 /// This family's own labels for the shared unrolled log2.
 ///

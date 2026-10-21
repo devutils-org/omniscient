@@ -37,6 +37,7 @@ use std::time::Duration as StdDuration;
 
 use crate::bpf::{pidns, BlockEvent, BlockProgram, Stage, Submitter};
 use crate::clock::monotonic_ns;
+use crate::collect::kernel::{KernelCounts, Lost, UserFilter};
 use crate::collect::{not_built, Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Direction, Event, KeyValue};
 use crate::filter::FilterExpr;
@@ -212,12 +213,8 @@ pub struct BlockCollector {
     submitter: Submitter,
     program: Option<BlockProgram>,
     losses: Losses,
-    /// The programs' counters are cumulative, so what is new is the difference.
-    dropped_inflight: u64,
-    dropped_ring: u64,
-    /// Completions the stamped close found no issue stamp on, as last read.
-    unstamped: u64,
-    skipped: u64,
+    /// The programs' loss counters, as last read (`collect::kernel`).
+    counts: KernelCounts,
     /// Requests seen closing that this run never saw open. Not a loss.
     unpaired: u64,
     /// `io.queue` only: requests the block layer issued directly, without ever
@@ -246,9 +243,7 @@ pub struct BlockCollector {
     counted_total: u64,
     /// When the run started, which is the timestamp a counted total carries.
     opened_ns: u64,
-    predicate: Option<FilterExpr>,
-    filtered_out: u64,
-    filtered_in: u64,
+    predicate: UserFilter,
     /// Events that carried a request identity.
     carried_request: u64,
     /// Why no event can carry one, when the kernel gave the programs no
@@ -284,10 +279,7 @@ impl BlockCollector {
             submitter,
             program: None,
             losses: Losses::default(),
-            dropped_inflight: 0,
-            dropped_ring: 0,
-            unstamped: 0,
-            skipped: 0,
+            counts: KernelCounts::default(),
             unpaired: 0,
             direct: 0,
             predating: 0,
@@ -299,9 +291,7 @@ impl BlockCollector {
             counted: 0,
             counted_total: 0,
             opened_ns: 0,
-            predicate,
-            filtered_out: 0,
-            filtered_in: 0,
+            predicate: UserFilter::new(predicate, "requests"),
             carried_request: 0,
             no_request_identity: None,
             status_is_errno: false,
@@ -409,12 +399,8 @@ impl BlockCollector {
                 self.own_scope += 1;
             }
             let event = self.event(&record, seq + index as u64);
-            if let Some(predicate) = &self.predicate {
-                if !crate::filter::matches(predicate, &event) {
-                    self.filtered_out += 1;
-                    continue;
-                }
-                self.filtered_in += 1;
+            if !self.predicate.keep(&event, 1) {
+                continue;
             }
             if self.mode == Mode::Count {
                 self.counted += 1;
@@ -542,43 +528,30 @@ impl BlockCollector {
             return;
         };
         let (inflight, ring) = program.dropped();
-        if inflight > self.dropped_inflight {
-            self.losses.dropped += inflight - self.dropped_inflight;
-            self.losses.note_times(
-                "more requests were in flight at once than the in-flight map holds, so they were \
-                 never timed",
-                inflight - self.dropped_inflight,
-            );
-            self.dropped_inflight = inflight;
-        }
-        if ring > self.dropped_ring {
-            self.losses.dropped += ring - self.dropped_ring;
-            self.losses
-                .note("the block ring was full: requests completed faster than they were drained");
-            self.dropped_ring = ring;
-        }
-        let unstamped = program.unstamped();
-        if unstamped > self.unstamped {
-            self.losses.dropped += unstamped - self.unstamped;
-            self.losses.note_times(
-                "a request completed with no issue stamp from the kernel -- a passthrough \
-                 command, or a queue that stopped keeping statistics -- so the histogram, which \
-                 reads that stamp, could not time it",
-                unstamped - self.unstamped,
-            );
-            self.unstamped = unstamped;
-        }
-        let skipped = program.skipped();
-        if skipped > self.skipped {
-            self.losses.dropped += skipped - self.skipped;
-            self.losses.note_times(
-                "the kernel skipped a run of these programs because an interrupt re-entered one \
-                 on its own cpu, so a request went unseen; the count is the machine's, and an \
-                 upper bound on this target's",
-                skipped - self.skipped,
-            );
-            self.skipped = skipped;
-        }
+        self.counts.absorb(
+            &mut self.losses,
+            [
+                Lost::dropped(
+                    "inflight",
+                    inflight,
+                    "more requests were in flight at once than the in-flight map holds, so they \
+                     were never timed",
+                ),
+                Lost::dropped(
+                    "ring",
+                    ring,
+                    "the block ring was full: requests completed faster than they were drained",
+                ),
+                Lost::dropped(
+                    "unstamped",
+                    program.unstamped(),
+                    "a request completed with no issue stamp from the kernel -- a passthrough \
+                     command, or a queue that stopped keeping statistics -- so the histogram, \
+                     which reads that stamp, could not time it",
+                ),
+                Lost::skipped_runs(program.skipped()),
+            ],
+        );
         let unfollowed = program.unfollowed();
         if unfollowed > 0 {
             self.losses.note(format!(
@@ -917,14 +890,7 @@ impl Collector for BlockCollector {
             ));
         }
 
-        if self.filtered_out > 0 || self.filtered_in > 0 {
-            notes.push(format!(
-                "the filter kept {} requests and removed {}; it ran here, over the drained \
-                 records, not in the kernel, so the removed ones were carried up before they \
-                 were dropped",
-                self.filtered_in, self.filtered_out,
-            ));
-        }
+        notes.extend(self.predicate.note());
 
         notes
     }

@@ -110,7 +110,7 @@ impl RunqLenProgram {
     /// Runs the kernel skipped because the program was already running on
     /// that cpu.
     pub fn skipped(&self) -> u64 {
-        super::attach::fentry::skipped([self.attachment.program()])
+        crate::bpf::program::skipped([self.attachment.program()])
     }
 }
 

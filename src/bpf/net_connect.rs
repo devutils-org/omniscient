@@ -34,8 +34,8 @@ use std::os::fd::{AsRawFd, OwnedFd};
 #[path = "net_accept.rs"]
 pub mod accept;
 
-use crate::bpf::attach::fentry::{self, Function, Link, Side, BPF_H, GET_SOCKET_COOKIE, SKIP};
 use crate::bpf::btf::Btf;
+use crate::bpf::fentry::{self, Function, Link, Side, BPF_H, GET_SOCKET_COOKIE, SKIP};
 use crate::bpf::insn::{
     self, count_drop, helper, push_current_filter, read_field, Insn, Program, Whose, BPF_DW, BPF_W,
     R10,
@@ -452,7 +452,7 @@ fn close_instructions(
 }
 
 /// `inet_sock_set_state(sock *, int, int)`: the road that needs no trampoline.
-const STATE_SIGNATURE: [&str; 3] = ["sock *", "int", "int"];
+pub(crate) const STATE_SIGNATURE: [&str; 3] = ["sock *", "int", "int"];
 
 /// The TCP states the road reads, the frozen numbering `/proc/net/tcp` prints.
 const TCP_ESTABLISHED: i32 = 1;
@@ -776,7 +776,7 @@ impl ConnectProgram {
     pub fn skipped(&self) -> u64 {
         self.state
             .as_ref()
-            .map_or(0, |(program, _)| fentry::skipped([program]))
+            .map_or(0, |(program, _)| crate::bpf::program::skipped([program]))
     }
 
     /// Handshakes stamped and not closed: still in `SYN_SENT`, or abandoned by

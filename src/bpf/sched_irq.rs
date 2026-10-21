@@ -47,9 +47,9 @@ const ARG_IRQ: i16 = 0;
 const ARG_ACTION: i16 = 8;
 
 /// The prototypes these programs are written against.
-const ENTRY_SIGNATURE: [&str; 2] = ["int", "irqaction *"];
-const EXIT_SIGNATURE: [&str; 3] = ["int", "irqaction *", "int"];
-const SOFT_SIGNATURE: [&str; 1] = ["unsigned int"];
+pub(super) const ENTRY_SIGNATURE: [&str; 2] = ["int", "irqaction *"];
+pub(super) const EXIT_SIGNATURE: [&str; 3] = ["int", "irqaction *", "int"];
+pub(super) const SOFT_SIGNATURE: [&str; 1] = ["unsigned int"];
 
 /// The two halves, as a row's `kind`.
 pub const KIND_HARD: u32 = 0;
@@ -509,7 +509,7 @@ impl IrqProgram {
     /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
     /// program's own counters can say an occurrence was never seen.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::attach::fentry::skipped(self.programs.iter())
+        crate::bpf::program::skipped(self.programs.iter())
     }
 
     pub fn load() -> Result<Self, String> {

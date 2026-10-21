@@ -46,7 +46,7 @@ use super::syscall::{self, BPF_MAP_TYPE_PERCPU_ARRAY};
 /// bare vector number since tracing existed, but the check costs nothing and
 /// the alternative to it is reading a vector number out of a slot that holds
 /// something else.
-const SIGNATURE: [&str; 1] = ["unsigned int"];
+pub(super) const SIGNATURE: [&str; 1] = ["unsigned int"];
 
 /// How many softirq vectors the kernel has. The per-cpu array is indexed by
 /// vector number, so it needs one slot for each; `NR_SOFTIRQS` has been ten
@@ -423,7 +423,7 @@ impl SoftIrqProgram {
     /// Runs of these programs the kernel skipped because one was already
     /// running on that cpu; see `BlockProgram::skipped`, where it was measured.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::attach::fentry::skipped([&self.entry_program, &self.exit_program])
+        crate::bpf::program::skipped([&self.entry_program, &self.exit_program])
     }
 
     /// Handler runs the histogram could not hold, which are lost.

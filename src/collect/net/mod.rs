@@ -167,7 +167,7 @@ pub fn factories() -> Vec<Factory> {
             Ok(Box::new(socket::Prepare {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
-                receives: crate::bpf::attach::net_socket::Receives::Generic,
+                receives: crate::bpf::net_socket::Receives::Generic,
             }))
         }),
         // The same, with the receives at the families' own functions, for a
@@ -176,7 +176,7 @@ pub fn factories() -> Vec<Factory> {
             Ok(Box::new(socket::Prepare {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
-                receives: crate::bpf::attach::net_socket::Receives::Families,
+                receives: crate::bpf::net_socket::Receives::Families,
             }))
         }),
         // A request the server declared, followed in the task serving it --

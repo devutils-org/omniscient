@@ -909,16 +909,6 @@ pub fn recursion_misses(program: &OwnedFd) -> Result<u64, String> {
     ))
 }
 
-/// Every run the kernel skipped across a set of programs, of any attach kind:
-/// a raw tracepoint's programs sit behind the same per-cpu guard and are
-/// counted in the same field.
-pub fn skipped<'a>(programs: impl IntoIterator<Item = &'a OwnedFd>) -> u64 {
-    programs
-        .into_iter()
-        .map(|program| recursion_misses(program).unwrap_or(0))
-        .sum()
-}
-
 /// Every run the kernel skipped across a set of links.
 pub fn misses(links: &[Link]) -> u64 {
     links.iter().map(Link::misses).sum()

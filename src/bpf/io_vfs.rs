@@ -60,10 +60,10 @@
 //! shape `src/bpf/runqlat.rs` worked out and `fentry::HistogramProgram` holds
 //! once for every source of this shape.
 
-use crate::bpf::attach::fentry::{
+use crate::bpf::btf::Btf;
+use crate::bpf::fentry::{
     self, HistogramProgram, HistogramSpec, Narrowing, Timed, BPF_H, FILL_DEV, FILL_OBJECT, SKIP,
 };
-use crate::bpf::btf::Btf;
 use crate::bpf::insn::{Insn, Program, BPF_DW, BPF_W, R10};
 
 /// What a row's `op` says the call was.

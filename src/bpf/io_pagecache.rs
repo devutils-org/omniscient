@@ -49,10 +49,10 @@ use super::DrainLosses;
 
 /// The two tracepoints, and the prototypes the programs read their slots by.
 const GET_PAGES: &str = "mm_filemap_get_pages";
-const GET_PAGES_SIGNATURE: [&str; 3] =
+pub(super) const GET_PAGES_SIGNATURE: [&str; 3] =
     ["address_space *", "long unsigned int", "long unsigned int"];
 const ADD: &str = "mm_filemap_add_to_page_cache";
-const ADD_SIGNATURE: [&str; 1] = ["folio *"];
+pub(super) const ADD_SIGNATURE: [&str; 1] = ["folio *"];
 
 /// How many distinct `(task, file)` rows one drain interval may hold.
 ///
@@ -745,7 +745,7 @@ impl PageCacheProgram {
     /// Runs the kernel skipped because one of these was already running on
     /// that cpu; see `BlockProgram::skipped`.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::attach::fentry::skipped(self.programs.iter())
+        crate::bpf::program::skipped(self.programs.iter())
             + self
                 .descendants
                 .as_ref()

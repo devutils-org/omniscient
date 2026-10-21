@@ -31,8 +31,8 @@ use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
 ///
 /// The third argument, the error the send returned, arrived recently. A kernel
 /// without it is served without it rather than refused.
-const WITH_ERROR: [&str; 3] = ["sock *", "sk_buff *", "int"];
-const WITHOUT_ERROR: [&str; 2] = ["sock *", "sk_buff *"];
+pub(super) const WITH_ERROR: [&str; 3] = ["sock *", "sk_buff *", "int"];
+pub(super) const WITHOUT_ERROR: [&str; 2] = ["sock *", "sk_buff *"];
 
 /// Arguments of `tcp_retransmit_skb`, as byte offsets into the context.
 const ARG_SOCK: i16 = 0;
@@ -295,7 +295,7 @@ impl RetransmitProgram {
     /// Runs of these programs the kernel skipped because one was already
     /// running on that cpu; see `BlockProgram::skipped`, where it was measured.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::attach::fentry::skipped([&self.program])
+        crate::bpf::program::skipped([&self.program])
     }
 
     /// Retransmissions the program could not publish because the ring was full.

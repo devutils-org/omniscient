@@ -49,11 +49,11 @@
 //! would name some other interface here. Functionally dependent on the socket
 //! until its route changes, so it costs no cardinality either.
 
-use crate::bpf::attach::fentry::{
+use crate::bpf::btf::Btf;
+use crate::bpf::fentry::{
     self, HistogramProgram, HistogramSpec, Narrowing, Timed, BPF_H, FILL_AUX, FILL_DEV,
     FILL_OBJECT, GET_SOCKET_COOKIE,
 };
-use crate::bpf::btf::Btf;
 use crate::bpf::insn::{read_narrow, read_pointer, Insn, Program, BPF_DW, BPF_W, R10};
 
 /// What a row's `op` says the call was.

@@ -9,7 +9,7 @@
 
 use std::time::Duration as StdDuration;
 
-use crate::bpf::attach::net_connect::{Connect, ConnectProgram, Outcome};
+use crate::bpf::net_connect::{Connect, ConnectProgram, Outcome};
 use crate::bpf::Whose;
 use crate::collect::io::vfs::narrowing;
 use crate::collect::{Collector, Losses, Prepared, SampleError};

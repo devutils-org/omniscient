@@ -51,25 +51,6 @@ use perf_event_open_sys as sys;
 use super::insn::Insn;
 use super::{syscall, Support};
 
-// The fifth attach kind, and the programs built on it.
-//
-// Declared here rather than beside the other programs in `bpf/mod.rs` because
-// that file belongs to no stream of the eighth wave and this one owns only
-// `attach.rs`, `fentry.rs` and the `io*`/`net*` programs. `#[path]` resolves
-// against this file's directory, so the files sit where they would anyway;
-// moving these lines into `mod.rs` is a request in `docs/open-findings.md`,
-// and costs nothing but the lines.
-#[path = "fentry.rs"]
-pub mod fentry;
-#[path = "io_fsync.rs"]
-pub mod io_fsync;
-#[path = "io_vfs.rs"]
-pub mod io_vfs;
-#[path = "net_connect.rs"]
-pub mod net_connect;
-#[path = "net_socket.rs"]
-pub mod net_socket;
-
 /// Where `tracefs` may be mounted, best first.
 const TRACEFS_ROOTS: [&str; 2] = ["/sys/kernel/tracing", "/sys/kernel/debug/tracing"];
 
@@ -886,7 +867,7 @@ mod ground_truth {
         // was the function here until a clang build inlined it into the
         // syscall and its out-of-line copy counted nothing (fentry's
         // `on_the_path`).
-        let Some(arch) = fentry::syscall_arch() else {
+        let Some(arch) = crate::bpf::fentry::syscall_arch() else {
             return;
         };
         let wrapper = format!("__{arch}_sys_read");

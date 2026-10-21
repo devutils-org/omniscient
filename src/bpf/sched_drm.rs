@@ -356,7 +356,7 @@ impl GpuJobProgram {
     /// Runs the kernel skipped because one of the two programs was already
     /// running on that cpu; see `WakeupProgram::skipped`.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::attach::fentry::skipped([self.run.program(), self.done_attachment.program()])
+        crate::bpf::program::skipped([self.run.program(), self.done_attachment.program()])
     }
 
     pub fn load() -> Result<Self, String> {

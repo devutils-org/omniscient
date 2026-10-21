@@ -36,13 +36,14 @@ use crate::bpf::program::LICENSE;
 
 /// The prototypes these programs are written against, as the kernel publishes
 /// them in its own BTF, with the tracepoint's leading data pointer dropped.
-const EXEC_SIGNATURE: [&str; 3] = ["task_struct *", "pid_t", "linux_binprm *"];
-const EXIT_SIGNATURE: [&str; 2] = ["task_struct *", "bool"];
+pub(super) const EXEC_SIGNATURE: [&str; 3] = ["task_struct *", "pid_t", "linux_binprm *"];
+pub(super) const EXIT_SIGNATURE: [&str; 2] = ["task_struct *", "bool"];
 /// `sched_process_exit` before it was handed whether the thread was its
 /// process's last (6.6 and the kernels before it). The program reads the same
 /// fact out of `task->signal->live` there; see [`exit_instructions`].
-const EXIT_SIGNATURE_WITHOUT_GROUP: [&str; 1] = ["task_struct *"];
-const SIGNAL_SIGNATURE: [&str; 5] = ["int", "kernel_siginfo *", "task_struct *", "int", "int"];
+pub(super) const EXIT_SIGNATURE_WITHOUT_GROUP: [&str; 1] = ["task_struct *"];
+pub(super) const SIGNAL_SIGNATURE: [&str; 5] =
+    ["int", "kernel_siginfo *", "task_struct *", "int", "int"];
 
 /// How much of a path a record carries.
 ///
@@ -458,21 +459,12 @@ fn exit_instructions(
     ring_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
-    let signature = btf.tracepoint_signature("sched_process_exit")?;
-    let passes_group_dead = if signature == EXIT_SIGNATURE {
-        true
-    } else if signature == EXIT_SIGNATURE_WITHOUT_GROUP {
-        false
-    } else {
-        return Err(format!(
-            "this kernel declares `sched_process_exit({})`, and this program is written for \
-             `sched_process_exit({})` or `sched_process_exit({})`: it reads its arguments out \
-             of fixed slots, and against another prototype those slots hold something else",
-            signature.join(", "),
-            EXIT_SIGNATURE.join(", "),
-            EXIT_SIGNATURE_WITHOUT_GROUP.join(", "),
-        ));
-    };
+    let passes_group_dead = crate::bpf::program::prototype(
+        btf,
+        "sched_process_exit",
+        &[&EXIT_SIGNATURE, &EXIT_SIGNATURE_WITHOUT_GROUP],
+        "its arguments",
+    )? == 0;
     let fields = TaskFields::locate(btf, whose)?;
     let pid_offset = btf.member_offset("task_struct", "pid")?;
     let tgid_offset = btf.member_offset("task_struct", "tgid")?;
@@ -668,7 +660,7 @@ impl EventStream {
     /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
     /// program's own counters can say an occurrence was never seen.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::attach::fentry::skipped([&self.program])
+        crate::bpf::program::skipped([&self.program])
     }
 
     /// Creates the two maps, builds the program with their descriptors, loads

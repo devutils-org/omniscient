@@ -475,8 +475,9 @@ pub struct RequestCounts {
 
 // ------------------------------------------------------------- the programs
 
-const SWITCH_SIGNATURE: [&str; 4] = ["bool", "task_struct *", "task_struct *", "unsigned int"];
-const WAKEUP_SIGNATURE: [&str; 1] = ["task_struct *"];
+pub(super) const SWITCH_SIGNATURE: [&str; 4] =
+    ["bool", "task_struct *", "task_struct *", "unsigned int"];
+pub(super) const WAKEUP_SIGNATURE: [&str; 1] = ["task_struct *"];
 const ARG_PREV_STATE: i16 = 24;
 const TASK_UNINTERRUPTIBLE: i32 = 2;
 
@@ -1179,7 +1180,7 @@ impl RequestProgram {
     /// Runs the kernel skipped, across all the programs: a switch this set
     /// never saw is a stretch that cannot be placed.
     pub fn skipped(&self) -> u64 {
-        super::attach::fentry::skipped(self.programs.iter())
+        crate::bpf::program::skipped(self.programs.iter())
             + self.net.as_ref().map_or(0, net::SocketPrograms::skipped)
     }
 

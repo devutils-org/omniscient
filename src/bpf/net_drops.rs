@@ -48,8 +48,8 @@ use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
 /// The fourth argument, the socket a receive-side drop belonged to, arrived in
 /// 6.9. A kernel without it is served without it rather than refused: the
 /// program falls back to `skb->sk`, which is set on the transmit side.
-const WITH_RX_SOCKET: [&str; 4] = ["sk_buff *", "void *", "skb_drop_reason", "sock *"];
-const WITHOUT_RX_SOCKET: [&str; 3] = ["sk_buff *", "void *", "skb_drop_reason"];
+pub(super) const WITH_RX_SOCKET: [&str; 4] = ["sk_buff *", "void *", "skb_drop_reason", "sock *"];
+pub(super) const WITHOUT_RX_SOCKET: [&str; 3] = ["sk_buff *", "void *", "skb_drop_reason"];
 
 /// Arguments of `kfree_skb`, as byte offsets into the raw tracepoint's context.
 const ARG_SKB: i16 = 0;
@@ -350,7 +350,7 @@ impl DropProgram {
     /// Runs of these programs the kernel skipped because one was already
     /// running on that cpu; see `BlockProgram::skipped`, where it was measured.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::attach::fentry::skipped([&self.program])
+        crate::bpf::program::skipped([&self.program])
     }
 
     /// Drops the program could not publish because the ring was full.

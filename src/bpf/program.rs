@@ -83,3 +83,14 @@ pub fn prototype(
             .join(" or "),
     ))
 }
+
+/// Every run the kernel skipped across a set of programs, of any attach kind:
+/// a program runs behind a per-cpu guard, and a run that finds it taken -- an
+/// interrupt re-entering it -- is counted in `bpf_prog_info.recursion_misses`
+/// and nowhere else.
+pub fn skipped<'a>(programs: impl IntoIterator<Item = &'a OwnedFd>) -> u64 {
+    programs
+        .into_iter()
+        .map(|program| super::fentry::recursion_misses(program).unwrap_or(0))
+        .sum()
+}

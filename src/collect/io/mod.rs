@@ -46,7 +46,7 @@ pub(crate) fn builds_histogram_in_kernel(request: &crate::request::Request) -> b
 use std::collections::BTreeMap;
 
 use super::Factory;
-use crate::bpf::attach::io_vfs::Layer;
+use crate::bpf::io_vfs::Layer;
 use block::Measure;
 use diskstats::Metric;
 

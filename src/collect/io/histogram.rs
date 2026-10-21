@@ -1,7 +1,7 @@
 //! The collector half of a kernel-built latency histogram.
 //!
 //! `io.syscall`, `io.fs` and `net.socket` are one program shape --
-//! `bpf::attach::fentry::HistogramProgram`, a timed pair counting into rows of
+//! `bpf::fentry::HistogramProgram`, a timed pair counting into rows of
 //! `(task, op, object, log2 bucket)` -- and so one collector shape: drain the
 //! rows on a tick, turn each into one event that stands for as many calls as it
 //! counted, and account for what the programs could not record. What differs
@@ -22,7 +22,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration as StdDuration;
 
-use crate::bpf::attach::fentry::{Drained, Row};
+use crate::bpf::fentry::{Drained, Row};
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Losses, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};

@@ -40,7 +40,7 @@ const ARG_DEST_CPU: i16 = 8;
 
 /// The prototype this program is written against, checked against the running
 /// kernel before a single instruction is built.
-const SIGNATURE: [&str; 2] = ["task_struct *", "int"];
+pub(super) const SIGNATURE: [&str; 2] = ["task_struct *", "int"];
 
 /// How many `(task, destination)` pairs one drain interval may hold.
 const MAX_ROWS: u32 = 16384;
@@ -238,7 +238,7 @@ impl MigrationProgram {
     /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
     /// program's own counters can say an occurrence was never seen.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::attach::fentry::skipped([&self.program])
+        crate::bpf::program::skipped([&self.program])
             + self.descendants.as_ref().map_or(0, Descendants::skipped)
     }
 

@@ -38,8 +38,8 @@ use super::net_program::{
 };
 
 /// The prototypes these programs are written against.
-const ENQUEUE_SIGNATURE: [&str; 3] = ["Qdisc *", "netdev_queue *", "sk_buff *"];
-const DEQUEUE_SIGNATURE: [&str; 4] = ["Qdisc *", "netdev_queue *", "int", "sk_buff *"];
+pub(super) const ENQUEUE_SIGNATURE: [&str; 3] = ["Qdisc *", "netdev_queue *", "sk_buff *"];
+pub(super) const DEQUEUE_SIGNATURE: [&str; 4] = ["Qdisc *", "netdev_queue *", "int", "sk_buff *"];
 
 /// Arguments, as byte offsets into each tracepoint's context.
 const ENQUEUE_ARG_SKB: i16 = 16;
@@ -478,7 +478,7 @@ impl QdiscProgram {
     /// Runs of these programs the kernel skipped because one was already
     /// running on that cpu; see `BlockProgram::skipped`, where it was measured.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::attach::fentry::skipped([&self.enqueue_program, &self.dequeue_program])
+        crate::bpf::program::skipped([&self.enqueue_program, &self.dequeue_program])
     }
 
     /// What the programs could not record, as `(packets the map had no room

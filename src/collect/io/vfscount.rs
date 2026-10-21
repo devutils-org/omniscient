@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use crate::bpf::attach::io_vfs::VfsCalls;
+use crate::bpf::io_vfs::VfsCalls;
 use crate::bpf::Whose;
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Losses, Prepared, SampleError};

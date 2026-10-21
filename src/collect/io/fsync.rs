@@ -11,9 +11,9 @@
 use std::time::Duration as StdDuration;
 
 use super::vfs::Mounts;
-use crate::bpf::attach::fentry::Narrowing;
-use crate::bpf::attach::io_fsync::{Fsync, FsyncProgram, Via};
-use crate::bpf::attach::io_vfs;
+use crate::bpf::fentry::Narrowing;
+use crate::bpf::io_fsync::{Fsync, FsyncProgram, Via};
+use crate::bpf::io_vfs;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;

@@ -46,8 +46,8 @@ const ARG_REGS: i16 = 0;
 const ARG_ID: i16 = 8;
 
 /// The prototypes these programs are written against.
-const ENTER_SIGNATURE: [&str; 2] = ["pt_regs *", "long int"];
-const EXIT_SIGNATURE: [&str; 2] = ["pt_regs *", "long int"];
+pub(super) const ENTER_SIGNATURE: [&str; 2] = ["pt_regs *", "long int"];
+pub(super) const EXIT_SIGNATURE: [&str; 2] = ["pt_regs *", "long int"];
 
 /// The `futex` syscall's number, which is per architecture and has no
 /// architecture-independent name anywhere the kernel publishes.
@@ -537,7 +537,7 @@ impl FutexProgram {
     /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
     /// program's own counters can say an occurrence was never seen.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::attach::fentry::skipped([&self.enter_program, &self.exit_program])
+        crate::bpf::program::skipped([&self.enter_program, &self.exit_program])
             + self.descendants.as_ref().map_or(0, Descendants::skipped)
     }
 

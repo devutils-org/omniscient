@@ -260,7 +260,7 @@ impl SwitchCountProgram {
     pub fn skipped(&self) -> u64 {
         match &self.0 {
             Loaded::Counting(counting) => {
-                crate::bpf::attach::fentry::skipped([&counting.program])
+                crate::bpf::program::skipped([&counting.program])
                     + counting
                         .descendants
                         .as_ref()
@@ -889,7 +889,7 @@ impl SwitchStreamProgram {
 
     /// Runs the kernel skipped; see `SwitchCountProgram::skipped`.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::attach::fentry::skipped([&self.program, &self.wakeup_program])
+        crate::bpf::program::skipped([&self.program, &self.wakeup_program])
             + self.descendants.as_ref().map_or(0, Descendants::skipped)
     }
 

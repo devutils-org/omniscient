@@ -348,8 +348,8 @@ const MAX_DESCENDANTS: u32 = 8192;
 const FOLLOW_KEY: i16 = -8;
 const FOLLOW_VALUE: i16 = -16;
 const FOLLOW_DROP_KEY: i16 = -24;
-const FORK_SIGNATURE: [&str; 2] = ["task_struct *", "task_struct *"];
-const FREE_SIGNATURE: [&str; 1] = ["task_struct *"];
+pub(super) const FORK_SIGNATURE: [&str; 2] = ["task_struct *", "task_struct *"];
+pub(super) const FREE_SIGNATURE: [&str; 1] = ["task_struct *"];
 const FOLLOW_LICENSE: &str = "Dual MIT/GPL";
 
 /// Whose tasks a program keeps: the target as [`Whose`] says, and, for a
@@ -580,7 +580,7 @@ impl Descendants {
     /// Runs of the two programs the kernel skipped, as every program here
     /// reports them.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::attach::fentry::skipped([&self.fork_program, &self.free_program])
+        crate::bpf::program::skipped([&self.fork_program, &self.free_program])
     }
 }
 

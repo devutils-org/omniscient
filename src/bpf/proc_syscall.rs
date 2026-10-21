@@ -61,8 +61,8 @@ mod extra_helper {
 /// `sys_exit`'s second argument is the *return value*, not the syscall number:
 /// the number is only on the entry side, which is the whole reason the pending
 /// map carries it rather than being keyed by it.
-const ENTER_SIGNATURE: [&str; 2] = ["pt_regs *", "long int"];
-const EXIT_SIGNATURE: [&str; 2] = ["pt_regs *", "long int"];
+pub(super) const ENTER_SIGNATURE: [&str; 2] = ["pt_regs *", "long int"];
+pub(super) const EXIT_SIGNATURE: [&str; 2] = ["pt_regs *", "long int"];
 
 /// How many threads may be inside a syscall at once before the entry program
 /// stops being able to record new ones.
@@ -495,7 +495,7 @@ impl SyscallProgram {
     /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
     /// program's own counters can say an occurrence was never seen.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::attach::fentry::skipped([&self.enter_program, &self.exit_program])
+        crate::bpf::program::skipped([&self.enter_program, &self.exit_program])
             + self.descendants.as_ref().map_or(0, Descendants::skipped)
     }
 

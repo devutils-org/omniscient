@@ -28,8 +28,8 @@ use std::io::Read;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::OnceLock;
 
-use crate::bpf::attach::fentry;
 use crate::bpf::btf::Btf;
+use crate::bpf::fentry;
 use crate::bpf::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
 
 /// `PROC_PID_INIT_INO` and `PROC_CGROUP_INIT_INO`, from
@@ -378,7 +378,7 @@ fn watch_births(btf: &Btf, at: &Offsets, own: u64) -> Result<Births, String> {
 /// saw it alive can translate. Zero where the program is not running.
 pub fn skipped() -> u64 {
     match BORN.get() {
-        Some(Ok(births)) => crate::bpf::attach::fentry::skipped([&births.program]),
+        Some(Ok(births)) => crate::bpf::program::skipped([&births.program]),
         _ => 0,
     }
 }

@@ -203,13 +203,13 @@ impl Kept {
 /// for one prototype and run against another reads a `struct request *` out of
 /// a slot holding an integer and gets a plausible number -- which is worse than
 /// an error, because a plausible latency is one nobody questions.
-const REQUEST_SIGNATURE: [&str; 1] = ["request *"];
-const COMPLETE_SIGNATURE: [&str; 3] = ["request *", "blk_status_t", "unsigned int"];
+pub(super) const REQUEST_SIGNATURE: [&str; 1] = ["request *"];
+pub(super) const COMPLETE_SIGNATURE: [&str; 3] = ["request *", "blk_status_t", "unsigned int"];
 /// `block_rq_complete` on 5.15: the same three slots, with the status already
 /// turned into a negative errno by `blk_status_to_errno`. The slot is read the
 /// same way and means something else, so the collector is told which it is
 /// ([`BlockProgram::status_is_errno`]) and names the attribute accordingly.
-const ERRNO_COMPLETE_SIGNATURE: [&str; 3] = ["request *", "int", "unsigned int"];
+pub(super) const ERRNO_COMPLETE_SIGNATURE: [&str; 3] = ["request *", "int", "unsigned int"];
 /// Every shape of the completion the program reads, in the order the catalog's
 /// requirement lists them.
 const COMPLETE_SIGNATURES: [&[&str]; 2] = [&COMPLETE_SIGNATURE, &ERRNO_COMPLETE_SIGNATURE];
@@ -1638,7 +1638,7 @@ impl BlockProgram {
     /// request and filters afterwards, so a skipped run cannot say whose it
     /// was, and this is an upper bound on the target's share.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::attach::fentry::skipped(
+        crate::bpf::program::skipped(
             self.open_program
                 .iter()
                 .chain(self.insert_program.iter())
@@ -1783,13 +1783,13 @@ fn load_tp_btf(
     let id = btf
         .tracepoint_id(tracepoint)
         .ok_or_else(|| format!("no `btf_trace_{tracepoint}` in this kernel's BTF"))?;
-    let function = super::attach::fentry::Function {
+    let function = super::fentry::Function {
         name: tracepoint.to_owned(),
         id,
         params: Vec::new(),
         returns: "void".to_owned(),
     };
-    super::attach::fentry::load_tracing(&function, BPF_TRACE_RAW_TP, instructions, name)
+    super::fentry::load_tracing(&function, BPF_TRACE_RAW_TP, instructions, name)
         .map_err(|error| error.to_string())
 }
 

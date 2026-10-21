@@ -1600,11 +1600,19 @@ mod tests {
 
     #[test]
     fn a_backend_whose_requirements_cannot_be_checked_is_reported_as_unverified() {
-        let catalog = Catalog::embedded().unwrap();
+        // The uncore counter is answered, and so is RDT since the twenty-sixth
+        // wave; a fallback behind it on a requirement no probe answers --
+        // `xdp`, deliberately unprobed -- is one the resolver falls to without
+        // being able to check it, and has to say it assumed rather than
+        // checked.
+        let embedded = Catalog::embedded().unwrap();
+        let mut entry = embedded
+            .get(&"mem.bandwidth".parse().unwrap())
+            .expect("mem.bandwidth is in the catalog")
+            .clone();
+        entry.backends[1].requires = vec!["xdp".to_owned()];
+        let catalog = Catalog::from_entries(vec![entry]).unwrap();
         let capabilities = Capabilities::detect();
-        // The uncore counter is answered now; the RDT fallback behind it is
-        // not, so the resolver falls to a backend it could not check and has to
-        // say it assumed rather than checked.
         let mut request = fixture("mem.bandwidth", Target::System);
         request.mode = Mode::Count;
         request.emit = vec!["rate".parse().unwrap()];

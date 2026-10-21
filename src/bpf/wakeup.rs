@@ -588,10 +588,10 @@ impl WakeupProgram {
     /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
     /// program's own counters can say an occurrence was never seen.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::attach::fentry::skipped([&self.program])
+        crate::bpf::program::skipped([&self.program])
             + self.descendants.as_ref().map_or(0, Descendants::skipped)
             + self.interrupts.as_ref().map_or(0, |numbers| {
-                crate::bpf::attach::fentry::skipped(numbers.programs.iter())
+                crate::bpf::program::skipped(numbers.programs.iter())
             })
     }
 

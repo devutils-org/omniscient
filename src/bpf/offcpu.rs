@@ -74,10 +74,10 @@ const ARG_PREV_STATE: i16 = 24;
 /// fourth argument in 5.18; a program written for the older shape reads
 /// `prev_state` out of a slot that holds nothing and a `task_struct *` out of
 /// one that holds an integer, and what comes back is a plausible number.
-const SIGNATURE: [&str; 4] = ["bool", "task_struct *", "task_struct *", "unsigned int"];
+pub(super) const SIGNATURE: [&str; 4] = ["bool", "task_struct *", "task_struct *", "unsigned int"];
 
 /// `sched_wakeup(struct task_struct *p)`, which the second program reads.
-const WAKEUP_SIGNATURE: [&str; 1] = ["task_struct *"];
+pub(super) const WAKEUP_SIGNATURE: [&str; 1] = ["task_struct *"];
 
 /// `BPF_F_USER_STACK`: walk the task's own frames rather than the kernel's.
 ///
@@ -863,10 +863,10 @@ impl OffCpuProgram {
     /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
     /// program's own counters can say an occurrence was never seen.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::attach::fentry::skipped([&self.program, &self.wakeup_program])
+        crate::bpf::program::skipped([&self.program, &self.wakeup_program])
             + self.descendants.as_ref().map_or(0, Descendants::skipped)
             + self.entries.as_ref().map_or(0, |entries| {
-                crate::bpf::attach::fentry::skipped([&entries.program])
+                crate::bpf::program::skipped([&entries.program])
             })
     }
 

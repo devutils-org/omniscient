@@ -33,7 +33,7 @@ use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
 use crate::bpf::program::load_raw_tracepoint as load;
 
 /// The prototype both programs are written against.
-const SIGNATURE: [&str; 2] = ["bdi_writeback *", "wb_writeback_work *"];
+pub(super) const SIGNATURE: [&str; 2] = ["bdi_writeback *", "wb_writeback_work *"];
 
 /// How many writeback rounds may be open at once.
 ///
@@ -352,7 +352,7 @@ impl WritebackProgram {
     /// Runs of these programs the kernel skipped because one was already
     /// running on that cpu; see `BlockProgram::skipped`, where it was measured.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::attach::fentry::skipped([&self.start_program, &self.written_program])
+        crate::bpf::program::skipped([&self.start_program, &self.written_program])
     }
 
     /// Rounds the map could not hold, and records the ring could not hold.

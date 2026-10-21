@@ -55,8 +55,8 @@ const ARG_FLAGS: i16 = 8;
 
 /// The prototypes these programs are written against, checked against the
 /// running kernel before a single instruction is built.
-const BEGIN_SIGNATURE: [&str; 2] = ["void *", "unsigned int"];
-const END_SIGNATURE: [&str; 2] = ["void *", "int"];
+pub(super) const BEGIN_SIGNATURE: [&str; 2] = ["void *", "unsigned int"];
+pub(super) const END_SIGNATURE: [&str; 2] = ["void *", "int"];
 
 /// How many threads may be waiting for a lock at once.
 ///
@@ -571,7 +571,7 @@ impl LockProgram {
     /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
     /// program's own counters can say an occurrence was never seen.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::attach::fentry::skipped([&self.begin_program, &self.end_program])
+        crate::bpf::program::skipped([&self.begin_program, &self.end_program])
             + self.descendants.as_ref().map_or(0, Descendants::skipped)
     }
 

@@ -7,8 +7,8 @@
 
 use std::time::Duration as StdDuration;
 
-use crate::bpf::attach::fentry::Narrowing;
-use crate::bpf::attach::net_connect::accept::{Accept, AcceptProgram};
+use crate::bpf::fentry::Narrowing;
+use crate::bpf::net_connect::accept::{Accept, AcceptProgram};
 use crate::collect::io::vfs::narrowing;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};

@@ -29,11 +29,17 @@
 
 pub mod attach;
 pub mod btf;
+mod context;
+pub mod fentry;
 mod insn;
 mod io;
+pub mod io_fsync;
 mod io_pagecache;
+pub mod io_vfs;
 mod io_writeback;
 mod map;
+pub mod net_connect;
+pub mod net_socket;
 /// The round's shared grace period: the runner registers which collection
 /// owns the row maps it creates, and retires a round's maps together.
 pub use map::{owned_by, retire_owned_by};
@@ -742,6 +748,124 @@ mod tests {
         let advice = permission_advice("loading a tracing program");
         assert!(advice.contains("CAP_BPF"), "{advice}");
         assert!(advice.contains("setcap"), "{advice}");
+    }
+
+    /// Every prototype a program is written for is the one the catalog
+    /// lists for its tracepoint, and the other way round: the catalog line is
+    /// what the probe compares before a run, and the program's constant what
+    /// it compares at the attach, so where they part a source is listed
+    /// usable and refused at the start -- or refused here on a kernel its
+    /// program would have served.
+    #[test]
+    fn every_program_prototype_is_the_catalog_s() {
+        let programs: Vec<(&str, &[&str])> = vec![
+            ("sched_process_fork", &sched_common::FORK_SIGNATURE[..]),
+            ("sched_process_free", &sched_common::FREE_SIGNATURE[..]),
+            ("sched_switch", &runqlat::SWITCH_SIGNATURE[..]),
+            ("sched_wakeup", &runqlat::WAKEUP_SIGNATURE[..]),
+            ("sched_wakeup_new", &runqlat::WAKEUP_SIGNATURE[..]),
+            ("sched_switch", &offcpu::SIGNATURE[..]),
+            ("sched_wakeup", &offcpu::WAKEUP_SIGNATURE[..]),
+            ("sched_switch", &switch_count::SIGNATURE[..]),
+            ("sched_switch", &request::SWITCH_SIGNATURE[..]),
+            ("sched_waking", &request::WAKEUP_SIGNATURE[..]),
+            ("sched_migrate_task", &migrate::SIGNATURE[..]),
+            ("contention_begin", &sched_lock::BEGIN_SIGNATURE[..]),
+            ("contention_end", &sched_lock::END_SIGNATURE[..]),
+            ("sys_enter", &sched_futex::ENTER_SIGNATURE[..]),
+            ("sys_exit", &sched_futex::EXIT_SIGNATURE[..]),
+            ("sys_enter", &proc_syscall::ENTER_SIGNATURE[..]),
+            ("sys_exit", &proc_syscall::EXIT_SIGNATURE[..]),
+            ("sys_enter", &context::SYS_ENTER[..]),
+            ("sys_exit", &context::SYS_EXIT[..]),
+            ("irq_handler_entry", &sched_irq::ENTRY_SIGNATURE[..]),
+            ("irq_handler_exit", &sched_irq::EXIT_SIGNATURE[..]),
+            ("softirq_entry", &sched_irq::SOFT_SIGNATURE[..]),
+            ("softirq_exit", &sched_irq::SOFT_SIGNATURE[..]),
+            ("softirq_entry", &net_softirq::SIGNATURE[..]),
+            ("softirq_exit", &net_softirq::SIGNATURE[..]),
+            ("qdisc_enqueue", &net_qdisc::ENQUEUE_SIGNATURE[..]),
+            ("qdisc_dequeue", &net_qdisc::DEQUEUE_SIGNATURE[..]),
+            ("writeback_start", &io_writeback::SIGNATURE[..]),
+            ("writeback_written", &io_writeback::SIGNATURE[..]),
+            (
+                "mm_filemap_get_pages",
+                &io_pagecache::GET_PAGES_SIGNATURE[..],
+            ),
+            (
+                "mm_filemap_add_to_page_cache",
+                &io_pagecache::ADD_SIGNATURE[..],
+            ),
+            ("mark_victim", &mem_oom::SIGNATURE[..]),
+            ("mark_victim", &mem_oom::SIGNATURE_WITHOUT_UID[..]),
+            ("sched_process_exec", &proc_events::EXEC_SIGNATURE[..]),
+            ("sched_process_exit", &proc_events::EXIT_SIGNATURE[..]),
+            (
+                "sched_process_exit",
+                &proc_events::EXIT_SIGNATURE_WITHOUT_GROUP[..],
+            ),
+            ("signal_generate", &proc_events::SIGNAL_SIGNATURE[..]),
+            ("sched_process_exec", &proc_renames::SIGNATURE[..]),
+            ("sched_stat_runtime", &oncpu::SIGNATURE[..]),
+            ("inet_sock_set_state", &net_lifetime::SIGNATURE[..]),
+            ("inet_sock_set_state", &net_connect::STATE_SIGNATURE[..]),
+            ("tcp_retransmit_skb", &net_retransmit::WITH_ERROR[..]),
+            ("tcp_retransmit_skb", &net_retransmit::WITHOUT_ERROR[..]),
+            ("kfree_skb", &net_drops::WITH_RX_SOCKET[..]),
+            ("kfree_skb", &net_drops::WITHOUT_RX_SOCKET[..]),
+            ("block_rq_issue", &io::REQUEST_SIGNATURE[..]),
+            ("block_rq_insert", &io::REQUEST_SIGNATURE[..]),
+            ("block_rq_complete", &io::COMPLETE_SIGNATURE[..]),
+            ("block_rq_complete", &io::ERRNO_COMPLETE_SIGNATURE[..]),
+        ];
+        let catalog = crate::catalog::Catalog::embedded().expect("the embedded catalog loads");
+        let mut listed: std::collections::BTreeMap<String, Vec<Vec<String>>> = Default::default();
+        for entry in catalog.entries() {
+            for backend in &entry.backends {
+                for requirement in &backend.requires {
+                    let Some(event) = requirement.strip_prefix("raw_tracepoint:") else {
+                        continue;
+                    };
+                    let (name, shapes) = parse_raw_tracepoint(event).expect("a well-formed line");
+                    listed.entry(name.to_owned()).or_default().extend(shapes);
+                }
+            }
+        }
+        let mut accepted: std::collections::BTreeMap<&str, Vec<Vec<String>>> = Default::default();
+        for (tracepoint, shape) in &programs {
+            accepted.entry(tracepoint).or_default().push(
+                shape
+                    .iter()
+                    .map(|argument| (*argument).to_owned())
+                    .collect(),
+            );
+        }
+        let mut parted = Vec::new();
+        for (tracepoint, shapes) in &listed {
+            let Some(program) = accepted.get(tracepoint.as_str()) else {
+                continue;
+            };
+            for shape in shapes {
+                if !program.contains(shape) {
+                    parted.push(format!(
+                        "the catalog lists `{tracepoint}({})`, which no program reads",
+                        shape.join(", ")
+                    ));
+                }
+            }
+        }
+        for (tracepoint, shapes) in &accepted {
+            let catalog = listed.get(*tracepoint).cloned().unwrap_or_default();
+            for shape in shapes {
+                if !catalog.contains(shape) {
+                    parted.push(format!(
+                        "a program reads `{tracepoint}({})`, which the catalog never lists",
+                        shape.join(", ")
+                    ));
+                }
+            }
+        }
+        assert!(parted.is_empty(), "{parted:#?}");
     }
 
     /// Every file that attaches a raw tracepoint says how many runs the kernel

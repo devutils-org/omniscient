@@ -588,7 +588,7 @@ impl StallProgram {
     /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
     /// program's own counters can say an occurrence was never seen.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::attach::fentry::skipped(self.programs.iter())
+        crate::bpf::program::skipped(self.programs.iter())
     }
 
     pub fn load(stall: Stall, target_tgid: Option<u32>) -> Result<Self, String> {

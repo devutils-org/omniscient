@@ -14,8 +14,8 @@ use std::collections::BTreeMap;
 
 use super::histogram::{HistogramCollector, Rows, Source};
 use super::underneath;
-use crate::bpf::attach::fentry::{self, Narrowing, Row};
-use crate::bpf::attach::io_vfs::{self, Layer, Op, VfsProgram};
+use crate::bpf::fentry::{self, Narrowing, Row};
+use crate::bpf::io_vfs::{self, Layer, Op, VfsProgram};
 use crate::bpf::pidns;
 use crate::collect::{not_built, Collector, Prepared};
 use crate::event::{Attr, KeyValue};
