@@ -69,7 +69,9 @@ def main():
             selection = json.loads(Path('scripts/distroproof/devutils/packages.json').read_text())[family]
             provider = selection['provider']
             report['provider'] = provider
-            report['engine'] = 'dnf4-bootstrap' if provider == 'dnf' and not shutil.which('dnf5') else 'xpac'
+            # xpac drives DNF4 too since its ADR 016 (Rocky 9's witnesses were
+            # installed by dnf directly before, xpac only inventorying them).
+            report['engine'] = 'xpac'
             if provider == 'portage':
                 # Binaries from the stage's configured host, and nothing built
                 # from source: a witness with no binary is unavailable here.
@@ -107,20 +109,16 @@ def main():
                         if required:
                             report['errors'].append(package + ': required package unavailable')
                         continue
-                    if report['engine'] == 'dnf4-bootstrap':
-                        entry['coverage'] = 'native DNF4 installation; xpac inventory only'
-                        entry['apply'] = run(['dnf', 'install', '-y', package], timeout=600)
-                    else:
-                        manifest = Path('witness-package.toml')
-                        manifest.write_text('version = 1\n[packages.' + provider + ']\ninstall = [' + json.dumps(package) + ']\n')
-                        entry['manifest'] = manifest.read_text()
-                        entry['plan'] = run([XPAC, 'plan', '-f', str(manifest), '--json'])
-                        if entry['plan']['code'] != 0:
-                            entry['reason'] = 'xpac preview failed'
-                            report['errors'].append(package + ': preview failed')
-                            continue
-                        entry['apply'] = run([XPAC, 'apply', '-f', str(manifest), '--yes', '--state-dir',
-                                              '/var/lib/xpac-devutils', '--json'], timeout=1800)
+                    manifest = Path('witness-package.toml')
+                    manifest.write_text('version = 1\n[packages.' + provider + ']\ninstall = [' + json.dumps(package) + ']\n')
+                    entry['manifest'] = manifest.read_text()
+                    entry['plan'] = run([XPAC, 'plan', '-f', str(manifest), '--json'])
+                    if entry['plan']['code'] != 0:
+                        entry['reason'] = 'xpac preview failed'
+                        report['errors'].append(package + ': preview failed')
+                        continue
+                    entry['apply'] = run([XPAC, 'apply', '-f', str(manifest), '--yes', '--state-dir',
+                                          '/var/lib/xpac-devutils', '--json'], timeout=1800)
                     if entry['apply']['code'] != 0:
                         entry['reason'] = 'installation failed despite an available candidate'
                         report['errors'].append(package + ': installation failed')

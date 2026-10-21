@@ -42,9 +42,7 @@ def judge(target, cell, witnesses, manifest, reference_log):
         require(bool(checks['omn-reference-pairs']['detail'].get('not_applicable')),'missing reference exclusion')
         pairs={'held':0,'skipped':0,'scope':'native provisioning unavailable'}
     else:
-        require(engine in {'xpac','dnf4-bootstrap'},'unknown installation engine')
-        if engine=='dnf4-bootstrap':
-            require(target['image'].startswith('rocky-'),'unexpected DNF4 fallback')
+        require(engine=='xpac','unknown installation engine')
         require(bool(witnesses['packages']),'no witness packages checked')
         for p in witnesses['packages']:
             require(p['status'] in {'installed','unavailable'},'package failed: '+p['package'])
