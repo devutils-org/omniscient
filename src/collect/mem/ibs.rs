@@ -1231,9 +1231,21 @@ mod tests {
             tids: vec![tid],
             cpus: vec![0],
         });
-        let deadline = std::time::Instant::now() + StdDuration::from_millis(30);
+        // Thirty milliseconds of this thread's own cpu time, not of the wall
+        // clock: under the full suite's load the thread is preempted, and 30
+        // ms of wall time read as 19.6 ms run (2026-10-21).
+        let cpu_ns = || {
+            let mut now = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            // SAFETY: a valid clock id and a timespec this frame owns.
+            unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) };
+            now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64
+        };
+        let until = cpu_ns() + 30_000_000;
         let mut spin = 0u64;
-        while std::time::Instant::now() < deadline {
+        while cpu_ns() < until {
             spin = std::hint::black_box(spin.wrapping_add(1));
         }
         clock.refresh();

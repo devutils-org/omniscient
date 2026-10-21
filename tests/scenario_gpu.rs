@@ -1709,7 +1709,10 @@ fn a_target_that_exits_before_the_duration_ends_the_run_and_names_it() {
         // until every holder of its write end is gone, and the background sleep
         // inherits that end. Without them this call blocks for the whole second
         // and the target is already dead before the run starts.
-        .arg("sleep 1 </dev/null >/dev/null 2>&1 & echo $!")
+        // Three seconds: the target starts before omn, and under the full
+        // suite's load omn took 0.3 s to open its window, which left 0.70 s
+        // of a one-second sleep (2026-10-21).
+        .arg("sleep 3 </dev/null >/dev/null 2>&1 & echo $!")
         .output()
         .expect("sh should run");
     let pid = String::from_utf8_lossy(&spawned.stdout).trim().to_owned();
@@ -1741,8 +1744,8 @@ fn a_target_that_exits_before_the_duration_ends_the_run_and_names_it() {
     );
     let window = window_seconds(result);
     assert!(
-        (0.8..2.0).contains(&window),
-        "the target slept one second and the window was {window:.2} s"
+        (1.0..4.0).contains(&window),
+        "the target slept three seconds and the window was {window:.2} s"
     );
     assert_eq!(
         result["losses"]["failed_reads"], 0,

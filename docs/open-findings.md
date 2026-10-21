@@ -14491,3 +14491,24 @@ a_threads_clock_counts_what_it_ran_after_the_start` (30 ms of spinning read as
 thread at 499 of 500), `scenario_gpu::a_target_that_exits_before_the_duration_
 ends_the_run_and_names_it` (a 0.70 s window for a one-second sleep). 3201
 passed, 2 failed in `cargo test --workspace --no-fail-fast`.
+
+Taken up the next session (2026-10-21, evening): two of the three timing
+failures were the tests'. `ibs::a_threads_clock_counts_what_it_ran_after_the_start`
+spun for 30 ms of wall time and asked for 20 ms of cpu time; it now spins for 30
+ms of the thread's own cpu clock. `scenario_gpu::a_target_that_exits_before_the_
+duration_ends_the_run_and_names_it` started `sleep 1` before omn, whose start
+took 0.3 s under load; the target sleeps 3 s now, and the window is held to
+1-4 s, still well short of the run's 10 s. Both passed with 24 busy loops on
+the 24 cpus (5 of 5, and whole).
+
+`scenario_runtime::a_probe_follows_every_thread_of_the_process` is not the
+test's: eight threads of exactly 500 USDT hits each, the total exact (4000),
+and one thread read 499 and another 501 -- a hit credited to the wrong thread,
+whose tid the program takes from `bpf_get_current_pid_tgid`. Twenty runs with
+the 24 cpus busy did not reproduce it. Left open: if it recurs, the first
+suspect is the ring's consumer reading a record's payload through a shared
+`&[u8]` the kernel writes behind it (`bpf/ring.rs`), which the compiler is
+entitled to treat as unchanging.
+
+`cases::every_case_names_its_known_cause_both_ways`, in the flaky tally, failed
+once in `make check` the same evening and passed alone.
