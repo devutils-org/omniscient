@@ -14370,3 +14370,12 @@ message on stderr) is neither a refusal nor a disagreement; should it skip
 with its reason, as a refusal does, instead of failing the pair? Until then,
 `chain-gentoo` fails its tenth check on these two pairs alone; the other nine
 checks pass, 46 pairs hold and no other pair fails.
+
+The same two pairs fail on `chain-debian-13` (2026-10-21, kernel
+6.12.113+deb13), where the 2026-10-19 run held every pair: bcc's `vfsstat`
+stops with `Failed to compile BPF module`, and `tcplife` again reports no
+session where omn sees 20. Both pairs came in after that run, so this is
+their first pass over the distributions; the question above is not Gentoo's
+alone. The same guest also misses `bpftrace/biolatency` by one bucket more
+than allowed (median 32768 against 16000 us, log2 buckets 15 against 13);
+one run, not yet repeated.

@@ -9,7 +9,8 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[3]
 REQUIRED = {'xpac-installed','omn-installed','atfq-installed','atfq-procfs','atfq-free',
-            'atfq-zombie','atfq-command-not-found','atfq-mcp','vmanyware-observed-by-omn','omn-reference-pairs'}
+            'atfq-zombie','atfq-command-not-found','atfq-mcp','atfq-agrees-with-envprobe',
+            'vmanyware-observed-by-omn','omn-reference-pairs'}
 
 
 def require(value, message):

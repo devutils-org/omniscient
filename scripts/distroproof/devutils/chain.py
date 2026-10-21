@@ -83,6 +83,16 @@ def main():
         finally:
             if p.poll() is None: p.kill();p.wait()
     check('atfq-mcp', mcp)
+    def agree():
+        # atfq and envprobe read the machine with their own code; where they
+        # read the same fact they must agree (agree.py). envprobe is the one
+        # distroproof put in the guest.
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import agree as agreement
+        rows, disagree = agreement.compare('/distroproof/bin/envprobe', '/opt/devutils/atfq')
+        require(not disagree, 'atfq and envprobe disagree: ' + repr(disagree))
+        return {'facts': [{'fact': f, 'envprobe': a, 'atfq': b} for f, a, b in rows]}
+    check('atfq-agrees-with-envprobe', agree)
     def service():
         with tempfile.TemporaryDirectory(prefix='devutils-service-') as tmp:
             database=str(Path(tmp)/'service.sqlite')
