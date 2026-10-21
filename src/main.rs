@@ -259,6 +259,9 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         // As the stderr one, before any thread is started.
         std::env::set_var(omn::collect::PROGRAM_STDOUT_VARIABLE, path);
     }
+    if let Some(path) = &cli.envprobe {
+        std::env::set_var(omn::encode::ENVPROBE_VARIABLE, path);
+    }
     match cli.command {
         Command::Trace(args) => trace(*args),
         Command::List(args) => list(args),
@@ -2196,6 +2199,7 @@ fn assemble(
         results: Vec::new(),
         joins: Vec::new(),
         decompositions: Vec::new(),
+        machine: encode::machine_report(),
     };
     let mut costs: Vec<MeasuredCost> = Vec::new();
     let mut served_by: Vec<ResolvedRequest> = Vec::new();

@@ -180,6 +180,7 @@ impl Profile {
             results: vec![whole],
             joins: Vec::new(),
             decompositions: Vec::new(),
+            machine: None,
         };
         let text = encode::run_output(OutputFormat::Folded, &single)
             .map_err(|error| format!("{origin}: {error}"))?;

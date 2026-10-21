@@ -3326,6 +3326,7 @@ mod tests {
                     keys_seen: tables.len(),
                     tables,
                 }],
+                machine: None,
             },
             events,
             served: Vec::new(),

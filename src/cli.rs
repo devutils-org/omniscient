@@ -65,6 +65,16 @@ pub struct Cli {
     /// program to launch, or a session file that may launch one.
     #[arg(long, value_name = "FILE", global = true)]
     pub program_stdout: Option<PathBuf>,
+
+    /// Describe the machine beside the results: after the run, ask this
+    /// envprobe (distroproof's, a separate tool) for its report and keep it
+    /// whole under `machine` in the document -- kernel, hardware, toolchain,
+    /// privileges -- so that two runs on two machines say how the machines
+    /// differ. What OMN_ENVPROBE sets, which this flag overrides. Nothing is
+    /// linked: without it, or when envprobe cannot answer, the run is the
+    /// same and says so.
+    #[arg(long, value_name = "PATH", global = true)]
+    pub envprobe: Option<PathBuf>,
 }
 
 impl Cli {

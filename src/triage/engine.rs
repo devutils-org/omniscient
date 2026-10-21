@@ -252,6 +252,7 @@ pub fn run(
         results: Vec::new(),
         joins: Vec::new(),
         decompositions: Vec::new(),
+        machine: None,
     };
     let mut events = Vec::new();
     let mut costs = Vec::new();

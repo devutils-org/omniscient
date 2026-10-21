@@ -29,6 +29,78 @@ pub struct RunOutput {
     pub joins: Vec<Correlation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decompositions: Vec<DecompositionOutput>,
+    /// The machine the run measured, as envprobe describes it, kept whole:
+    /// present only when the run was asked for it (`--envprobe`,
+    /// [`ENVPROBE_VARIABLE`]); `{"refused": why}` when envprobe could not
+    /// answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<serde_json::Value>,
+}
+
+/// The envprobe to ask for the machine's report: what `--envprobe` sets.
+pub const ENVPROBE_VARIABLE: &str = "OMN_ENVPROBE";
+
+/// Longest envprobe may take to describe the machine.
+const ENVPROBE_LIMIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// envprobe's report, when [`ENVPROBE_VARIABLE`] names one; run after the
+/// measurement, so its probes are no part of what was measured.
+pub fn machine_report() -> Option<serde_json::Value> {
+    let path = std::env::var_os(ENVPROBE_VARIABLE)?;
+    Some(
+        ask_envprobe(std::path::Path::new(&path)).unwrap_or_else(|why| {
+            eprintln!("warning: no machine report: {why}");
+            serde_json::json!({ "refused": why })
+        }),
+    )
+}
+
+fn ask_envprobe(path: &std::path::Path) -> Result<serde_json::Value, String> {
+    use std::io::Read;
+    let mut child = std::process::Command::new(path)
+        .arg("--json")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("{} cannot run: {e}", path.display()))?;
+    // read while it runs: a report larger than a pipe would block it
+    let mut stdout = child.stdout.take().expect("piped");
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        stdout.read_to_string(&mut text).map(|_| text)
+    });
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if start.elapsed() < ENVPROBE_LIMIT => {
+                std::thread::sleep(std::time::Duration::from_millis(20))
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "{} did not answer in {} s",
+                    path.display(),
+                    ENVPROBE_LIMIT.as_secs()
+                ));
+            }
+        }
+    };
+    let text = reader
+        .join()
+        .map_err(|_| "envprobe's output could not be read".to_string())?
+        .map_err(|e| format!("envprobe's output: {e}"))?;
+    if !status.success() {
+        return Err(format!("{} exited with {status}", path.display()));
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("envprobe's report is not JSON: {e}"))?;
+    if value.get("sections").is_none() {
+        return Err("envprobe's report has no sections".into());
+    }
+    Ok(value)
 }
 
 /// Encodes a whole run.
@@ -1017,6 +1089,7 @@ pub fn results(format: OutputFormat, results: &Results) -> Result<String, ParseE
                 results: vec![results.clone()],
                 joins: Vec::new(),
                 decompositions: Vec::new(),
+                machine: None,
             },
         ),
         format if format.renders_documents() => format.serialize_document(results),
@@ -2822,6 +2895,36 @@ fn why_no_timeline(output: &RunOutput) -> String {
 mod tests {
     use std::collections::BTreeMap;
 
+    #[test]
+    fn envprobe_answers_or_says_why_not() {
+        let dir = std::env::temp_dir().join(format!("omn-envprobe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = |name: &str, body: &str| {
+            use std::os::unix::fs::PermissionsExt;
+            let path = dir.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let good = script("good", r#"echo '{"schema_version":1,"sections":[]}'"#);
+        assert_eq!(
+            super::ask_envprobe(&good).unwrap()["schema_version"],
+            serde_json::json!(1)
+        );
+        let failing = script("failing", "exit 3");
+        assert!(super::ask_envprobe(&failing)
+            .unwrap_err()
+            .contains("exited"));
+        let not_a_report = script("not-a-report", "echo '{}'");
+        assert!(super::ask_envprobe(&not_a_report)
+            .unwrap_err()
+            .contains("no sections"));
+        assert!(super::ask_envprobe(&dir.join("absent"))
+            .unwrap_err()
+            .contains("cannot run"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     use super::*;
     use crate::join::{Attribution, StateStats};
 
@@ -2861,6 +2964,7 @@ mod tests {
             results: vec![results.clone()],
             joins: Vec::new(),
             decompositions: Vec::new(),
+            machine: None,
         };
         let bytes = run_output_bytes(OutputFormat::Pcap, &run).expect("a capture");
         assert_eq!(&bytes[0..4], &0xa1b2_3c4du32.to_le_bytes());
@@ -2887,6 +2991,7 @@ mod tests {
             results: vec![results],
             joins: Vec::new(),
             decompositions: Vec::new(),
+            machine: None,
         };
         let error = run_output_bytes(OutputFormat::Pcap, &run).unwrap_err();
         assert!(
@@ -3112,6 +3217,7 @@ mod tests {
                 readings: None,
             }],
             decompositions: Vec::new(),
+            machine: None,
         }
     }
 
@@ -3312,6 +3418,7 @@ mod tests {
             results: vec![profile()],
             joins: Vec::new(),
             decompositions: Vec::new(),
+            machine: None,
         };
         let encoded = run_output(OutputFormat::Folded, &run).expect("encoding");
 
@@ -3348,6 +3455,7 @@ mod tests {
             results: vec![keyed],
             joins: Vec::new(),
             decompositions: Vec::new(),
+            machine: None,
         };
         let encoded = run_output(OutputFormat::Folded, &run).expect("encoding");
         assert_eq!(encoded.trim(), "task:7;main;work;read 3000000", "{encoded}");
@@ -3365,6 +3473,7 @@ mod tests {
             results: vec![profile(), second],
             joins: Vec::new(),
             decompositions: Vec::new(),
+            machine: None,
         };
         let encoded = run_output(OutputFormat::Folded, &run).expect("encoding");
         assert!(encoded.contains("profile;main;work;read "), "{encoded}");
@@ -3380,6 +3489,7 @@ mod tests {
             results: vec![profile()],
             joins: Vec::new(),
             decompositions: Vec::new(),
+            machine: None,
         };
         let encoded = run_output(OutputFormat::Speedscope, &run).expect("encoding");
         let document: serde_json::Value =
@@ -3418,6 +3528,7 @@ mod tests {
             results: vec![sample()],
             joins: Vec::new(),
             decompositions: Vec::new(),
+            machine: None,
         };
         let encoded = run_output(OutputFormat::Speedscope, &run).expect("encoding");
         let document: serde_json::Value =
@@ -3456,6 +3567,7 @@ mod tests {
             results: vec![ranked()],
             joins: Vec::new(),
             decompositions: Vec::new(),
+            machine: None,
         };
         let error = run_output(OutputFormat::Folded, &run).unwrap_err();
         assert!(error.message().contains("emitted no stacks"), "{error}");
@@ -3477,6 +3589,7 @@ mod tests {
             results: vec![empty],
             joins: Vec::new(),
             decompositions: Vec::new(),
+            machine: None,
         };
         let error = run_output(OutputFormat::Folded, &run).unwrap_err();
         assert!(
@@ -3546,6 +3659,7 @@ mod tests {
             results: vec![profile()],
             joins: Vec::new(),
             decompositions: Vec::new(),
+            machine: None,
         };
         let error = run_output(OutputFormat::Pprof, &run).unwrap_err();
         assert!(error.message().contains("not text"), "{error}");
@@ -3562,6 +3676,7 @@ mod tests {
             results: vec![ranked()],
             joins: Vec::new(),
             decompositions: Vec::new(),
+            machine: None,
         };
         let error = run_output(OutputFormat::Pprof, &run).unwrap_err();
         assert!(error.message().contains("emitted no stacks"), "{error}");
@@ -3610,6 +3725,7 @@ mod tests {
                 results: vec![empty],
                 joins: Vec::new(),
                 decompositions: Vec::new(),
+                machine: None,
             },
         )
         .unwrap_err();
@@ -3630,6 +3746,7 @@ mod tests {
                 results: vec![histogram()],
                 joins: Vec::new(),
                 decompositions: Vec::new(),
+                machine: None,
             },
         )
         .unwrap_err();
@@ -3646,6 +3763,7 @@ mod tests {
                 results: vec![empty],
                 joins: Vec::new(),
                 decompositions: Vec::new(),
+                machine: None,
             },
         )
         .unwrap_err();
@@ -3669,6 +3787,7 @@ mod tests {
                 results: vec![lossy],
                 joins: Vec::new(),
                 decompositions: Vec::new(),
+                machine: None,
             },
         )
         .expect("encoding");
@@ -3708,6 +3827,7 @@ mod tests {
             results: vec![profile(), second, third],
             joins: Vec::new(),
             decompositions: Vec::new(),
+            machine: None,
         };
         let bytes = run_output_bytes(OutputFormat::Pprof, &run).expect("encoding");
         // The names are in the string table, which is not compressed away: the
@@ -4170,6 +4290,7 @@ mod tests {
             results: vec![sample()],
             joins: vec![temporal.clone(), temporal],
             decompositions: vec![decomposed(0.0)],
+            machine: None,
         };
         let text = run_output(OutputFormat::Text, &run).unwrap();
         for level in [Evidence::Temporal, Evidence::Key] {
@@ -4197,6 +4318,7 @@ mod tests {
             results: vec![sample()],
             joins: Vec::new(),
             decompositions: Vec::new(),
+            machine: None,
         };
         assert!(!run_output(OutputFormat::Text, &bare)
             .unwrap()
