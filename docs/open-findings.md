@@ -14449,3 +14449,18 @@ and 24.04, Arch, Alpine and Gentoo pass all eleven checks. Fedora missed
 `bpftrace/biolatency` (median of three, two log2 buckets against one): the
 load-sensitive pairs, already compared as medians, which fail on a different
 target each run. Left as they are: a wider band would hide what they measure.
+
+Then the load-sensitive pairs were made to read one run instead of two
+(f530acc): `cpu.cache_misses` and `cpu.ipc` attach both sides to the same
+stopped workload, `biolatency` reads alongside, `runqlat` runs bpftrace over
+omn and compares the ninetieth percentile. libbpf-tools are installed where
+the distribution has them. And omn attaches a source's fentry programs at
+once (5eb4b13): io.vfs was blind for its first 1.4 s on Ubuntu 24.04, twelve
+trampolines at about 120 ms each. Chain rerun: **all nine targets pass all
+eleven checks**, 23.5 minutes.
+
+Not from these changes, seen in a `cargo test --workspace --no-fail-fast` on
+the development machine the same day: `scenario_net` (2), `scenario_mem` (2)
+and `scenario_gpu` (1) fail whole-binary with and without 5eb4b13 alike, and
+pass alone; `cross_machine::a_memory_limit_turns_...` failed once under the
+full suite's load and passed eight times alone. Not investigated.
