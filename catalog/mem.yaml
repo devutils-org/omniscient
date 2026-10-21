@@ -143,6 +143,12 @@
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_page_alloc(page *, unsigned int, gfp_t, int)", "raw_tracepoint:mm_page_free(page *, unsigned int)", "bpf_map:ringbuf"], cost: med, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:kmem:mm_page_alloc", "tracepoint:kmem:mm_page_free", "bpf"], cost: med, equivalent: true}
+    # The allocator's own count, by zone, read around the window: what a
+    # container or a locked-down kernel still has.
+    - {id: "fs:proc", requires: ["/proc/vmstat"], cost: free, modes: [count], emits: [summary, rate, raw],
+       targets: {system: native}, keys: [], filter_fields: [],
+       degraded: "the machine's count of pages allocated and freed over the window, from
+                  /proc/vmstat: no allocation, order, call site, task or cgroup"}
   modes: [trace, count]
   emits: [hist, topk, rate, raw, summary]
   targets: {system: native, cgroup: bpf_only}

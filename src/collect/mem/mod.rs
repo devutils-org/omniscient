@@ -31,8 +31,37 @@ use heap::Which;
 /// Adding a source means adding a line here and a module beside it. No file
 /// outside this directory changes, which is what lets the families be worked on
 /// independently.
+/// `mem.page_alloc` where no program can be loaded: the pages the allocator
+/// handed out, by zone, from `/proc/vmstat`.
+const PAGES_ALLOCATED: crate::collect::counter_file::Spec = crate::collect::counter_file::Spec {
+    source: "mem.page_alloc",
+    path: "/proc/vmstat",
+    layout: crate::collect::counter_file::Layout::Flat,
+    counters: &[
+        (
+            "pages",
+            &[
+                "pgalloc_dma",
+                "pgalloc_dma32",
+                "pgalloc_normal",
+                "pgalloc_movable",
+                "pgalloc_device",
+            ],
+        ),
+        ("freed_pages", &["pgfree"]),
+    ],
+    value: "pages",
+    what: "pages allocated",
+};
+
 pub fn factories() -> Vec<Factory> {
     vec![
+        Factory::new("mem.page_alloc", "fs:proc", |resolved| {
+            Ok(Box::new(crate::collect::counter_file::Prepare::new(
+                PAGES_ALLOCATED,
+                resolved.request.mode,
+            )?))
+        }),
         Factory::new("mem.rss", "fs:proc:smaps_rollup", |resolved| {
             Ok(footprint::Prepare::new(
                 Metric::Rss,

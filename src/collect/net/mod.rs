@@ -55,8 +55,26 @@ pub fn probe(requirement: &str) -> Option<Result<(), String>> {
 }
 
 /// The collectors this family provides.
+/// `net.tcp.retransmit` where no program can be loaded: TCP's own count of
+/// the segments it sent again, from `/proc/net/snmp`.
+const SEGMENTS_RETRANSMITTED: crate::collect::counter_file::Spec =
+    crate::collect::counter_file::Spec {
+        source: "net.tcp.retransmit",
+        path: "/proc/net/snmp",
+        layout: crate::collect::counter_file::Layout::Paired,
+        counters: &[("retransmits", &["Tcp:RetransSegs"])],
+        value: "retransmits",
+        what: "TCP segments retransmitted",
+    };
+
 pub fn factories() -> Vec<Factory> {
     vec![
+        Factory::new("net.tcp.retransmit", "fs:proc", |resolved| {
+            Ok(Box::new(crate::collect::counter_file::Prepare::new(
+                SEGMENTS_RETRANSMITTED,
+                resolved.request.mode,
+            )?))
+        }),
         Factory::new("net.bytes", "fs:proc", |resolved| {
             let by_direction = resolved
                 .request

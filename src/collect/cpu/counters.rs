@@ -214,6 +214,14 @@ pub const SPECS: &[Spec] = &[
         counters: &[MIGRATIONS],
         value: Value::Count,
     },
+    // The same counter answering `sched.migrations` where no program can be
+    // loaded: how many times the target moved, not where from or to.
+    Spec {
+        source: "sched.migrations",
+        backend: "pmu:sw",
+        counters: &[MIGRATIONS],
+        value: Value::Count,
+    },
     // The order matters: the value is the first counter over the second.
     Spec {
         source: "cpu.ipc",

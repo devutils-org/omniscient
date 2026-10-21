@@ -297,8 +297,29 @@ pub(crate) fn refresh_followed_symbols(
 }
 
 /// The collectors this family provides.
+/// `sched.irq` where no program can be loaded: each cpu's time in hard and
+/// soft interrupt handlers, from `/proc/stat`'s tick accounting.
+const HANDLER_TIME: crate::collect::counter_file::Spec = crate::collect::counter_file::Spec {
+    source: "sched.irq",
+    path: "/proc/stat",
+    layout: crate::collect::counter_file::Layout::CpuTicks,
+    counters: &[
+        ("handler_ns", &["irq", "softirq"]),
+        ("hardirq_ns", &["irq"]),
+        ("softirq_ns", &["softirq"]),
+    ],
+    value: "handler_ns",
+    what: "time in interrupt handlers",
+};
+
 pub fn factories() -> Vec<Factory> {
     vec![
+        Factory::new("sched.irq", "fs:proc", |resolved| {
+            Ok(Box::new(crate::collect::counter_file::Prepare::new(
+                HANDLER_TIME,
+                resolved.request.mode,
+            )?))
+        }),
         Factory::new("sched.runqlen", "bpf:perf_event", |resolved| {
             Ok(Box::new(runqlen::Prepare {
                 mode: resolved.request.mode,

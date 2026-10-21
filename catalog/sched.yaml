@@ -251,6 +251,13 @@
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_migrate_task(task_struct *, int)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)", "bpf_map:ringbuf"], cost: low, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_migrate_task", "bpf"], cost: low, equivalent: true}
+    # The perf software counter `cpu.migrations` reads, where no program can
+    # be loaded: how many times the target moved.
+    - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_CPU_MIGRATIONS"], cost: low, modes: [count],
+       emits: [summary, rate, raw], targets: {system: native, pid: native, cgroup: native},
+       keys: [], filter_fields: [],
+       degraded: "a count of the target's migrations over the window: not where each one went
+                  from or to, nor which task moved"}
   modes: [trace, count]
   emits: [rate, topk, raw, summary]
   targets: {system: native, pid: bpf_only, cgroup: bpf_only}
@@ -370,6 +377,14 @@
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:irq_handler_entry(int, irqaction *)", "raw_tracepoint:irq_handler_exit(int, irqaction *, int)", "raw_tracepoint:softirq_entry(unsigned int)", "raw_tracepoint:softirq_exit(unsigned int)", "bpf_map:ringbuf"], cost: med, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:irq:irq_handler_entry", "tracepoint:irq:irq_handler_exit", "tracepoint:irq:softirq_entry", "tracepoint:irq:softirq_exit", "bpf"], cost: med, equivalent: true}
+    # Each cpu's time in interrupt handlers as the scheduler accounts it, in
+    # clock ticks: exact where the kernel accounts irq time
+    # (CONFIG_IRQ_TIME_ACCOUNTING, the distributions' default), the ticks that
+    # landed in a handler otherwise.
+    - {id: "fs:proc", requires: ["/proc/stat"], cost: free, modes: [count], emits: [summary, rate, raw],
+       targets: {system: native}, keys: [cpu], filter_fields: [cpu],
+       degraded: "each cpu's time in hard and soft interrupt handlers over the window, in clock
+                  ticks (10 ms): no handler, interrupt or vector, and no distribution"}
   modes: [trace, count]
   emits: [hist, topk, rate, raw, summary]
   targets: {system: native, cpu: native}

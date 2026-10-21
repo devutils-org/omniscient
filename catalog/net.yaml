@@ -165,6 +165,11 @@
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:tcp_retransmit_skb(sock *, sk_buff *, int)|(sock *, sk_buff *)", "bpf_map:ringbuf"], cost: low}
     - {id: "bpf:tp", requires: ["tracepoint:tcp:tcp_retransmit_skb", "bpf"], cost: low, equivalent: true}
+    - {id: "fs:proc", requires: ["/proc/net/snmp"], cost: free, modes: [count], emits: [summary, rate, raw],
+       targets: {system: native}, keys: [], filter_fields: [],
+       degraded: "TCP's own count of segments sent again over the window, from /proc/net/snmp:
+                  no connection, task or reason, and a retransmission of several segments counts
+                  each"}
   modes: [trace, count]
   emits: [rate, topk, raw, summary]
   targets: {system: native, pid: bpf_only, cgroup: bpf_only}
