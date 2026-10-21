@@ -36,8 +36,8 @@ use std::os::fd::{AsRawFd, OwnedFd};
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
 use super::map::{map_failure, row_map, select_rows, Counters, Hash, Rows};
 use super::mem_program::{
-    bucket_low, check_signature, comm, count_drop, load, long, push_log2_bucket, read_cgroup_id,
-    read_comm, read_pid_tgid, word,
+    bucket_low, comm, count_drop, load, long, push_log2_bucket, read_cgroup_id, read_comm,
+    read_pid_tgid, word,
 };
 use super::syscall;
 use super::DrainLosses;
@@ -617,7 +617,7 @@ impl StallProgram {
         // thing standing between that and a duration measured from an
         // uninitialised timestamp.
         for site in stall.begins() {
-            match check_signature(
+            match crate::bpf::program::prototype(
                 btf,
                 site.name,
                 site.signatures,
@@ -639,7 +639,9 @@ impl StallProgram {
             None => "nothing but the moment it fired",
         };
         for site in stall.ends() {
-            if let Err(reason) = check_signature(btf, site.name, site.signatures, reads) {
+            if let Err(reason) =
+                crate::bpf::program::prototype(btf, site.name, site.signatures, reads)
+            {
                 if site.required {
                     return Err(reason);
                 }
@@ -820,8 +822,9 @@ mod tests {
     #[test]
     fn a_missing_end_tracepoint_is_refused_by_name() {
         let Some(btf) = kernel_btf() else { return };
-        let error = check_signature(&btf, "definitely_not_a_tracepoint", &[], "nothing")
-            .expect_err("a refusal");
+        let error =
+            crate::bpf::program::prototype(&btf, "definitely_not_a_tracepoint", &[], "nothing")
+                .expect_err("a refusal");
         assert!(
             error.contains("definitely_not_a_tracepoint"),
             "the refusal names the tracepoint that is missing: {error}"

@@ -59,6 +59,7 @@ mod proc_calls;
 mod proc_events;
 mod proc_renames;
 mod proc_syscall;
+pub(crate) mod program;
 mod request;
 mod ring;
 mod runqlat;
@@ -749,8 +750,8 @@ mod tests {
     /// `bpf_prog_info.recursion_misses` and nowhere else. Fifteen programs went
     /// three waves without reading it, because the file that first learned it
     /// had no way to reach the others; this is the test in every file of the
-    /// kind that finding 46 asks for. `mod.rs` and `syscall.rs` define the
-    /// attach and attach nothing themselves.
+    /// kind that finding 46 asks for. `mod.rs`, `syscall.rs` and `program.rs`
+    /// define the attach and attach nothing themselves.
     #[test]
     fn every_program_that_attaches_a_raw_tracepoint_reports_the_runs_it_skipped() {
         let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
@@ -761,11 +762,17 @@ mod tests {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("");
-            if !name.ends_with(".rs") || name == "mod.rs" || name == "syscall.rs" {
+            if !name.ends_with(".rs")
+                || name == "mod.rs"
+                || name == "syscall.rs"
+                || name == "program.rs"
+            {
                 continue;
             }
             let source = std::fs::read_to_string(&path).expect("a source file");
-            if source.contains("raw_tracepoint_open(") && !source.contains("pub fn skipped(") {
+            let attaches =
+                source.contains("raw_tracepoint_open(") || source.contains("program::attach_raw(");
+            if attaches && !source.contains("pub fn skipped(") {
                 silent.push(name.to_owned());
             }
         }

@@ -29,7 +29,7 @@
 //! only side this build can name: kernel frames would need `/proc/kallsyms`,
 //! which a normal machine restricts to root.
 
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 
 use super::btf::Btf;
 use super::insn::{helper, Insn, Program, Whose, BPF_DW, BPF_W, R10};
@@ -39,7 +39,7 @@ use super::sched_common::{
     push_current_followed_filter, push_log2_bucket, push_user_lr, text_of, Descendants, Followed,
     Log2Labels, BPF_F_USER_STACK, BPF_NOEXIST, E2BIG, EEXIST,
 };
-use super::syscall;
+use crate::bpf::program::load_raw_tracepoint as load;
 
 /// Arguments of the two tracepoints, in the raw tracepoint's context.
 ///
@@ -168,9 +168,6 @@ const LOG2: Log2Labels = [
     "lock_log2_done",
 ];
 
-/// `bpf_get_current_comm` and the stack walker are GPL-only.
-const LICENSE: &str = "Dual MIT/GPL";
-
 /// One `(task, lock kind, stack, bucket)` row's waits over one drain interval.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LockWait {
@@ -267,21 +264,6 @@ impl LockWait {
     }
 }
 
-/// Checks a tracepoint's prototype before any instruction is built.
-fn check(btf: &Btf, tracepoint: &str, expected: &[&str]) -> Result<(), String> {
-    let signature = btf.tracepoint_signature(tracepoint)?;
-    if signature != expected {
-        return Err(format!(
-            "this kernel declares `{tracepoint}({})`, and this program is written for \
-             `{tracepoint}({})`: it reads fixed slots of the tracepoint's context, and against \
-             another prototype those slots hold something else",
-            signature.join(", "),
-            expected.join(", "),
-        ));
-    }
-    Ok(())
-}
-
 /// Loads the caller's thread id and thread group into `r7`, and filters.
 ///
 /// `bpf_get_current_pid_tgid` rather than a `task_struct` read: both
@@ -304,7 +286,12 @@ fn begin_instructions(
     waiting_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
-    check(btf, "contention_begin", &BEGIN_SIGNATURE)?;
+    crate::bpf::program::prototype(
+        btf,
+        "contention_begin",
+        &[&BEGIN_SIGNATURE],
+        "its arguments",
+    )?;
 
     let mut program = Program::new();
     // r6 keeps the context and r7 the caller's ids; both survive the helper
@@ -397,7 +384,7 @@ fn end_instructions(
     kernel_stacks_fd: i32,
     leaf_lr: bool,
 ) -> Result<Vec<Insn>, String> {
-    check(btf, "contention_end", &END_SIGNATURE)?;
+    crate::bpf::program::prototype(btf, "contention_end", &[&END_SIGNATURE], "its arguments")?;
 
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
@@ -658,14 +645,8 @@ impl LockProgram {
         // would close a wait nobody opened, and the lookup that fails is the
         // only thing standing between that and a duration measured from an
         // uninitialised timestamp.
-        let begin_link =
-            syscall::raw_tracepoint_open("contention_begin", begin_program.as_raw_fd()).map_err(
-                |error| format!("cannot attach to the `contention_begin` tracepoint: {error}"),
-            )?;
-        let end_link = syscall::raw_tracepoint_open("contention_end", end_program.as_raw_fd())
-            .map_err(|error| {
-                format!("cannot attach to the `contention_end` tracepoint: {error}")
-            })?;
+        let begin_link = crate::bpf::program::attach_raw("contention_begin", &begin_program)?;
+        let end_link = crate::bpf::program::attach_raw("contention_end", &end_program)?;
 
         Ok(Self {
             descendants,
@@ -744,22 +725,6 @@ impl LockProgram {
             backwards: self.drops.read(DROP_BACKWARDS),
         }
     }
-}
-
-fn load(instructions: &[Insn], name: &str) -> Result<OwnedFd, String> {
-    syscall::prog_load(
-        syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
-        instructions,
-        name,
-        LICENSE,
-    )
-    .map_err(|error| {
-        if error.is_permission() {
-            super::permission_advice("loading a raw tracepoint program")
-        } else {
-            format!("the kernel refused the `{name}` program: {error}")
-        }
-    })
 }
 
 #[cfg(test)]
@@ -867,7 +832,13 @@ mod tests {
                 .expect("a prototype"),
             END_SIGNATURE
         );
-        assert!(check(&btf, "contention_begin", &["void *"]).is_err());
+        assert!(crate::bpf::program::prototype(
+            &btf,
+            "contention_begin",
+            &[&["void *"]],
+            "its arguments"
+        )
+        .is_err());
     }
 
     /// The kernel hashes every byte of a key, so one the program never writes

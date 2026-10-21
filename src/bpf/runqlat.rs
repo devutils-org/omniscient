@@ -32,7 +32,7 @@
 //! bucketing without being re-bucketed into something else, and there is a test
 //! below that crosses the two definitions.
 
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 
 use super::btf::Btf;
 use super::insn::{
@@ -44,7 +44,7 @@ use super::sched_common::{
     push_followed_filter, push_kernel_wait, push_last_queued, push_rq_clock, push_run_delay,
     Descendants, Followed, KernelClock,
 };
-use super::syscall;
+use crate::bpf::program::load_raw_tracepoint as load;
 
 /// Arguments of `sched_switch`, in the raw tracepoint's context.
 const ARG_PREV: i16 = 8;
@@ -163,10 +163,6 @@ const QUEUED_KEY_BYTES: usize = 4;
 /// When the wait began by the tracepoints, and the task's `run_delay` then.
 const QUEUED_VALUE_BYTES: usize = 16;
 const QUEUED_RUN_DELAY: i16 = 8;
-
-/// `bpf_probe_read_kernel` is GPL-only, and every field these programs read
-/// comes out of a `task_struct` through it.
-const LICENSE: &str = "Dual MIT/GPL";
 
 /// One `(task, cpu, priority, bucket)` row's waits over one drain interval.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -703,8 +699,7 @@ impl RunqLatProgram {
         // wakeup has been recorded would close a wait nobody opened, and the
         // lookup that fails is the only thing standing between that and a
         // duration measured from an uninitialised timestamp.
-        let wakeup_link = syscall::raw_tracepoint_open("sched_wakeup", wakeup_program.as_raw_fd())
-            .map_err(|error| format!("cannot attach to the `sched_wakeup` tracepoint: {error}"))?;
+        let wakeup_link = crate::bpf::program::attach_raw("sched_wakeup", &wakeup_program)?;
         if btf.tracepoint_signature("sched_wakeup_new")? != WAKEUP_SIGNATURE {
             return Err(
                 "this kernel's `sched_wakeup_new` does not take the task it wakes as its only \
@@ -712,12 +707,8 @@ impl RunqLatProgram {
                     .to_owned(),
             );
         }
-        let wakeup_new_link =
-            syscall::raw_tracepoint_open("sched_wakeup_new", wakeup_program.as_raw_fd()).map_err(
-                |error| format!("cannot attach to the `sched_wakeup_new` tracepoint: {error}"),
-            )?;
-        let switch_link = syscall::raw_tracepoint_open("sched_switch", switch_program.as_raw_fd())
-            .map_err(|error| format!("cannot attach to the `sched_switch` tracepoint: {error}"))?;
+        let wakeup_new_link = crate::bpf::program::attach_raw("sched_wakeup_new", &wakeup_program)?;
+        let switch_link = crate::bpf::program::attach_raw("sched_switch", &switch_program)?;
 
         Ok(Self {
             descendants,
@@ -774,22 +765,6 @@ impl RunqLatProgram {
     pub fn dropped(&self) -> (u64, u64) {
         (self.drops.read(DROP_QUEUED), self.drops.read(DROP_ROWS))
     }
-}
-
-fn load(instructions: &[Insn], name: &str) -> Result<OwnedFd, String> {
-    syscall::prog_load(
-        syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
-        instructions,
-        name,
-        LICENSE,
-    )
-    .map_err(|error| {
-        if error.is_permission() {
-            super::permission_advice("loading a raw tracepoint program")
-        } else {
-            format!("the kernel refused the `{name}` program: {error}")
-        }
-    })
 }
 
 #[cfg(test)]

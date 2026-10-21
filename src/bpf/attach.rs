@@ -303,10 +303,6 @@ fn retprobe_bit(pmu: &str) -> Result<u32, String> {
         })
 }
 
-/// Anything reading a kernel structure needs `bpf_probe_read_kernel`, which is
-/// GPL-only, and everything this layer writes does.
-const LICENSE: &str = "Dual MIT/GPL";
-
 /// Loads a program of the type this attach kind requires.
 ///
 /// The three attach functions load their own programs, rather than taking one
@@ -316,13 +312,7 @@ const LICENSE: &str = "Dual MIT/GPL";
 /// that chose the wrong type. Pairing them here means the mistake cannot be
 /// made.
 fn load(prog_type: u32, instructions: &[Insn], name: &str) -> Result<OwnedFd, String> {
-    syscall::prog_load(prog_type, instructions, name, LICENSE).map_err(|error| {
-        if error.is_permission() {
-            super::permission_advice(&format!("loading the `{name}` program"))
-        } else {
-            format!("the kernel refused the `{name}` program: {error}")
-        }
-    })
+    crate::bpf::program::load(prog_type, instructions, name)
 }
 
 /// Attaches a program to a tracepoint, the classic way.

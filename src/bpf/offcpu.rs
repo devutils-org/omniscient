@@ -50,6 +50,7 @@ use super::sched_common::{
     push_run_delay, push_user_lr, Descendants, Followed, KernelClock,
 };
 use super::syscall;
+use crate::bpf::program::LICENSE;
 
 /// This program's own labels for the shared unrolled log2.
 const LOG2: Log2Labels = [
@@ -846,11 +847,6 @@ pub struct OffCpuProgram {
     _wakeup_link: OwnedFd,
 }
 
-/// `bpf_probe_read_kernel` is GPL-only, and reading a field out of a
-/// `task_struct` is not possible without it. The declaration covers the
-/// instruction stream in this file, which is what the kernel is asking about.
-const LICENSE: &str = "Dual MIT/GPL";
-
 /// What one drain found, beside the measurements.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct DrainLosses {
@@ -991,8 +987,7 @@ impl OffCpuProgram {
         };
         let (program, leaf_lr_missing) = load_reading_user_lr("off-cpu", build, load)?;
 
-        let link = syscall::raw_tracepoint_open("sched_switch", program.as_raw_fd())
-            .map_err(|error| format!("cannot attach to the `sched_switch` tracepoint: {error}"))?;
+        let link = crate::bpf::program::attach_raw("sched_switch", &program)?;
 
         let wakeup_instructions = wakeup_instructions(btf, in_flight.as_raw_fd())?;
         let wakeup_program = syscall::prog_load(
@@ -1008,8 +1003,7 @@ impl OffCpuProgram {
                 format!("the kernel refused the off-cpu wakeup program: {error}")
             }
         })?;
-        let wakeup_link = syscall::raw_tracepoint_open("sched_wakeup", wakeup_program.as_raw_fd())
-            .map_err(|error| format!("cannot attach to the `sched_wakeup` tracepoint: {error}"))?;
+        let wakeup_link = crate::bpf::program::attach_raw("sched_wakeup", &wakeup_program)?;
 
         Ok(Self {
             descendants,

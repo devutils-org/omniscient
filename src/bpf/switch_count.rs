@@ -33,6 +33,7 @@ use super::insn::{
     count_drop, helper, read_field, Insn, Program, Subject, TaskFields, Whose, BPF_DW, BPF_W, R10,
 };
 use super::map::{map_failure, row_map, select_rows, Counters, Rows};
+use crate::bpf::program::LICENSE;
 
 /// `BPF_MAP_TYPE_LRU_HASH`: a wakeup stamp whose task never ran under the
 /// program is evicted rather than kept forever.
@@ -90,10 +91,6 @@ const VALUE_COUNT: i16 = 0;
 const VALUE_COMM: i16 = 8;
 const COMM_BYTES: usize = 16;
 const ROW_VALUE_BYTES: usize = 24;
-
-/// `bpf_probe_read_kernel` is GPL-only, and the task's name and ids come
-/// through it.
-const LICENSE: &str = "Dual MIT/GPL";
 
 /// One task's switches of one kind over one drain interval.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -339,8 +336,7 @@ impl SwitchCountProgram {
                 format!("the kernel refused the switch-counting program: {error}")
             }
         })?;
-        let link = syscall::raw_tracepoint_open("sched_switch", program.as_raw_fd())
-            .map_err(|error| format!("cannot attach to the `sched_switch` tracepoint: {error}"))?;
+        let link = crate::bpf::program::attach_raw("sched_switch", &program)?;
 
         Ok(Self(Loaded::Counting(Counting {
             descendants,
@@ -856,16 +852,13 @@ impl SwitchStreamProgram {
         })?;
         // The wakeups first, so a switch never looks for a stamp nobody could
         // have written yet.
-        let wakeup_link = |tracepoint: &str| {
-            syscall::raw_tracepoint_open(tracepoint, wakeup_program.as_raw_fd())
-                .map_err(|error| format!("cannot attach to the `{tracepoint}` tracepoint: {error}"))
-        };
+        let wakeup_link =
+            |tracepoint: &str| crate::bpf::program::attach_raw(tracepoint, &wakeup_program);
         let wakeup_links = [
             wakeup_link("sched_wakeup")?,
             wakeup_link("sched_wakeup_new")?,
         ];
-        let link = syscall::raw_tracepoint_open("sched_switch", program.as_raw_fd())
-            .map_err(|error| format!("cannot attach to the `sched_switch` tracepoint: {error}"))?;
+        let link = crate::bpf::program::attach_raw("sched_switch", &program)?;
         let ring = RingBuffer::map(ring_map, bytes)
             .map_err(|error| format!("cannot map the switch ring buffer: {error}"))?;
         Ok(Self {

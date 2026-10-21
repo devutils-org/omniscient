@@ -33,12 +33,11 @@ use super::map::{map_failure, Counters, Hash};
 use super::ring::{ring_bytes, RingBuffer};
 use super::sched_common::{push_current_followed_filter, Descendants, Followed};
 use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
+use crate::bpf::program::load_raw_tracepoint as load;
 
 /// `bpf_probe_read_user_str(dst, size, unsafe_ptr)`, which `insn::helper`
 /// does not name.
 const PROBE_READ_USER_STR: i32 = 114;
-
-const LICENSE: &str = "Dual MIT/GPL";
 
 const ENTER_SIGNATURE: [&str; 2] = ["pt_regs *", "long int"];
 const EXIT_SIGNATURE: [&str; 2] = ["pt_regs *", "long int"];
@@ -177,19 +176,6 @@ pub struct CallsNarrowing {
     pub paths: [Option<PathCall>; PATH_CALLS],
 }
 
-fn check_signature(btf: &Btf, tracepoint: &str, expected: &[&str]) -> Result<(), String> {
-    let signature = btf.tracepoint_signature(tracepoint)?;
-    if signature != expected {
-        return Err(format!(
-            "this kernel declares `{tracepoint}({})`, and this program is written for \
-             `{tracepoint}({})`",
-            signature.join(", "),
-            expected.join(", "),
-        ));
-    }
-    Ok(())
-}
-
 /// Where the two programs find what they read: the raw tracepoints hand over
 /// `(pt_regs *, long)`, the classic ones a record whose offsets tracefs
 /// publishes.
@@ -249,7 +235,7 @@ fn enter_instructions(
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
     if let Context::Raw(btf) = context {
-        check_signature(btf, "sys_enter", &ENTER_SIGNATURE)?;
+        crate::bpf::program::prototype(btf, "sys_enter", &[&ENTER_SIGNATURE], "its arguments")?;
     }
     const LABELS: [(&str, &str); PATH_CALLS] = [
         ("path_0", "path_0_done"),
@@ -343,7 +329,7 @@ fn exit_instructions(
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
     if let Context::Raw(btf) = context {
-        check_signature(btf, "sys_exit", &EXIT_SIGNATURE)?;
+        crate::bpf::program::prototype(btf, "sys_exit", &[&EXIT_SIGNATURE], "its arguments")?;
     }
 
     let mut program = Program::new();
@@ -470,22 +456,6 @@ enum Attached {
     },
 }
 
-fn load(instructions: &[Insn], name: &str) -> Result<OwnedFd, String> {
-    syscall::prog_load(
-        syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
-        instructions,
-        name,
-        LICENSE,
-    )
-    .map_err(|error| {
-        if error.is_permission() {
-            super::permission_advice("loading a raw tracepoint program")
-        } else {
-            format!("the kernel refused the `{name}` program: {error}")
-        }
-    })
-}
-
 impl CallsProgram {
     pub fn load(narrowing: CallsNarrowing, requested_ring_bytes: usize) -> Result<Self, String> {
         Self::load_on(narrowing, requested_ring_bytes, false)
@@ -568,12 +538,8 @@ impl CallsProgram {
             let enter_program = load(&enter, "omn_call_enter")?;
             let exit_program = load(&exit, "omn_call_exit")?;
             // Entry first, for the reason `proc_syscall.rs` gives.
-            let enter_link = syscall::raw_tracepoint_open("sys_enter", enter_program.as_raw_fd())
-                .map_err(|error| {
-                format!("cannot attach to the `sys_enter` tracepoint: {error}")
-            })?;
-            let exit_link = syscall::raw_tracepoint_open("sys_exit", exit_program.as_raw_fd())
-                .map_err(|error| format!("cannot attach to the `sys_exit` tracepoint: {error}"))?;
+            let enter_link = crate::bpf::program::attach_raw("sys_enter", &enter_program)?;
+            let exit_link = crate::bpf::program::attach_raw("sys_exit", &exit_program)?;
             Attached::Raw {
                 enter_program,
                 _enter_link: enter_link,

@@ -15,7 +15,7 @@
 //! on -- and a generic version of them would hide exactly what a reader of
 //! those files needs to see.
 
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 
 use super::btf::Btf;
 use super::insn::{
@@ -490,15 +490,9 @@ impl Descendants {
         let fork = fork_instructions(btf, root, followed.as_raw_fd(), missed.as_raw_fd())?;
         let free = free_instructions(btf, followed.as_raw_fd(), exited.as_raw_fd())?;
         let fork_program = load_raw(&fork, "omn_sched_fork")?;
-        let fork_link =
-            syscall::raw_tracepoint_open("sched_process_fork", fork_program.as_raw_fd()).map_err(
-                |error| format!("cannot attach to the `sched_process_fork` tracepoint: {error}"),
-            )?;
+        let fork_link = crate::bpf::program::attach_raw("sched_process_fork", &fork_program)?;
         let free_program = load_raw(&free, "omn_sched_free")?;
-        let free_link =
-            syscall::raw_tracepoint_open("sched_process_free", free_program.as_raw_fd()).map_err(
-                |error| format!("cannot attach to the `sched_process_free` tracepoint: {error}"),
-            )?;
+        let free_link = crate::bpf::program::attach_raw("sched_process_free", &free_program)?;
         let mut descendants = Self {
             root,
             followed,
@@ -606,20 +600,6 @@ fn load_raw(instructions: &[Insn], name: &str) -> Result<OwnedFd, String> {
     })
 }
 
-fn check_signature(btf: &Btf, tracepoint: &str, expected: &[&str]) -> Result<(), String> {
-    let signature = btf.tracepoint_signature(tracepoint)?;
-    if signature != expected {
-        return Err(format!(
-            "this kernel declares `{tracepoint}({})`, and the program that follows a target's \
-             children is written for `{tracepoint}({})`: it reads tasks out of fixed slots, and \
-             against another prototype those slots hold something else",
-            signature.join(", "),
-            expected.join(", "),
-        ));
-    }
-    Ok(())
-}
-
 /// `sched_process_fork(parent, child)`: the child's thread group joins the map
 /// when the parent's is the root's or is in it.
 ///
@@ -632,7 +612,7 @@ fn fork_instructions(
     followed_fd: i32,
     missed_fd: i32,
 ) -> Result<Vec<Insn>, String> {
-    check_signature(btf, "sched_process_fork", &FORK_SIGNATURE)?;
+    crate::bpf::program::prototype(btf, "sched_process_fork", &[&FORK_SIGNATURE], "tasks")?;
     let tgid_offset = btf.member_offset("task_struct", "tgid")?;
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
@@ -686,7 +666,7 @@ fn fork_instructions(
 /// `sched_process_free(task)`: a thread group leaves the map when its
 /// leader's `task_struct` is freed, which is after every thread of it is.
 fn free_instructions(btf: &Btf, followed_fd: i32, exited_fd: i32) -> Result<Vec<Insn>, String> {
-    check_signature(btf, "sched_process_free", &FREE_SIGNATURE)?;
+    crate::bpf::program::prototype(btf, "sched_process_free", &[&FREE_SIGNATURE], "tasks")?;
     let pid_offset = btf.member_offset("task_struct", "pid")?;
     let tgid_offset = btf.member_offset("task_struct", "tgid")?;
     let mut program = Program::new();

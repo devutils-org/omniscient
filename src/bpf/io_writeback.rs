@@ -30,6 +30,7 @@ use super::insn::{helper, read_field, Insn, Program, BPF_DW, BPF_W, R10};
 use super::map::{map_failure, Counters, Hash};
 use super::ring::{ring_bytes, RingBuffer};
 use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
+use crate::bpf::program::load_raw_tracepoint as load;
 
 /// The prototype both programs are written against.
 const SIGNATURE: [&str; 2] = ["bdi_writeback *", "wb_writeback_work *"];
@@ -45,8 +46,6 @@ const DROP_RING: u32 = 1;
 /// loss: the round began before the programs attached.
 const UNPAIRED: u32 = 2;
 const DROP_SLOTS: u32 = 3;
-
-const LICENSE: &str = "Dual MIT/GPL";
 
 /// One writeback round, as the programs write it and userspace reads it.
 #[repr(C)]
@@ -140,27 +139,18 @@ fn count(program: &mut Program, counters_fd: i32, slot: u32, resume: &'static st
     program.push(Insn::stx(BPF_DW, 0, 0, 1));
 }
 
-fn check_signature(btf: &super::btf::Btf, tracepoint: &str) -> Result<(), String> {
-    let signature = btf.tracepoint_signature(tracepoint)?;
-    if signature != SIGNATURE {
-        return Err(format!(
-            "this kernel declares `{tracepoint}({})`, and this program is written for \
-             `{tracepoint}({})`: it reads the flusher and the work item out of fixed slots, and \
-             against another prototype those slots hold something else",
-            signature.join(", "),
-            SIGNATURE.join(", "),
-        ));
-    }
-    Ok(())
-}
-
 /// `writeback_start`: the round begins. Remember when, and what it may spend.
 fn start_instructions(
     btf: &super::btf::Btf,
     open_fd: i32,
     counters_fd: i32,
 ) -> Result<Vec<Insn>, String> {
-    check_signature(btf, "writeback_start")?;
+    crate::bpf::program::prototype(
+        btf,
+        "writeback_start",
+        &[&SIGNATURE],
+        "the flusher and the work item",
+    )?;
     let nr_pages = btf.member_offset("wb_writeback_work", "nr_pages")?;
 
     let mut program = Program::new();
@@ -199,7 +189,12 @@ fn written_instructions(
     ring_fd: i32,
     counters_fd: i32,
 ) -> Result<Vec<Insn>, String> {
-    check_signature(btf, "writeback_written")?;
+    crate::bpf::program::prototype(
+        btf,
+        "writeback_written",
+        &[&SIGNATURE],
+        "the flusher and the work item",
+    )?;
     let nr_pages = btf.member_offset("wb_writeback_work", "nr_pages")?;
     let sb = btf.member_offset("wb_writeback_work", "sb")?;
     let reason = btf.member_offset("wb_writeback_work", "reason")?;
@@ -330,15 +325,8 @@ impl WritebackProgram {
         // ages out of the map, whereas an end attached first would look for a
         // start nobody wrote -- which is the lookup that fails, and the only
         // thing between that and a duration measured from nothing.
-        let start_link = syscall::raw_tracepoint_open("writeback_start", start_program.as_raw_fd())
-            .map_err(|error| {
-                format!("cannot attach to the `writeback_start` tracepoint: {error}")
-            })?;
-        let written_link =
-            syscall::raw_tracepoint_open("writeback_written", written_program.as_raw_fd())
-                .map_err(|error| {
-                    format!("cannot attach to the `writeback_written` tracepoint: {error}")
-                })?;
+        let start_link = crate::bpf::program::attach_raw("writeback_start", &start_program)?;
+        let written_link = crate::bpf::program::attach_raw("writeback_written", &written_program)?;
 
         let ring = RingBuffer::map(ring_map, bytes)
             .map_err(|error| format!("cannot map the writeback ring buffer: {error}"))?;
@@ -383,22 +371,6 @@ impl WritebackProgram {
     }
 }
 
-fn load(instructions: &[Insn], name: &str) -> Result<OwnedFd, String> {
-    syscall::prog_load(
-        syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
-        instructions,
-        name,
-        LICENSE,
-    )
-    .map_err(|error| {
-        if error.is_permission() {
-            super::permission_advice("loading a raw tracepoint program")
-        } else {
-            format!("the kernel refused the `{name}` program: {error}")
-        }
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,8 +413,13 @@ mod tests {
     fn the_running_kernel_declares_the_prototype_these_programs_assume() {
         let Some(btf) = kernel_btf() else { return };
         for tracepoint in ["writeback_start", "writeback_written"] {
-            check_signature(btf, tracepoint)
-                .unwrap_or_else(|reason| panic!("{tracepoint}: {reason}"));
+            crate::bpf::program::prototype(
+                btf,
+                tracepoint,
+                &[&SIGNATURE],
+                "the flusher and the work item",
+            )
+            .unwrap_or_else(|reason| panic!("{tracepoint}: {reason}"));
         }
     }
 

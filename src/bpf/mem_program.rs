@@ -145,45 +145,6 @@ pub fn load(instructions: &[Insn], name: &str) -> Result<OwnedFd, String> {
     })
 }
 
-/// Refuses a kernel whose tracepoint is not one of the shapes a program was
-/// written for, and says which one it is.
-///
-/// A raw tracepoint hands its program an array of `u64` and nothing in that
-/// array says what any of them is: a program reads slot two as a byte count
-/// because the prototype says so, and against another prototype that slot holds
-/// a pointer and the byte count is four hundred billion. So the prototype is
-/// compared before an instruction is built, and a mismatch is an error naming
-/// both shapes rather than a measurement nobody can tell is wrong.
-///
-/// A program that reads the same slots out of several prototypes -- `kmalloc`
-/// has a trailing `node` argument that 5.15 does not, and nothing before it
-/// moved --
-/// lists them all, and gets back the index of the one this kernel declares. The
-/// catalog's `raw_tracepoint:` requirement lists the same shapes, joined by `|`,
-/// in the same order.
-pub fn check_signature(
-    btf: &super::btf::Btf,
-    tracepoint: &str,
-    accepted: &[&[&str]],
-    reads: &str,
-) -> Result<usize, String> {
-    let signature = btf.tracepoint_signature(tracepoint)?;
-    if let Some(shape) = accepted.iter().position(|shape| signature == *shape) {
-        return Ok(shape);
-    }
-    Err(format!(
-        "this kernel declares `{tracepoint}({})`, and this program is written for {}: it reads \
-         {reads} out of fixed slots, and against another prototype those slots hold something \
-         else",
-        signature.join(", "),
-        accepted
-            .iter()
-            .map(|shape| format!("`{tracepoint}({})`", shape.join(", ")))
-            .collect::<Vec<_>>()
-            .join(" or "),
-    ))
-}
-
 /// The prototypes the catalog's `raw_tracepoint:` requirement lists for one
 /// tracepoint of one source, in the order it lists them.
 ///

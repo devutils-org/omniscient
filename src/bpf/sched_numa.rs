@@ -27,13 +27,14 @@
 //! nowhere else to be, so the scenario for it skips with that number rather
 //! than asserting anything; `docs/families/sched.md` says so.
 
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 
 use super::btf::Btf;
 use super::insn::{count_drop, helper, Insn, Program, BPF_DW, BPF_W, R10};
 use super::map::{map_failure, row_map, select_rows, Counters, Rows};
 use super::sched_common::{count_update_failure, read_field, text_of, E2BIG};
 use super::syscall;
+use crate::bpf::program::LICENSE;
 
 /// Arguments of `sched_stick_numa`, in the raw tracepoint's context.
 const ARG_SRC_TASK: i16 = 0;
@@ -76,10 +77,6 @@ const VALUE_COUNT: i16 = 0;
 const VALUE_COMM: i16 = 8;
 const COMM_BYTES: usize = 16;
 const ROW_VALUE_BYTES: usize = 24;
-
-/// `bpf_probe_read_kernel` is GPL-only, and the task's name and ids come
-/// through it.
-const LICENSE: &str = "Dual MIT/GPL";
 
 /// One `(task, source cpu, destination cpu)` triple's decisions over one
 /// drain interval.
@@ -249,9 +246,7 @@ impl NumaProgram {
                 format!("the kernel refused the NUMA balancing program: {error}")
             }
         })?;
-        let link = syscall::raw_tracepoint_open("sched_stick_numa", program.as_raw_fd()).map_err(
-            |error| format!("cannot attach to the `sched_stick_numa` tracepoint: {error}"),
-        )?;
+        let link = crate::bpf::program::attach_raw("sched_stick_numa", &program)?;
 
         Ok(Self {
             rows,

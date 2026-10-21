@@ -316,8 +316,7 @@ impl DropProgram {
             stacks.as_ref().map(StackTraces::as_raw_fd),
         )?;
         let program = load(&instructions, "omn_kfree_skb")?;
-        let link = syscall::raw_tracepoint_open("kfree_skb", program.as_raw_fd())
-            .map_err(|error| format!("cannot attach to the `kfree_skb` tracepoint: {error}"))?;
+        let link = crate::bpf::program::attach_raw("kfree_skb", &program)?;
         let ring = RingBuffer::map(ring_map, bytes)
             .map_err(|error| format!("cannot map the drop ring buffer: {error}"))?;
 

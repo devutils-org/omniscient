@@ -31,7 +31,7 @@
 //! kernel-built histogram pass through the emit layer without being re-bucketed
 //! into something else.
 
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 
 use super::btf::Btf;
 use super::insn::{
@@ -40,7 +40,7 @@ use super::insn::{
 };
 use super::map::{map_failure, row_map, select_rows, Counters, Hash, Rows};
 use super::sched_common::Descendants;
-use super::syscall;
+use crate::bpf::program::load_raw_tracepoint as load;
 
 /// Helper numbers this family needs and the shared `insn::helper` module does
 /// not name yet; the request to move them there is in `docs/open-findings.md`.
@@ -156,11 +156,6 @@ const PEND_TS: i16 = 0;
 const PEND_NR: i16 = 8;
 const PEND_VALUE_BYTES: usize = 16;
 
-/// `bpf_get_current_comm` is not GPL-only, but `bpf_probe_read_kernel` is and
-/// the rest of this layer declares GPL for it; a program that declared
-/// otherwise would be the one exception nobody expects.
-const LICENSE: &str = "Dual MIT/GPL";
-
 /// One `(task, comm, syscall, bucket)` row's calls over one drain interval.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyscallRow {
@@ -239,21 +234,6 @@ const LOG2: Log2Labels = [
     "log2_done",
 ];
 
-/// Refuses a kernel whose tracepoint is not the shape the program reads.
-fn check_signature(btf: &Btf, tracepoint: &str, expected: &[&str]) -> Result<(), String> {
-    let signature = btf.tracepoint_signature(tracepoint)?;
-    if signature != expected {
-        return Err(format!(
-            "this kernel declares `{tracepoint}({})`, and this program is written for \
-             `{tracepoint}({})`: it reads the syscall number out of a fixed slot, and against \
-             another prototype that slot holds something else",
-            signature.join(", "),
-            expected.join(", "),
-        ));
-    }
-    Ok(())
-}
-
 /// What the two programs are narrowed to before they do any work.
 ///
 /// Both are written into the instruction stream rather than looked up in a map:
@@ -276,7 +256,7 @@ fn enter_instructions(
     pending_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
-    check_signature(btf, "sys_enter", &ENTER_SIGNATURE)?;
+    crate::bpf::program::prototype(btf, "sys_enter", &[&ENTER_SIGNATURE], "the syscall number")?;
 
     let mut program = Program::new();
     // r6 keeps the context, r8 the timestamp and r9 the syscall number; all
@@ -375,7 +355,7 @@ fn exit_instructions(
     rows_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
-    check_signature(btf, "sys_exit", &EXIT_SIGNATURE)?;
+    crate::bpf::program::prototype(btf, "sys_exit", &[&EXIT_SIGNATURE], "the syscall number")?;
 
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
@@ -570,10 +550,8 @@ impl SyscallProgram {
         // exit seen before any entry was recorded would close a call nobody
         // opened, and the lookup that fails is the only thing standing between
         // that and a duration measured from an uninitialised timestamp.
-        let enter_link = syscall::raw_tracepoint_open("sys_enter", enter_program.as_raw_fd())
-            .map_err(|error| format!("cannot attach to the `sys_enter` tracepoint: {error}"))?;
-        let exit_link = syscall::raw_tracepoint_open("sys_exit", exit_program.as_raw_fd())
-            .map_err(|error| format!("cannot attach to the `sys_exit` tracepoint: {error}"))?;
+        let enter_link = crate::bpf::program::attach_raw("sys_enter", &enter_program)?;
+        let exit_link = crate::bpf::program::attach_raw("sys_exit", &exit_program)?;
 
         Ok(Self {
             pending,
@@ -635,22 +613,6 @@ impl SyscallProgram {
     pub fn skipped_by_predicate(&self) -> u64 {
         self.drops.read(SKIPPED_BY_PREDICATE)
     }
-}
-
-fn load(instructions: &[Insn], name: &str) -> Result<OwnedFd, String> {
-    syscall::prog_load(
-        syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
-        instructions,
-        name,
-        LICENSE,
-    )
-    .map_err(|error| {
-        if error.is_permission() {
-            super::permission_advice("loading a raw tracepoint program")
-        } else {
-            format!("the kernel refused the `{name}` program: {error}")
-        }
-    })
 }
 
 #[cfg(test)]

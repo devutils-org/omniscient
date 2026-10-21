@@ -25,7 +25,7 @@
 //! `sched.switches`: a stream of increments costs more than the answer is
 //! worth.
 
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 
 use super::btf::Btf;
 use super::insn::{
@@ -34,6 +34,7 @@ use super::insn::{
 use super::map::{map_failure, row_map, select_rows, Counters, Rows};
 use super::sched_common::{push_followed_filter, Descendants, Followed};
 use super::syscall;
+use crate::bpf::program::LICENSE;
 
 /// Arguments of `sched_stat_runtime`, in the raw tracepoint's context: one
 /// 64-bit slot each.
@@ -71,9 +72,6 @@ const VALUE_UPDATES: i16 = 8;
 const VALUE_COMM: i16 = 16;
 const COMM_BYTES: usize = 16;
 const ROW_VALUE_BYTES: usize = 32;
-
-/// `bpf_probe_read_kernel` is GPL-only.
-const LICENSE: &str = "Dual MIT/GPL";
 
 /// One thread's on-cpu time over one drain interval.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,10 +241,7 @@ impl OnCpuProgram {
                 format!("the kernel refused the on-cpu program: {error}")
             }
         })?;
-        let link = syscall::raw_tracepoint_open("sched_stat_runtime", program.as_raw_fd())
-            .map_err(|error| {
-                format!("cannot attach to the `sched_stat_runtime` tracepoint: {error}")
-            })?;
+        let link = crate::bpf::program::attach_raw("sched_stat_runtime", &program)?;
         Ok(Self {
             descendants,
             rows,

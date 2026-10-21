@@ -30,7 +30,7 @@
 //! by the program: a softirq is keyed by its vector, a hard interrupt by its
 //! line, and the numbers overlap.
 
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 
 use super::btf::Btf;
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
@@ -39,7 +39,7 @@ use super::sched_common::{
     bucket_low_ns, count_drop, count_update_failure, push_log2_bucket, read_field, text_of,
     Log2Labels, E2BIG,
 };
-use super::syscall;
+use crate::bpf::program::load_raw_tracepoint as load;
 
 /// Arguments of the tracepoints, in the raw tracepoint's context. A softirq's
 /// only argument is its vector, in the same first slot.
@@ -135,8 +135,6 @@ const LOG2: Log2Labels = [
     "irq_log2_done",
 ];
 
-const LICENSE: &str = "Dual MIT/GPL";
-
 /// One `(cpu, irq, bucket)` row's handler runs over one drain interval.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IrqRun {
@@ -181,20 +179,6 @@ impl IrqRun {
     }
 }
 
-fn check(btf: &Btf, tracepoint: &str, expected: &[&str]) -> Result<(), String> {
-    let signature = btf.tracepoint_signature(tracepoint)?;
-    if signature != expected {
-        return Err(format!(
-            "this kernel declares `{tracepoint}({})`, and this program is written for \
-             `{tracepoint}({})`: it reads the interrupt number and its action out of fixed \
-             slots, and against another prototype those slots hold something else",
-            signature.join(", "),
-            expected.join(", "),
-        ));
-    }
-    Ok(())
-}
-
 /// Puts a pointer to one of this cpu's in-flight slots in `r0`.
 fn open_slot(program: &mut Program, in_flight_fd: i32, slot: i32) {
     program.push(Insn::st_imm(BPF_W, R10, TS_KEY, slot));
@@ -206,7 +190,12 @@ fn open_slot(program: &mut Program, in_flight_fd: i32, slot: i32) {
 
 /// The program on `irq_handler_entry`: a handler has the cpu.
 fn entry_instructions(btf: &Btf, in_flight_fd: i32) -> Result<Vec<Insn>, String> {
-    check(btf, "irq_handler_entry", &ENTRY_SIGNATURE)?;
+    crate::bpf::program::prototype(
+        btf,
+        "irq_handler_entry",
+        &[&ENTRY_SIGNATURE],
+        "the interrupt number and its action",
+    )?;
 
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
@@ -237,7 +226,12 @@ fn exit_instructions(
     rows_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
-    check(btf, "irq_handler_exit", &EXIT_SIGNATURE)?;
+    crate::bpf::program::prototype(
+        btf,
+        "irq_handler_exit",
+        &[&EXIT_SIGNATURE],
+        "the interrupt number and its action",
+    )?;
     let name_offset = btf.member_offset("irqaction", "name")?;
 
     let mut program = Program::new();
@@ -387,7 +381,12 @@ fn push_row(program: &mut Program, rows_fd: i32, drops_fd: i32, name_offset: Opt
 
 /// The program on `softirq_entry`: a softirq vector has the cpu.
 fn soft_entry_instructions(btf: &Btf, in_flight_fd: i32) -> Result<Vec<Insn>, String> {
-    check(btf, "softirq_entry", &SOFT_SIGNATURE)?;
+    crate::bpf::program::prototype(
+        btf,
+        "softirq_entry",
+        &[&SOFT_SIGNATURE],
+        "the interrupt number and its action",
+    )?;
 
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
@@ -423,7 +422,12 @@ fn soft_exit_instructions(
     rows_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
-    check(btf, "softirq_exit", &SOFT_SIGNATURE)?;
+    crate::bpf::program::prototype(
+        btf,
+        "softirq_exit",
+        &[&SOFT_SIGNATURE],
+        "the interrupt number and its action",
+    )?;
 
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
@@ -561,11 +565,7 @@ impl IrqProgram {
         // stop a handler's length being measured from zero.
         let mut links = Vec::with_capacity(built.len());
         for ((tracepoint, _, _), program) in built.iter().zip(&programs) {
-            links.push(
-                syscall::raw_tracepoint_open(tracepoint, program.as_raw_fd()).map_err(|error| {
-                    format!("cannot attach to the `{tracepoint}` tracepoint: {error}")
-                })?,
-            );
+            links.push(crate::bpf::program::attach_raw(tracepoint, program)?);
         }
 
         Ok(Self {
@@ -604,22 +604,6 @@ impl IrqProgram {
             unopened: self.drops.read(DROP_UNOPENED),
         }
     }
-}
-
-fn load(instructions: &[Insn], name: &str) -> Result<OwnedFd, String> {
-    syscall::prog_load(
-        syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
-        instructions,
-        name,
-        LICENSE,
-    )
-    .map_err(|error| {
-        if error.is_permission() {
-            super::permission_advice("loading a raw tracepoint program")
-        } else {
-            format!("the kernel refused the `{name}` program: {error}")
-        }
-    })
 }
 
 #[cfg(test)]
@@ -732,7 +716,13 @@ mod tests {
                 .expect("a prototype"),
             EXIT_SIGNATURE
         );
-        assert!(check(&btf, "irq_handler_exit", &["int"]).is_err());
+        assert!(crate::bpf::program::prototype(
+            &btf,
+            "irq_handler_exit",
+            &[&["int"]],
+            "the interrupt number and its action"
+        )
+        .is_err());
     }
 
     #[test]

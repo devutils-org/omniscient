@@ -29,8 +29,7 @@ use super::map::{map_failure, Counters, Hash, StackTraces};
 use super::ring::{ring_bytes, RingBuffer};
 use super::sched_common::BPF_F_USER_STACK;
 use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
-
-const LICENSE: &str = "Dual MIT/GPL";
+use crate::bpf::program::LICENSE;
 
 /// What a record is.
 pub const OP_MALLOC: u32 = 1;

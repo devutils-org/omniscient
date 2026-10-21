@@ -54,6 +54,7 @@ use super::map::{map_failure, Counters};
 use super::ring::{ring_bytes, RingBuffer};
 use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
 use super::Support;
+use crate::bpf::program::LICENSE;
 
 // ------------------------------------------------------------------ the ELF
 
@@ -1137,7 +1138,6 @@ fn instructions(
 
 /// `bpf_attach_type::BPF_TRACE_UPROBE_MULTI`.
 const BPF_TRACE_UPROBE_MULTI: u32 = 48;
-const LICENSE: &str = "Dual MIT/GPL";
 
 /// Loads a `BPF_PROG_TYPE_KPROBE` program declared for a uprobe-multi link:
 /// `syscall::prog_load_for`, with this file's refusal wording on top.

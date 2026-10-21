@@ -29,7 +29,7 @@
 //! conditional subtractions; matching against the sixteen combinations instead
 //! would be a list to extend every time the kernel adds a flag.
 
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 
 use super::btf::Btf;
 use super::insn::{helper, Insn, Program, Whose, BPF_DW, BPF_W, R10};
@@ -39,7 +39,7 @@ use super::sched_common::{
     push_current_followed_filter, push_log2_bucket, push_user_lr, read_field, text_of, Descendants,
     Followed, Log2Labels, BPF_F_USER_STACK, BPF_NOEXIST, E2BIG, EEXIST,
 };
-use super::syscall;
+use crate::bpf::program::load_raw_tracepoint as load;
 
 /// Arguments of `sys_enter` and `sys_exit`, in the raw tracepoint's context.
 const ARG_REGS: i16 = 0;
@@ -176,8 +176,6 @@ const LOG2: Log2Labels = [
     "futex_log2_done",
 ];
 
-const LICENSE: &str = "Dual MIT/GPL";
-
 /// One `(address, task, command, stack, bucket)` row's waits over one drain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FutexWait {
@@ -244,20 +242,6 @@ impl FutexWait {
     }
 }
 
-fn check(btf: &Btf, tracepoint: &str, expected: &[&str]) -> Result<(), String> {
-    let signature = btf.tracepoint_signature(tracepoint)?;
-    if signature != expected {
-        return Err(format!(
-            "this kernel declares `{tracepoint}({})`, and this program is written for \
-             `{tracepoint}({})`: it reads the register block and the syscall number out of fixed \
-             slots, and against another prototype those slots hold something else",
-            signature.join(", "),
-            expected.join(", "),
-        ));
-    }
-    Ok(())
-}
-
 /// Loads the caller's ids into `r7` and leaves unless they are the run's.
 ///
 /// Both tracepoints fire on every syscall of every process on the machine,
@@ -281,7 +265,12 @@ fn enter_instructions(
     waiting_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
-    check(btf, "sys_enter", &ENTER_SIGNATURE)?;
+    crate::bpf::program::prototype(
+        btf,
+        "sys_enter",
+        &[&ENTER_SIGNATURE],
+        "the register block and the syscall number",
+    )?;
     let di = btf.syscall_argument(0)?;
     let si = btf.syscall_argument(1)?;
 
@@ -385,7 +374,12 @@ fn exit_instructions(
     stacks_fd: i32,
     leaf_lr: bool,
 ) -> Result<Vec<Insn>, String> {
-    check(btf, "sys_exit", &EXIT_SIGNATURE)?;
+    crate::bpf::program::prototype(
+        btf,
+        "sys_exit",
+        &[&EXIT_SIGNATURE],
+        "the register block and the syscall number",
+    )?;
 
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
@@ -619,10 +613,8 @@ impl FutexProgram {
         // Entries before exits: a wait opened by a program whose partner is not
         // attached yet ages out of the map, whereas an exit seen before any
         // entry was recorded would close a wait nobody opened.
-        let enter_link = syscall::raw_tracepoint_open("sys_enter", enter_program.as_raw_fd())
-            .map_err(|error| format!("cannot attach to the `sys_enter` tracepoint: {error}"))?;
-        let exit_link = syscall::raw_tracepoint_open("sys_exit", exit_program.as_raw_fd())
-            .map_err(|error| format!("cannot attach to the `sys_exit` tracepoint: {error}"))?;
+        let enter_link = crate::bpf::program::attach_raw("sys_enter", &enter_program)?;
+        let exit_link = crate::bpf::program::attach_raw("sys_exit", &exit_program)?;
 
         Ok(Self {
             descendants,
@@ -688,22 +680,6 @@ impl FutexProgram {
             backwards: self.drops.read(DROP_BACKWARDS),
         }
     }
-}
-
-fn load(instructions: &[Insn], name: &str) -> Result<OwnedFd, String> {
-    syscall::prog_load(
-        syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
-        instructions,
-        name,
-        LICENSE,
-    )
-    .map_err(|error| {
-        if error.is_permission() {
-            super::permission_advice("loading a raw tracepoint program")
-        } else {
-            format!("the kernel refused the `{name}` program: {error}")
-        }
-    })
 }
 
 #[cfg(test)]
@@ -864,7 +840,13 @@ mod tests {
             btf.tracepoint_signature("sys_enter").expect("a prototype"),
             ENTER_SIGNATURE
         );
-        assert!(check(&btf, "sys_enter", &["long int"]).is_err());
+        assert!(crate::bpf::program::prototype(
+            &btf,
+            "sys_enter",
+            &[&["long int"]],
+            "the register block and the syscall number"
+        )
+        .is_err());
     }
 
     #[test]

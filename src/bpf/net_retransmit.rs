@@ -262,10 +262,7 @@ impl RetransmitProgram {
             drops.as_raw_fd(),
         )?;
         let program = load(&instructions, "omn_retransmit")?;
-        let link = syscall::raw_tracepoint_open("tcp_retransmit_skb", program.as_raw_fd())
-            .map_err(|error| {
-                format!("cannot attach to the `tcp_retransmit_skb` tracepoint: {error}")
-            })?;
+        let link = crate::bpf::program::attach_raw("tcp_retransmit_skb", &program)?;
         let ring = RingBuffer::map(ring_map, bytes)
             .map_err(|error| format!("cannot map the retransmission ring buffer: {error}"))?;
 

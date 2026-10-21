@@ -739,10 +739,7 @@ impl ConnectProgram {
                 format!("the kernel refused the connect state program: {error}")
             }
         })?;
-        let link = syscall::raw_tracepoint_open("inet_sock_set_state", program.as_raw_fd())
-            .map_err(|error| {
-                format!("cannot attach to the `inet_sock_set_state` tracepoint: {error}")
-            })?;
+        let link = crate::bpf::program::attach_raw("inet_sock_set_state", &program)?;
         let ring = RingBuffer::map(ring_map, bytes)
             .map_err(|error| format!("cannot map the connect ring buffer: {error}"))?;
         Ok(Self {

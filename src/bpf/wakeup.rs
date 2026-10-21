@@ -34,6 +34,7 @@ use super::map::{map_failure, Counters};
 use super::ring::{ring_bytes, RingBuffer};
 use super::sched_common::{push_followed_filter, text_of, Descendants, Followed};
 use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
+use crate::bpf::program::LICENSE;
 
 /// One wakeup, as the program writes it and userspace reads it.
 ///
@@ -580,14 +581,6 @@ pub struct WakeupProgram {
     _link: OwnedFd,
 }
 
-/// The license the program declares.
-///
-/// `bpf_probe_read_kernel` is one of the helpers the kernel marks GPL-only, and
-/// reading a field out of a `task_struct` is not possible without it. The
-/// declaration covers the instruction stream in this file, which is what the
-/// kernel is asking about; `omn` itself stays under its own license.
-const LICENSE: &str = "Dual MIT/GPL";
-
 impl WakeupProgram {
     /// Runs the kernel skipped because one of these programs was already
     /// running on that cpu -- an interrupt re-entering it, since a raw
@@ -659,8 +652,7 @@ impl WakeupProgram {
             }
         })?;
 
-        let link = syscall::raw_tracepoint_open("sched_waking", program.as_raw_fd())
-            .map_err(|error| format!("cannot attach to the `sched_waking` tracepoint: {error}"))?;
+        let link = crate::bpf::program::attach_raw("sched_waking", &program)?;
 
         let ring = RingBuffer::map(ring_map, bytes)
             .map_err(|error| format!("cannot map the wakeup ring buffer: {error}"))?;

@@ -38,8 +38,8 @@ use super::btf::Btf;
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
 use super::map::{map_failure, row_map, select_rows, Counters, Rows};
 use super::mem_program::{
-    bucket_low, check_signature, comm, count_drop, load, long, push_log2_bucket, read_cgroup_id,
-    read_comm, read_pid_tgid, word,
+    bucket_low, comm, count_drop, load, long, push_log2_bucket, read_cgroup_id, read_comm,
+    read_pid_tgid, word,
 };
 use super::syscall;
 use super::DrainLosses;
@@ -357,7 +357,7 @@ fn instructions(
     rows_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
-    check_signature(btf, site.tracepoint, site.signatures, site.reads)?;
+    crate::bpf::program::prototype(btf, site.tracepoint, site.signatures, site.reads)?;
 
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));

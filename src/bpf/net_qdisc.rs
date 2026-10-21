@@ -27,7 +27,7 @@
 //! traffic. What the kernel keeps is a count and an exact total per
 //! `(interface, discipline, log2 bucket)`.
 
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 
 use super::btf::Btf;
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
@@ -36,7 +36,6 @@ use super::net_program::{
     bucket_low_ns, count_drop, expect_signature, load, push_log2_bucket, read_field, read_narrow,
     read_pointer,
 };
-use super::syscall;
 
 /// The prototypes these programs are written against.
 const ENQUEUE_SIGNATURE: [&str; 3] = ["Qdisc *", "netdev_queue *", "sk_buff *"];
@@ -435,14 +434,8 @@ impl QdiscProgram {
         // out of the map; a dequeue seen before any enqueue was recorded would
         // close a wait nobody opened, and the lookup that fails is the only
         // thing standing between that and a duration measured from nothing.
-        let enqueue_link =
-            syscall::raw_tracepoint_open("qdisc_enqueue", enqueue_program.as_raw_fd()).map_err(
-                |error| format!("cannot attach to the `qdisc_enqueue` tracepoint: {error}"),
-            )?;
-        let dequeue_link =
-            syscall::raw_tracepoint_open("qdisc_dequeue", dequeue_program.as_raw_fd()).map_err(
-                |error| format!("cannot attach to the `qdisc_dequeue` tracepoint: {error}"),
-            )?;
+        let enqueue_link = crate::bpf::program::attach_raw("qdisc_enqueue", &enqueue_program)?;
+        let dequeue_link = crate::bpf::program::attach_raw("qdisc_dequeue", &dequeue_program)?;
 
         Ok(Self {
             rows,

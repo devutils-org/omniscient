@@ -77,6 +77,7 @@ use super::request::read_request_id;
 use super::ring::{ring_bytes, RingBuffer};
 use super::sched_common::Descendants;
 use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
+use crate::bpf::program::load_raw_tracepoint as load;
 
 /// Which two moments a program set measures between.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -483,10 +484,6 @@ const ENTRY_VALUE: i16 = -40;
 const ENTRY_KEY: i16 = -48;
 const OPEN_DROP_KEY: i16 = -56;
 
-/// `bpf_probe_read_kernel` is GPL-only, and every field read out of a
-/// `struct request` comes through it.
-const LICENSE: &str = "Dual MIT/GPL";
-
 /// Adds one to a slot of the per-cpu counter array.
 ///
 /// `resume` is where control goes both when the count has been made and when
@@ -505,26 +502,6 @@ fn count(program: &mut Program, counters_fd: i32, key_at: i16, slot: u32, resume
     program.push(Insn::stx(BPF_DW, 0, 0, 1));
 }
 
-/// Checks a tracepoint's prototype against the shapes a program assumes, and
-/// says which one this kernel declares.
-fn check_signature(btf: &Btf, tracepoint: &str, accepted: &[&[&str]]) -> Result<usize, String> {
-    let signature = btf.tracepoint_signature(tracepoint)?;
-    if let Some(shape) = accepted.iter().position(|shape| signature == *shape) {
-        return Ok(shape);
-    }
-    Err(format!(
-        "this kernel declares `{tracepoint}({})`, and this program is written for {}: it reads \
-         the request out of a fixed slot, and against another prototype that slot holds \
-         something else -- which does not fail, it produces a number",
-        signature.join(", "),
-        accepted
-            .iter()
-            .map(|shape| format!("`{tracepoint}({})`", shape.join(", ")))
-            .collect::<Vec<_>>()
-            .join(" or "),
-    ))
-}
-
 /// The program on the opening tracepoint: record when, and by whom.
 ///
 /// Nothing is measured here. What it writes is one map entry per in-flight
@@ -534,7 +511,7 @@ fn check_signature(btf: &Btf, tracepoint: &str, accepted: &[&[&str]]) -> Result<
 /// time.
 /// The program on `block_rq_insert`: who put the request in the queue.
 fn insert_instructions(btf: &Btf, submitters_fd: i32) -> Result<Vec<Insn>, String> {
-    check_signature(btf, "block_rq_insert", &[&REQUEST_SIGNATURE])?;
+    crate::bpf::program::prototype(btf, "block_rq_insert", &[&REQUEST_SIGNATURE], "the request")?;
     const KEY: i16 = -8;
     const VALUE: i16 = -32;
     let mut program = Program::new();
@@ -573,7 +550,7 @@ fn open_instructions(
     let tracepoint = stage
         .opens_at()
         .expect("an open program is only built for a stage that has one");
-    check_signature(btf, tracepoint, &[&REQUEST_SIGNATURE])?;
+    crate::bpf::program::prototype(btf, tracepoint, &[&REQUEST_SIGNATURE], "the request")?;
 
     let mut program = Program::new();
     // r6 keeps the context and r7 the request; both survive helper calls,
@@ -680,7 +657,7 @@ fn close_instructions(
     } else {
         &[&REQUEST_SIGNATURE]
     };
-    check_signature(btf, tracepoint, accepted)?;
+    crate::bpf::program::prototype(btf, tracepoint, accepted, "the request")?;
 
     let sector = btf.member_offset("request", "__sector")?;
     let data_len = btf.member_offset("request", "__data_len")?;
@@ -903,7 +880,7 @@ fn histogram_open_instructions(
     let tracepoint = stage
         .opens_at()
         .expect("an open program is only built for a stage that has one");
-    check_signature(btf, tracepoint, &[&REQUEST_SIGNATURE])?;
+    crate::bpf::program::prototype(btf, tracepoint, &[&REQUEST_SIGNATURE], "the request")?;
 
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
@@ -1023,7 +1000,7 @@ fn histogram_close_instructions(
     } else {
         &[&REQUEST_SIGNATURE]
     };
-    check_signature(btf, tracepoint, accepted)?;
+    crate::bpf::program::prototype(btf, tracepoint, accepted, "the request")?;
     let part = btf.member_offset("request", "part")?;
     let bd_dev = btf.member_offset("block_device", "bd_dev")?;
 
@@ -1435,7 +1412,12 @@ impl BlockProgram {
             }
         };
         let status_is_errno = stage.closes_at() == "block_rq_complete"
-            && check_signature(btf, "block_rq_complete", &COMPLETE_SIGNATURES)? == 1;
+            && crate::bpf::program::prototype(
+                btf,
+                "block_rq_complete",
+                &COMPLETE_SIGNATURES,
+                "the request",
+            )? == 1;
 
         // The opening program is attached first, and that order is not
         // arbitrary. An entry written with no closing program attached ages in
@@ -1462,10 +1444,7 @@ impl BlockProgram {
                 &insert_instructions(btf, map.as_raw_fd())?,
                 "omn_blk_insert",
             )?;
-            let link = syscall::raw_tracepoint_open("block_rq_insert", program.as_raw_fd())
-                .map_err(|error| {
-                    format!("cannot attach to the `block_rq_insert` tracepoint: {error}")
-                })?;
+            let link = crate::bpf::program::attach_raw("block_rq_insert", &program)?;
             (Some(map), Some(program), Some(link))
         } else {
             (None, None, None)
@@ -1494,9 +1473,7 @@ impl BlockProgram {
                     )?
                 };
                 let program = load(&open, "omn_blk_open")?;
-                let link = syscall::raw_tracepoint_open(tracepoint, program.as_raw_fd()).map_err(
-                    |error| format!("cannot attach to the `{tracepoint}` tracepoint: {error}"),
-                )?;
+                let link = crate::bpf::program::attach_raw(tracepoint, &program)?;
                 (Some(program), Some(link))
             }
             None => (None, None),
@@ -1814,22 +1791,6 @@ fn load_tp_btf(
     };
     super::attach::fentry::load_tracing(&function, BPF_TRACE_RAW_TP, instructions, name)
         .map_err(|error| error.to_string())
-}
-
-fn load(instructions: &[Insn], name: &str) -> Result<OwnedFd, String> {
-    syscall::prog_load(
-        syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
-        instructions,
-        name,
-        LICENSE,
-    )
-    .map_err(|error| {
-        if error.is_permission() {
-            super::permission_advice("loading a raw tracepoint program")
-        } else {
-            format!("the kernel refused the `{name}` program: {error}")
-        }
-    })
 }
 
 #[cfg(test)]
@@ -2591,8 +2552,13 @@ mod tests {
     #[test]
     fn a_tracepoint_of_another_shape_is_refused_with_both_prototypes() {
         let Some(btf) = kernel_btf() else { return };
-        let error = check_signature(btf, "block_rq_complete", &[&REQUEST_SIGNATURE])
-            .expect_err("the prototypes differ");
+        let error = crate::bpf::program::prototype(
+            btf,
+            "block_rq_complete",
+            &[&REQUEST_SIGNATURE],
+            "the request",
+        )
+        .expect_err("the prototypes differ");
         assert!(error.contains("blk_status_t"), "{error}");
         assert!(error.contains("produces a number"), "{error}");
     }

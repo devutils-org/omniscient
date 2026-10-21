@@ -39,13 +39,12 @@
 //! The row records when it was created, which is the window's first event
 //! rather than the drain that read it (finding 44).
 
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 
 use super::btf::Btf;
 use super::insn::{self, helper, read_field, read_pointer, Insn, Program, BPF_DW, BPF_W, R10};
 use super::map::{map_failure, row_map, select_rows, Counters, Rows, TaskStorage};
-use super::mem_program::{check_signature, comm, count_drop, load, long, read_comm, word};
-use super::syscall;
+use super::mem_program::{comm, count_drop, load, long, read_comm, word};
 use super::DrainLosses;
 
 /// The two tracepoints, and the prototypes the programs read their slots by.
@@ -443,7 +442,7 @@ fn get_pages_instructions(
     last_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
-    check_signature(
+    crate::bpf::program::prototype(
         btf,
         GET_PAGES,
         &[&GET_PAGES_SIGNATURE],
@@ -547,7 +546,7 @@ fn add_instructions(
     rows_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
-    check_signature(btf, ADD, &[&ADD_SIGNATURE], "the folio")?;
+    crate::bpf::program::prototype(btf, ADD, &[&ADD_SIGNATURE], "the folio")?;
     let at = Offsets::read(btf)?;
 
     let mut program = Program::new();
@@ -688,10 +687,7 @@ impl PageCacheProgram {
         let mut links = Vec::new();
         for (tracepoint, built, name) in sites {
             let program = load(&built, name)?;
-            let link =
-                syscall::raw_tracepoint_open(tracepoint, program.as_raw_fd()).map_err(|error| {
-                    format!("cannot attach to the `{tracepoint}` tracepoint: {error}")
-                })?;
+            let link = crate::bpf::program::attach_raw(tracepoint, &program)?;
             programs.push(program);
             links.push(link);
         }
@@ -914,8 +910,9 @@ mod tests {
     #[test]
     fn the_running_kernel_declares_the_prototypes_these_programs_read() {
         let Some(btf) = kernel_btf() else { return };
-        check_signature(btf, GET_PAGES, &[&GET_PAGES_SIGNATURE], "the range").expect(GET_PAGES);
-        check_signature(btf, ADD, &[&ADD_SIGNATURE], "the folio").expect(ADD);
+        crate::bpf::program::prototype(btf, GET_PAGES, &[&GET_PAGES_SIGNATURE], "the range")
+            .expect(GET_PAGES);
+        crate::bpf::program::prototype(btf, ADD, &[&ADD_SIGNATURE], "the folio").expect(ADD);
         Offsets::read(btf).expect("every field of the chain from a folio to its file");
     }
 

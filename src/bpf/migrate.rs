@@ -23,7 +23,7 @@
 //! where a task arrived, never where it came from, and it says so rather than
 //! reporting the cpu the program happened to run on, which is neither.
 
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 
 use super::btf::Btf;
 use super::insn::{
@@ -32,6 +32,7 @@ use super::insn::{
 use super::map::{map_failure, row_map, select_rows, Counters, Rows};
 use super::sched_common::{push_followed_filter, Descendants, Followed};
 use super::syscall;
+use crate::bpf::program::LICENSE;
 
 /// Arguments of `sched_migrate_task`, in the raw tracepoint's context.
 const ARG_TASK: i16 = 0;
@@ -70,10 +71,6 @@ const VALUE_COUNT: i16 = 0;
 const VALUE_COMM: i16 = 8;
 const COMM_BYTES: usize = 16;
 const ROW_VALUE_BYTES: usize = 24;
-
-/// `bpf_probe_read_kernel` is GPL-only, and the task's name and ids come
-/// through it.
-const LICENSE: &str = "Dual MIT/GPL";
 
 /// One `(task, destination cpu)` pair's migrations over one drain interval.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -281,10 +278,7 @@ impl MigrationProgram {
                 format!("the kernel refused the migration program: {error}")
             }
         })?;
-        let link = syscall::raw_tracepoint_open("sched_migrate_task", program.as_raw_fd())
-            .map_err(|error| {
-                format!("cannot attach to the `sched_migrate_task` tracepoint: {error}")
-            })?;
+        let link = crate::bpf::program::attach_raw("sched_migrate_task", &program)?;
 
         Ok(Self {
             descendants,

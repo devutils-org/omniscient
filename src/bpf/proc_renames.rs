@@ -29,6 +29,7 @@ use super::insn::{
     helper, push_task_filter, read_field, Insn, Program, Subject, TaskFields, Whose, BPF_DW, R10,
 };
 use super::syscall;
+use crate::bpf::program::LICENSE;
 
 /// `BPF_MAP_TYPE_LRU_HASH`: a machine that execs faster than the drain keeps
 /// the most recent names rather than refusing new ones.
@@ -36,8 +37,6 @@ const BPF_MAP_TYPE_LRU_HASH: u32 = 9;
 
 /// How many renamed tasks one drain interval can carry.
 const MAX_RENAMES: u32 = 4096;
-
-const LICENSE: &str = "Dual MIT/GPL";
 
 /// `sched_process_exec(task_struct *, pid_t, linux_binprm *)`.
 const SIGNATURE: [&str; 3] = ["task_struct *", "pid_t", "linux_binprm *"];
@@ -139,10 +138,7 @@ impl Renames {
             LICENSE,
         )
         .map_err(|error| format!("the kernel refused the exec name program: {error}"))?;
-        let link = syscall::raw_tracepoint_open("sched_process_exec", program.as_raw_fd())
-            .map_err(|error| {
-                format!("cannot attach to the `sched_process_exec` tracepoint: {error}")
-            })?;
+        let link = crate::bpf::program::attach_raw("sched_process_exec", &program)?;
         Ok(Self {
             map,
             program,

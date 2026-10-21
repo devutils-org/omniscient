@@ -32,10 +32,7 @@ use super::insn::{
 use super::map::{map_failure, Counters};
 use super::ring::{ring_bytes, RingBuffer};
 use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
-
-/// `bpf_probe_read_kernel` is GPL-only, and every one of these programs reads a
-/// field out of a `task_struct` through it.
-const LICENSE: &str = "Dual MIT/GPL";
+use crate::bpf::program::LICENSE;
 
 /// The prototypes these programs are written against, as the kernel publishes
 /// them in its own BTF, with the tracepoint's leading data pointer dropped.
@@ -358,21 +355,6 @@ pub(super) fn publish(
     program.push(Insn::stx(BPF_DW, 0, 0, 1));
 }
 
-/// Refuses a kernel whose tracepoint is not the shape the program reads.
-fn check_signature(btf: &Btf, tracepoint: &str, expected: &[&str]) -> Result<(), String> {
-    let signature = btf.tracepoint_signature(tracepoint)?;
-    if signature != expected {
-        return Err(format!(
-            "this kernel declares `{tracepoint}({})`, and this program is written for \
-             `{tracepoint}({})`: it reads its arguments out of fixed slots, and against another \
-             prototype those slots hold something else",
-            signature.join(", "),
-            expected.join(", "),
-        ));
-    }
-    Ok(())
-}
-
 /// The program on `sched_process_exec`: a task has just become another program.
 fn exec_instructions(
     btf: &Btf,
@@ -380,7 +362,12 @@ fn exec_instructions(
     ring_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
-    check_signature(btf, "sched_process_exec", &EXEC_SIGNATURE)?;
+    crate::bpf::program::prototype(
+        btf,
+        "sched_process_exec",
+        &[&EXEC_SIGNATURE],
+        "its arguments",
+    )?;
     let fields = TaskFields::locate(btf, whose)?;
     let pid_offset = btf.member_offset("task_struct", "pid")?;
     let tgid_offset = btf.member_offset("task_struct", "tgid")?;
@@ -576,7 +563,12 @@ fn signal_instructions(
     ring_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
-    check_signature(btf, "signal_generate", &SIGNAL_SIGNATURE)?;
+    crate::bpf::program::prototype(
+        btf,
+        "signal_generate",
+        &[&SIGNAL_SIGNATURE],
+        "its arguments",
+    )?;
     let fields = TaskFields::locate(btf, whose)?;
     let pid_offset = btf.member_offset("task_struct", "pid")?;
     let tgid_offset = btf.member_offset("task_struct", "tgid")?;
@@ -710,8 +702,7 @@ impl EventStream {
             }
         })?;
 
-        let link = syscall::raw_tracepoint_open(tracepoint, program.as_raw_fd())
-            .map_err(|error| format!("cannot attach to the `{tracepoint}` tracepoint: {error}"))?;
+        let link = crate::bpf::program::attach_raw(tracepoint, &program)?;
 
         let ring = RingBuffer::map(ring_map, bytes)
             .map_err(|error| format!("cannot map the `{tracepoint}` ring buffer: {error}"))?;
@@ -1117,7 +1108,12 @@ mod tests {
     #[test]
     fn a_tracepoint_of_another_shape_is_refused_with_both_prototypes() {
         let Some(btf) = kernel_btf() else { return };
-        let Err(reason) = check_signature(&btf, "sched_process_exit", &EXEC_SIGNATURE) else {
+        let Err(reason) = crate::bpf::program::prototype(
+            &btf,
+            "sched_process_exit",
+            &[&EXEC_SIGNATURE],
+            "its arguments",
+        ) else {
             panic!("`sched_process_exit` does not have `sched_process_exec`'s prototype");
         };
         assert!(reason.contains("this kernel declares"), "{reason}");

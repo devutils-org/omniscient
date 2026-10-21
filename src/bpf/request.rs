@@ -81,6 +81,7 @@ use super::map::{map_failure, Counters, Hash, TaskStorage};
 use super::ring::{ring_bytes, RingBuffer};
 use super::syscall::{self, BPF_MAP_TYPE_PERCPU_ARRAY, BPF_MAP_TYPE_RINGBUF};
 use super::usdt::{Operand, Site};
+use crate::bpf::program::LICENSE;
 
 #[path = "request_net.rs"]
 mod net;
@@ -478,7 +479,6 @@ const SWITCH_SIGNATURE: [&str; 4] = ["bool", "task_struct *", "task_struct *", "
 const WAKEUP_SIGNATURE: [&str; 1] = ["task_struct *"];
 const ARG_PREV_STATE: i16 = 24;
 const TASK_UNINTERRUPTIBLE: i32 = 2;
-const LICENSE: &str = "Dual MIT/GPL";
 
 /// The file descriptors the programs are built against.
 #[derive(Debug, Clone, Copy)]
@@ -490,19 +490,6 @@ struct Maps {
     counters: i32,
     /// The socket map and the walk to it, when the network rows are followed.
     sockets: Option<(i32, net::Offsets)>,
-}
-
-fn check_signature(btf: &Btf, tracepoint: &str, expected: &[&str]) -> Result<(), String> {
-    let signature = btf.tracepoint_signature(tracepoint)?;
-    if signature != expected {
-        return Err(format!(
-            "this kernel declares `{tracepoint}({})`, and the request programs are written for \
-             `{tracepoint}({})`",
-            signature.join(", "),
-            expected.join(", ")
-        ));
-    }
-    Ok(())
 }
 
 /// `field += r<reg>`, on the storage value in `r7`.
@@ -914,7 +901,7 @@ fn end_instructions(btf: &Btf, site: &Site, maps: Maps) -> Result<Vec<Insn>, Str
 /// `sched_switch`: the task leaving the cpu closes its on-cpu stretch and
 /// opens an off-cpu one; the cpu remembers when it switched.
 fn switch_instructions(btf: &Btf, maps: Maps) -> Result<Vec<Insn>, String> {
-    check_signature(btf, "sched_switch", &SWITCH_SIGNATURE)?;
+    crate::bpf::program::prototype(btf, "sched_switch", &[&SWITCH_SIGNATURE], "its arguments")?;
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
     program.push(Insn::call(helper::KTIME_GET_NS));
@@ -974,7 +961,7 @@ fn switch_instructions(btf: &Btf, maps: Maps) -> Result<Vec<Insn>, String> {
 /// running there: the first run of this program read the lock's holder as the
 /// idle task, tid 0, on every request.
 fn wakeup_instructions(btf: &Btf, maps: Maps) -> Result<Vec<Insn>, String> {
-    check_signature(btf, "sched_waking", &WAKEUP_SIGNATURE)?;
+    crate::bpf::program::prototype(btf, "sched_waking", &[&WAKEUP_SIGNATURE], "its arguments")?;
     let pid = btf.member_offset("task_struct", "pid")?;
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
@@ -1099,11 +1086,7 @@ impl RequestProgram {
                 &instructions,
                 name,
             )?;
-            links.push(
-                syscall::raw_tracepoint_open(tracepoint, program.as_raw_fd()).map_err(|error| {
-                    format!("cannot attach to the `{tracepoint}` tracepoint: {error}")
-                })?,
-            );
+            links.push(crate::bpf::program::attach_raw(tracepoint, &program)?);
             programs.push(program);
         }
         for (sites, build, name) in [
@@ -1535,8 +1518,10 @@ mod tests {
     #[test]
     fn the_running_kernel_declares_the_prototypes_these_programs_assume() {
         let Some(btf) = kernel_btf() else { return };
-        check_signature(btf, "sched_switch", &SWITCH_SIGNATURE).unwrap();
-        check_signature(btf, "sched_waking", &WAKEUP_SIGNATURE).unwrap();
+        crate::bpf::program::prototype(btf, "sched_switch", &[&SWITCH_SIGNATURE], "its arguments")
+            .unwrap();
+        crate::bpf::program::prototype(btf, "sched_waking", &[&WAKEUP_SIGNATURE], "its arguments")
+            .unwrap();
     }
 
     fn with_sockets() -> Option<Maps> {

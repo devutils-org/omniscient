@@ -379,12 +379,8 @@ impl SoftIrqProgram {
         // entry was recorded would close an interval nobody opened, and the
         // zero test is the only thing standing between that and a duration
         // measured from an uninitialised slot.
-        let entry_link = syscall::raw_tracepoint_open("softirq_entry", entry_program.as_raw_fd())
-            .map_err(|error| {
-            format!("cannot attach to the `softirq_entry` tracepoint: {error}")
-        })?;
-        let exit_link = syscall::raw_tracepoint_open("softirq_exit", exit_program.as_raw_fd())
-            .map_err(|error| format!("cannot attach to the `softirq_exit` tracepoint: {error}"))?;
+        let entry_link = crate::bpf::program::attach_raw("softirq_entry", &entry_program)?;
+        let exit_link = crate::bpf::program::attach_raw("softirq_exit", &exit_program)?;
 
         Ok(Self {
             rows,
