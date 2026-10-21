@@ -350,6 +350,9 @@ impl Collector for PageFaultCollector {
             other => other,
         };
         let event = opened.map_err(|error| {
+            if crate::perf::is_ring_too_large(&error) {
+                return crate::perf::task_ring_budget_refusal("page faults", self.pid, &error);
+            }
             format!(
                 "perf_event_open for page faults on pid {} was refused ({error}); \
                  check /proc/sys/kernel/perf_event_paranoid",

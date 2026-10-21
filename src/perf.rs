@@ -2797,6 +2797,31 @@ pub fn ring_budget_refusal(
     )
 }
 
+/// The refusal of a ring that a task's sampler could not map, at the smallest
+/// size: the budget [`ring_budget_refusal`] names is the user's, shared by
+/// every ring the user holds, so other omn or perf sessions sampling at the
+/// same time can leave none for this one. Eight `omn mem.faults` started
+/// together on 24 cpus: five were refused, with a message that sent the
+/// reader to `perf_event_paranoid` (2026-10-21).
+pub fn task_ring_budget_refusal(what: &str, pid: i32, error: &io::Error) -> String {
+    let per_cpu = match kernel_sysctl("perf_event_mlock_kb") {
+        Some(kib) => format!("{kib} KiB"),
+        None => "an unreadable amount".to_owned(),
+    };
+    let memlock = match memlock_kib() {
+        Some(kib) => format!("{kib} KiB"),
+        None => "unlimited".to_owned(),
+    };
+    format!(
+        "perf_event_open for {what} on pid {pid} opened, and its sampling ring did not fit what \
+         this user may still lock ({error}): the rings of every perf session this user holds, \
+         other omn or perf runs included, share /proc/sys/kernel/perf_event_mlock_kb per \
+         online cpu ({per_cpu} here) and then RLIMIT_MEMLOCK ({memlock} here; `ulimit -l`), \
+         unless perf_event_paranoid is -1 or the process holds CAP_IPC_LOCK -- CAP_PERFMON \
+         does not lift it. Close this user's other perf sessions, or raise either limit"
+    )
+}
+
 /// Whether this process may open an event that observes a whole cpu.
 ///
 /// The question a system or core target asks of every `pmu:` backend, and

@@ -556,7 +556,22 @@ fn sweep(sources: &[&str]) -> Vec<Combination> {
                     continue;
                 }
                 let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
-                let output = run(&borrowed);
+                // The user's locked-memory budget for sampling rings is shared
+                // by every perf session the user holds, so the scenarios
+                // sampling beside this one can leave none for a moment: eight
+                // `omn mem.faults` started together were five refused
+                // (2026-10-21). That refusal is the moment's, not the
+                // combination's, and is asked again before it counts.
+                // A scenario profiling the whole machine holds its rings for
+                // seconds, so the question is asked for up to fifteen.
+                let mut output = run(&borrowed);
+                let asked = std::time::Instant::now();
+                while stderr(&output).contains("did not fit what this user may still lock")
+                    && asked.elapsed() < std::time::Duration::from_secs(15)
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    output = run(&borrowed);
+                }
                 let reason = stderr(&output)
                     .lines()
                     .find(|line| line.starts_with("error:"))

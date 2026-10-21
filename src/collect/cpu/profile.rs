@@ -913,6 +913,13 @@ impl Collector for ProfileCollector {
             RING_PAGES,
         )
         .map_err(|error| {
+            if crate::perf::is_ring_too_large(&error) {
+                return crate::perf::task_ring_budget_refusal(
+                    &format!("a {} profile", self.sampled.name),
+                    self.pid,
+                    &error,
+                );
+            }
             format!(
                 "perf_event_open for a {} profile of pid {} was refused ({error}); \
                  check /proc/sys/kernel/perf_event_paranoid",

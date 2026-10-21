@@ -14464,3 +14464,30 @@ the development machine the same day: `scenario_net` (2), `scenario_mem` (2)
 and `scenario_gpu` (1) fail whole-binary with and without 5eb4b13 alike, and
 pass alone; `cross_machine::a_memory_limit_turns_...` failed once under the
 full suite's load and passed eight times alone. Not investigated.
+
+### The "five scenario failures" were a binary without its capabilities, and one real refusal (2026-10-21)
+
+Four of the five failures noted above came from `target/debug/omn` relinked
+by `git stash` round trips without `make`, so without CAP_BPF and CAP_PERFMON,
+on both sides of the comparison: with them, scenario_net (42), scenario_gpu
+(37) and cross_machine (6) pass whole. The fifth was real.
+
+`scenario_mem`'s sweep failed under its siblings: ten `mem.faults` sample and
+trace combinations refused with exit 1. Eight `omn mem.faults` started
+together on this 24-cpu machine reproduced it, five refused with `mmap of 8
+ring pages: Operation not permitted` -- the user's locked-memory budget for
+sampling rings (`perf_event_mlock_kb` per online cpu, then `RLIMIT_MEMLOCK`),
+which every perf session of the user shares -- and the message said to check
+`perf_event_paranoid`. A task sampler's refusal now names that budget, as a
+per-cpu sampler's already did (`perf::task_ring_budget_refusal`, used by
+`mem.faults` and `cpu.profile`), and the sweep asks a combination refused for
+it again for up to 15 s before it counts. Three parallel runs of
+scenario_mem: 42 of 42.
+
+Seen in the full suite the same evening and passing alone once each, timing
+under the suite's own load, not touched by the change: `collect::mem::ibs::
+a_threads_clock_counts_what_it_ran_after_the_start` (30 ms of spinning read as
+19.6 ms), `scenario_runtime::a_probe_follows_every_thread_of_the_process` (one
+thread at 499 of 500), `scenario_gpu::a_target_that_exits_before_the_duration_
+ends_the_run_and_names_it` (a 0.70 s window for a one-second sleep). 3201
+passed, 2 failed in `cargo test --workspace --no-fail-fast`.
