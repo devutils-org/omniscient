@@ -538,28 +538,35 @@ impl VfsCalls {
             }
         }
         let inside_fd = inside.as_ref().map(crate::bpf::map::Hash::as_raw_fd);
+        let mut found = Vec::new();
         for (slot, name) in VFS_CALLS.iter().enumerate() {
-            let function = match index.function(name) {
-                Ok(function) => function,
-                Err(reason) => {
-                    absent.push(format!("`{name}`: {reason}"));
-                    continue;
-                }
-            };
+            match index.function(name) {
+                Ok(function) => found.push((slot, *name, function)),
+                Err(reason) => absent.push(format!("`{name}`: {reason}")),
+            }
+        }
+        let mut requests = Vec::new();
+        for (slot, name, function) in &found {
             let guard = match (*name, inside_fd) {
                 ("do_fsync", Some(fd)) => Guard::Marks(fd),
                 ("vfs_fsync_range", Some(fd)) => Guard::Unless(fd),
                 _ => Guard::Plain,
             };
             let instructions =
-                calls_instructions(&followed, counts.as_raw_fd(), slot as u32, guard);
+                calls_instructions(&followed, counts.as_raw_fd(), *slot as u32, guard);
             crate::bpf::insn::audit(&instructions)?;
-            match fentry::attach(
-                &function,
-                fentry::Side::Entry,
-                &instructions,
-                "omn_vfs_call",
-            ) {
+            requests.push(fentry::Request {
+                function,
+                side: fentry::Side::Entry,
+                instructions,
+                prog_name: "omn_vfs_call",
+            });
+        }
+        // All at once: the kernel installs each trampoline in about 120 ms.
+        let attached = fentry::attach_many(&requests);
+        for ((slot, name, _), result) in found.iter().zip(attached) {
+            let slot = *slot;
+            match result {
                 Ok(link) => links.push((slot as u32, link)),
                 // The first function refused is the machine's answer for all
                 // of them (a permission, a kernel with no trampolines); a later

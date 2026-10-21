@@ -984,6 +984,42 @@ pub fn attach(
     })
 }
 
+/// One program of [`attach_many`]: a function, its half, its instructions
+/// and the program's name.
+pub struct Request<'a> {
+    pub function: &'a Function,
+    pub side: Side,
+    pub instructions: Vec<Insn>,
+    pub prog_name: &'a str,
+}
+
+/// Several programs attached at once, each on a thread of its own, the
+/// results in the order given. Installing a trampoline is mostly the kernel
+/// waiting: about 120 ms an attach on Ubuntu 24.04's 6.8, so `io.vfs`'s twelve
+/// functions took 1.4 s one after the other, and the reads of that time were
+/// in no count (2026-10-21).
+pub fn attach_many(requests: &[Request<'_>]) -> Vec<Result<Link, String>> {
+    std::thread::scope(|scope| {
+        let threads: Vec<_> = requests
+            .iter()
+            .map(|r| scope.spawn(move || attach(r.function, r.side, &r.instructions, r.prog_name)))
+            .collect();
+        threads
+            .into_iter()
+            .map(|t| {
+                t.join()
+                    .unwrap_or_else(|_| Err("the thread attaching a program panicked".to_owned()))
+            })
+            .collect()
+    })
+}
+
+/// [`attach_many`] for a batch that stands or falls together: every link, or
+/// the first refusal in the order given.
+pub fn attach_all(requests: &[Request<'_>]) -> Result<Vec<Link>, String> {
+    attach_many(requests).into_iter().collect()
+}
+
 // ---------------------------------------------------------------------------
 // The timed pair: the shape most fentry sources take.
 //
@@ -1683,23 +1719,28 @@ impl HistogramProgram {
         // is a call that will never be closed -- harmless, the next call on the
         // thread overwrites it -- whereas the other order is never worse than
         // this one and sometimes is.
-        let mut links = Vec::with_capacity(spec.timed.len() * 2);
-        for (timed, _, exit) in &built {
-            links.push(attach(
-                &timed.function,
-                Side::Exit,
-                exit,
-                &format!("{}_x", spec.name),
-            )?);
-        }
-        for (timed, entry, _) in &built {
-            links.push(attach(
-                &timed.function,
-                Side::Entry,
-                entry,
-                &format!("{}_e", spec.name),
-            )?);
-        }
+        // Each half's batch at once (`attach_many`), the exits' first.
+        let (exit_name, entry_name) = (format!("{}_x", spec.name), format!("{}_e", spec.name));
+        let exits: Vec<_> = built
+            .iter()
+            .map(|(timed, _, exit)| Request {
+                function: &timed.function,
+                side: Side::Exit,
+                instructions: exit.clone(),
+                prog_name: &exit_name,
+            })
+            .collect();
+        let entries: Vec<_> = built
+            .iter()
+            .map(|(timed, entry, _)| Request {
+                function: &timed.function,
+                side: Side::Entry,
+                instructions: entry.clone(),
+                prog_name: &entry_name,
+            })
+            .collect();
+        let mut links = attach_all(&exits)?;
+        links.extend(attach_all(&entries)?);
         let now = crate::clock::monotonic_ns();
         Ok(Self {
             pending,

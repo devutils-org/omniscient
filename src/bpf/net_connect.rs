@@ -661,23 +661,27 @@ impl ConnectProgram {
         }
         // Every close before any open, for the reason `HistogramProgram::load`
         // gives.
-        let mut links = Vec::new();
-        for (function, side, instructions) in &closes {
-            links.push(fentry::attach(
+        // Each batch at once (`fentry::attach_many`), the closes' first.
+        let closing: Vec<_> = closes
+            .iter()
+            .map(|(function, side, instructions)| fentry::Request {
                 function,
-                *side,
-                instructions,
-                "omn_conn_close",
-            )?);
-        }
-        for (function, instructions) in &opens {
-            links.push(fentry::attach(
+                side: *side,
+                instructions: instructions.clone(),
+                prog_name: "omn_conn_close",
+            })
+            .collect();
+        let opening: Vec<_> = opens
+            .iter()
+            .map(|(function, instructions)| fentry::Request {
                 function,
-                Side::Entry,
-                instructions,
-                "omn_conn_open",
-            )?);
-        }
+                side: Side::Entry,
+                instructions: instructions.clone(),
+                prog_name: "omn_conn_open",
+            })
+            .collect();
+        let mut links = fentry::attach_all(&closing)?;
+        links.extend(fentry::attach_all(&opening)?);
         let ring = RingBuffer::map(ring_map, bytes)
             .map_err(|error| format!("cannot map the connect ring buffer: {error}"))?;
         Ok(Self {

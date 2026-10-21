@@ -580,23 +580,27 @@ impl FsyncProgram {
         }
         // Every exit before any entry, for the reason `HistogramProgram::load`
         // gives.
-        let mut links = Vec::new();
-        for (shape, _, exit) in &built {
-            links.push(fentry::attach(
-                shape.function,
-                Side::Exit,
-                exit,
-                "omn_fsync_x",
-            )?);
-        }
-        for (shape, entry, _) in &built {
-            links.push(fentry::attach(
-                shape.function,
-                Side::Entry,
-                entry,
-                "omn_fsync_e",
-            )?);
-        }
+        // Each half's batch at once (`fentry::attach_many`).
+        let exits: Vec<_> = built
+            .iter()
+            .map(|(shape, _, exit)| fentry::Request {
+                function: shape.function,
+                side: Side::Exit,
+                instructions: exit.clone(),
+                prog_name: "omn_fsync_x",
+            })
+            .collect();
+        let entries: Vec<_> = built
+            .iter()
+            .map(|(shape, entry, _)| fentry::Request {
+                function: shape.function,
+                side: Side::Entry,
+                instructions: entry.clone(),
+                prog_name: "omn_fsync_e",
+            })
+            .collect();
+        let mut links = fentry::attach_all(&exits)?;
+        links.extend(fentry::attach_all(&entries)?);
         let ring = RingBuffer::map(ring_map, bytes)
             .map_err(|error| format!("cannot map the fsync ring buffer: {error}"))?;
         Ok(Self {
