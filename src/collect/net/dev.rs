@@ -78,7 +78,6 @@ impl Prepared for Prepare {
             }
         };
         Ok(Box::new(DevCollector {
-            id: CollectorId::new(format!("{}/fs:proc", self.0.source())),
             counted: self.0,
             by_direction: self.1,
             only,
@@ -93,7 +92,6 @@ impl Prepared for Prepare {
 
 /// Reads interface counters and reports what moved between reads.
 pub struct DevCollector {
-    id: CollectorId,
     counted: Counted,
     /// One event per direction, keyed `dir:rx` and `dir:tx`.
     by_direction: bool,
@@ -168,10 +166,6 @@ impl DevCollector {
 }
 
 impl Collector for DevCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         self.counted.value_attr()
     }
@@ -265,7 +259,7 @@ impl Collector for DevCollector {
                             Attr::uint(self.counted.value_attr(), value),
                             Attr::text("iface", line.name.clone()),
                         ],
-                        collector_id: self.id.clone(),
+                        collector_id: CollectorId::unstamped(),
                         seq: index,
                     });
                     index += 1;
@@ -285,7 +279,7 @@ impl Collector for DevCollector {
                     Attr::uint("tx", transmitted),
                     Attr::text("iface", line.name),
                 ],
-                collector_id: self.id.clone(),
+                collector_id: CollectorId::unstamped(),
                 seq: index,
             });
             index += 1;
@@ -409,7 +403,6 @@ mod tests {
                 .expect("a system target")
         };
         let mut stale = DevCollector {
-            id: CollectorId::new("net.bytes/fs:proc"),
             counted: Counted::Bytes,
             by_direction: false,
             only: None,

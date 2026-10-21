@@ -901,7 +901,7 @@ fn emitting(emits: &[EmitKind]) -> String {
 fn cannot_serve_target(entry: &Entry, backend: &Backend, kind: TargetKind) -> Option<String> {
     match entry.backend_target_support(backend, kind) {
         TargetSupport::Native => None,
-        TargetSupport::BpfOnly if backend.id.starts_with("bpf") => None,
+        TargetSupport::BpfOnly if backend.kind().narrows_in_program() => None,
         TargetSupport::BpfOnly => Some(format!(
             "a {kind} target needs in-program filtering, which `{}` cannot do",
             backend.id
@@ -1143,7 +1143,7 @@ fn placement(backend: &Backend, entry: &Entry, predicate: &FilterExpr) -> Filter
             ),
         });
     }
-    if backend.id.starts_with("bpf") {
+    if backend.kind().narrows_in_program() {
         let narrowed = if pushed.is_empty() {
             String::new()
         } else {

@@ -61,7 +61,6 @@ impl Prepared for Prepare {
 }
 
 pub struct OnCpuThreads {
-    id: CollectorId,
     whose: Whose,
     program: Option<OnCpuProgram>,
     predicate: Option<FilterExpr>,
@@ -78,7 +77,6 @@ pub struct OnCpuThreads {
 impl OnCpuThreads {
     pub fn new(whose: Whose, predicate: Option<FilterExpr>) -> Self {
         Self {
-            id: CollectorId::new("cpu.oncpu_time/bpf:raw_tp"),
             whose,
             program: None,
             predicate,
@@ -97,7 +95,7 @@ impl OnCpuThreads {
             kind: "cpu.oncpu_time".to_owned(),
             keys: vec![KeyValue::task(row.tid as i32)],
             attrs: attributes(row, window_ns),
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }
     }
@@ -192,10 +190,6 @@ fn attributes(row: &OnCpu, window_ns: u64) -> Vec<Attr> {
 }
 
 impl Collector for OnCpuThreads {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "ns"
     }

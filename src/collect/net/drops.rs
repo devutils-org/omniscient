@@ -77,7 +77,6 @@ impl Prepared for Prepare {
 }
 
 pub struct DropCollector {
-    id: CollectorId,
     /// `trace` is one event per drop; `count` is the single measurement of one
     /// window, totalled per series.
     mode: Mode,
@@ -121,7 +120,6 @@ struct Counted {
 impl DropCollector {
     fn new(mode: Mode, predicate: Option<FilterExpr>) -> Self {
         Self {
-            id: CollectorId::new("net.drops/bpf:raw_tp"),
             mode,
             program: None,
             losses: Losses::default(),
@@ -219,7 +217,7 @@ impl DropCollector {
                 cookie => vec![KeyValue::Sock { cookie }],
             },
             attrs: attributes(dropped, drops, bytes),
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }
     }
@@ -393,10 +391,6 @@ fn attributes(dropped: &PacketDrop, drops: u64, bytes: u64) -> Vec<Attr> {
 }
 
 impl Collector for DropCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "drops"
     }

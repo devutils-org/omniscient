@@ -44,7 +44,6 @@ impl Prepared for Prepare {
         }
         let narrowing = super::vfs::narrowing("io.fsync", target)?;
         Ok(Box::new(FsyncCollector {
-            id: CollectorId::new("io.fsync/bpf:fentry"),
             narrowing,
             program: None,
             losses: Losses::default(),
@@ -66,7 +65,6 @@ impl Prepared for Prepare {
 }
 
 pub struct FsyncCollector {
-    id: CollectorId,
     narrowing: Narrowing,
     program: Option<FsyncProgram>,
     losses: Losses,
@@ -164,7 +162,7 @@ impl FsyncCollector {
                 vec![file, KeyValue::task(record.tid as i32)]
             },
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }
     }
@@ -251,10 +249,6 @@ impl FsyncCollector {
 }
 
 impl Collector for FsyncCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "lat_ns"
     }
@@ -385,7 +379,6 @@ mod tests {
 
     fn collector() -> FsyncCollector {
         FsyncCollector {
-            id: CollectorId::new("io.fsync/bpf:fentry"),
             narrowing: Narrowing::default(),
             program: None,
             losses: Losses::default(),

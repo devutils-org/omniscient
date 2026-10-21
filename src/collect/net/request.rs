@@ -143,7 +143,6 @@ impl Prepared for Prepare {
 }
 
 pub struct RequestCollector {
-    id: CollectorId,
     object: PathBuf,
     program: Option<RequestProgram>,
     losses: Losses,
@@ -235,7 +234,7 @@ fn net_rows(record: &RequestRecord) -> NetRows {
 }
 
 /// The event for one ended request.
-fn event(id: &CollectorId, record: &RequestRecord, seq: u64) -> Event {
+fn event(record: &RequestRecord, seq: u64) -> Event {
     let total = record.done_ns.saturating_sub(record.born_ns);
     let mut attrs = vec![
         Attr::uint("total_ns", total),
@@ -309,7 +308,7 @@ fn event(id: &CollectorId, record: &RequestRecord, seq: u64) -> Event {
         kind: "net.request".to_owned(),
         keys,
         attrs,
-        collector_id: id.clone(),
+        collector_id: CollectorId::unstamped(),
         seq,
     }
 }
@@ -322,11 +321,6 @@ impl RequestCollector {
         predicate: Option<FilterExpr>,
     ) -> Self {
         RequestCollector {
-            id: CollectorId::new(if sockets {
-                "net.request/bpf:usdt"
-            } else {
-                "net.request/bpf:usdt:threads"
-            }),
             sockets,
             program: None,
             losses: Losses::default(),
@@ -439,7 +433,7 @@ impl RequestCollector {
                 self.net.both += 1;
             }
         }
-        let event = event(&self.id, &record, seq + events.len() as u64);
+        let event = event(&record, seq + events.len() as u64);
         if let Some(predicate) = &self.predicate {
             if !crate::filter::matches(predicate, &event) {
                 self.filtered_out += 1;
@@ -598,10 +592,6 @@ impl RequestCollector {
 }
 
 impl Collector for RequestCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "total_ns"
     }
@@ -802,7 +792,7 @@ mod tests {
     fn a_followed_socket_adds_both_rows_and_the_span_they_tile() {
         // Born at 1 ms, ended at 43 ms; first byte at 0.4 ms, drained at 45 ms.
         let record = with_socket(0, 77, [400_000, 1_000, 2_000, 45_000_000], DECLARED);
-        let event = event(&CollectorId::new("t"), &record, 0);
+        let event = event(&record, 0);
         assert!(event.keys.contains(&KeyValue::Sock { cookie: 77 }));
         assert_eq!(value(&event, "rx_queued_ns"), Some(600_000.0));
         assert_eq!(value(&event, "net_rx_ns"), Some(601_000.0));
@@ -816,7 +806,7 @@ mod tests {
     #[test]
     fn an_unseen_first_byte_is_no_row_rather_than_a_zero() {
         let record = with_socket(0, 77, [0, 0, 0, 45_000_000], DECLARED | RX_UNSEEN);
-        let event = event(&CollectorId::new("t"), &record, 0);
+        let event = event(&record, 0);
         assert_eq!(value(&event, "net_rx_ns"), None);
         assert_eq!(value(&event, "span_ns"), None);
         assert_eq!(value(&event, "net_tx_ns"), Some(2_000_000.0));
@@ -865,7 +855,7 @@ mod tests {
     /// them, not rescaled to fit it.
     #[test]
     fn an_ended_request_is_keyed_by_its_id_and_carries_its_states() {
-        let event = event(&CollectorId::new("t"), &record(0), 0);
+        let event = event(&record(0), 0);
         assert_eq!(event.keys[0].to_string(), "req:a3f1");
         assert_eq!(event.keys[1], KeyValue::task(8820));
         let value = |name: &str| event.attr(name).and_then(|value| value.as_f64());
@@ -883,7 +873,7 @@ mod tests {
     /// either.
     #[test]
     fn an_end_under_another_id_carries_both() {
-        let event = event(&CollectorId::new("t"), &record(crate::bpf::ID_MISMATCH), 0);
+        let event = event(&record(crate::bpf::ID_MISMATCH), 0);
         assert_eq!(event.keys[0].to_string(), "req:a3f1");
         assert_eq!(
             event.attr("declared").map(ToString::to_string),
@@ -948,15 +938,11 @@ mod tests {
             bytes[184..192].copy_from_slice(&2_500_000u64.to_ne_bytes());
             RequestRecord::from_bytes(&bytes).expect("a full record")
         };
-        let both = event(
-            &CollectorId::new("t"),
-            &with(DECLARED | RX_BYTES | TX_BYTES),
-            0,
-        );
+        let both = event(&with(DECLARED | RX_BYTES | TX_BYTES), 0);
         assert_eq!(value(&both, "rx_bytes"), Some(517.0));
         assert_eq!(value(&both, "tx_bytes"), Some(40_960.0));
         assert_eq!(value(&both, "holder_since_ns"), Some(2_500_000.0));
-        let neither = event(&CollectorId::new("t"), &with(DECLARED), 0);
+        let neither = event(&with(DECLARED), 0);
         assert_eq!(value(&neither, "rx_bytes"), None);
         assert_eq!(value(&neither, "tx_bytes"), None);
         assert!(RequestRecord::from_bytes(&[0u8; 168]).is_none());
@@ -969,7 +955,7 @@ mod tests {
         let entry = catalog
             .get(&"net.request".parse().expect("an id"))
             .expect("net.request is in the catalog");
-        let event = event(&CollectorId::new("t"), &record(0), 0);
+        let event = event(&record(0), 0);
         for field in &entry.filter_fields {
             assert!(
                 event.attr(field).is_some(),

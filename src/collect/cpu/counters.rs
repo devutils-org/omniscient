@@ -626,7 +626,6 @@ pub(super) fn multiplexing_notes(readings: &[Reading], whose: &str) -> Vec<Strin
 
 /// Reads one source's counters over one window.
 pub struct CounterCollector {
-    id: CollectorId,
     pid: i32,
     spec: &'static Spec,
     group: Option<ThreadCounters>,
@@ -648,7 +647,6 @@ pub struct CounterCollector {
 impl CounterCollector {
     pub fn new(pid: i32, spec: &'static Spec) -> Self {
         Self {
-            id: CollectorId::new(format!("{}/{}", spec.source, spec.backend)),
             pid,
             spec,
             group: None,
@@ -695,17 +693,13 @@ impl CounterCollector {
             kind: self.spec.source.to_owned(),
             keys: vec![KeyValue::task(self.pid)],
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         })
     }
 }
 
 impl Collector for CounterCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         self.spec.value_attr()
     }

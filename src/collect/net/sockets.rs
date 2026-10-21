@@ -135,7 +135,6 @@ impl Prepared for Prepare {
             }
         };
         Ok(Box::new(SocketsCollector {
-            id: CollectorId::new("net.sockets/netlink"),
             only,
             diag: None,
             losses: Losses::default(),
@@ -145,7 +144,6 @@ impl Prepared for Prepare {
 }
 
 pub struct SocketsCollector {
-    id: CollectorId,
     /// One process: only the sockets it holds.
     only: Option<i32>,
     diag: Option<Diag>,
@@ -193,17 +191,13 @@ impl SocketsCollector {
                 cookie: socket.cookie,
             }],
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }
     }
 }
 
 impl Collector for SocketsCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "recv_q"
     }
@@ -307,7 +301,6 @@ mod tests {
         assert!(refusal.contains("unknown"), "{refusal}");
 
         let mut collector = SocketsCollector {
-            id: CollectorId::new("net.sockets/netlink"),
             only: Some(1),
             diag: None,
             losses: Losses::default(),

@@ -614,7 +614,6 @@ impl Common {
         ts_ns: u64,
         ts_err_ns: u64,
         attrs: Vec<Attr>,
-        id: &CollectorId,
         seq: u64,
     ) -> Event {
         let mut keys = vec![KeyValue::task(pid as i32)];
@@ -631,7 +630,7 @@ impl Common {
             kind: self.kind.source().to_owned(),
             keys,
             attrs,
-            collector_id: id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }
     }
@@ -661,7 +660,6 @@ struct Series {
 }
 
 pub struct CountersCollector {
-    id: CollectorId,
     common: Common,
     setups: BTreeMap<(u32, u32), Setup>,
     /// By (pid, kernel, counter).
@@ -755,7 +753,6 @@ pub fn judge(values: &[f64]) -> Judgement {
 impl CountersCollector {
     fn new(socket: Rc<RefCell<Socket>>, reader: usize, launched: i32) -> Self {
         Self {
-            id: CollectorId::new("gpu.counters/vendor:cupti"),
             common: Common::new(Inside::Counters, socket, reader, launched),
             setups: BTreeMap::new(),
             series: BTreeMap::new(),
@@ -882,7 +879,6 @@ impl CountersCollector {
                 values.first_ns,
                 values.last_ns.saturating_sub(values.first_ns),
                 attrs,
-                &self.id,
                 seq as u64,
             );
             events.push(event);
@@ -892,10 +888,6 @@ impl CountersCollector {
 }
 
 impl Collector for CountersCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "value"
     }

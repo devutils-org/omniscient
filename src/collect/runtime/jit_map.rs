@@ -59,7 +59,6 @@ impl Prepared for Prepare {
 }
 
 pub struct JitMapCollector {
-    id: CollectorId,
     pid: i32,
     path: PathBuf,
     /// How much of the file has been turned into events.
@@ -93,7 +92,6 @@ impl JitMapCollector {
     /// lets the tests write one without having to own a pid.
     fn at(path: PathBuf, pid: i32) -> Self {
         Self {
-            id: CollectorId::new("runtime.jit/fs:jit-map"),
             pid,
             path,
             consumed: 0,
@@ -252,7 +250,7 @@ impl JitMapCollector {
                 .into_iter()
                 .chain(comm.map(|comm| Attr::text("comm", comm)))
                 .collect(),
-                collector_id: self.id.clone(),
+                collector_id: CollectorId::unstamped(),
                 seq: index,
             });
             index += 1;
@@ -262,10 +260,6 @@ impl JitMapCollector {
 }
 
 impl Collector for JitMapCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "count"
     }

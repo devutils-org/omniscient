@@ -78,7 +78,6 @@ impl Prepared for Prepare {
 }
 
 pub struct LockCollector {
-    id: CollectorId,
     /// Whose waits are kept.
     filter: Whose,
     program: Option<LockProgram>,
@@ -128,7 +127,6 @@ pub struct LockCollector {
 impl LockCollector {
     pub fn new(filter: Whose, wants_stacks: bool, predicate: Option<FilterExpr>) -> Self {
         Self {
-            id: CollectorId::new("sched.lock/bpf:raw_tp"),
             filter,
             program: None,
             losses: Losses::default(),
@@ -202,7 +200,7 @@ impl LockCollector {
                 // it.
                 keys: vec![KeyValue::task(row.tid as i32)],
                 attrs: attributes(&row, window_ns),
-                collector_id: self.id.clone(),
+                collector_id: CollectorId::unstamped(),
                 seq: seq + index as u64,
             };
             if let Some(ppid) = self.parents.of(row.tgid) {
@@ -516,10 +514,6 @@ fn attributes(row: &LockWait, window_ns: u64) -> Vec<Attr> {
 }
 
 impl Collector for LockCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "wait_ns"
     }

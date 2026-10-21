@@ -143,7 +143,6 @@ impl Prepared for Prepare {
 
 /// Reads one footprint of one process.
 pub struct FootprintCollector {
-    id: CollectorId,
     pid: i32,
     /// The process across containers (`KeyValue::proc_of`), read once: a
     /// process does not change pid namespace, and an exec keeps it. `None`
@@ -168,7 +167,6 @@ pub struct FootprintCollector {
 impl FootprintCollector {
     pub fn new(pid: i32, metric: Metric, source: Source, interval: Duration) -> Self {
         Self {
-            id: CollectorId::new(format!("{}/fs:proc:{}", metric.source_id(), source.label())),
             pid,
             proc_key: KeyValue::proc_of(pid),
             metric,
@@ -321,10 +319,6 @@ fn statm_virt_shared(text: &str) -> Option<(u64, u64)> {
 }
 
 impl Collector for FootprintCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "bytes"
     }
@@ -361,7 +355,7 @@ impl Collector for FootprintCollector {
                 .chain(self.proc_key.clone())
                 .collect(),
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }])
     }
@@ -405,7 +399,7 @@ impl FootprintCollector {
                         .chain(self.proc_key.clone())
                         .collect(),
                     attrs,
-                    collector_id: self.id.clone(),
+                    collector_id: CollectorId::unstamped(),
                     seq: seq + index as u64,
                 }
             })

@@ -87,7 +87,6 @@ impl Prepared for Prepare {
 
 /// Measures one process's working set by clearing and re-reading.
 pub struct WorkingSet {
-    id: CollectorId,
     pid: i32,
     rollup: PathBuf,
     clear_refs: PathBuf,
@@ -102,7 +101,6 @@ pub struct WorkingSet {
 impl WorkingSet {
     pub fn new(pid: i32, interval: std::time::Duration) -> Self {
         Self {
-            id: CollectorId::new("mem.wss/fs:proc:clear_refs"),
             pid,
             rollup: PathBuf::from(format!("/proc/{pid}/smaps_rollup")),
             clear_refs: PathBuf::from(format!("/proc/{pid}/clear_refs")),
@@ -215,10 +213,6 @@ fn still_running(pid: i32) -> bool {
 }
 
 impl Collector for WorkingSet {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "bytes"
     }
@@ -288,7 +282,7 @@ impl Collector for WorkingSet {
             kind: "mem.wss".to_owned(),
             keys: vec![KeyValue::task(self.pid)],
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }])
     }

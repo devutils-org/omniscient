@@ -52,7 +52,6 @@ impl Prepared for Prepare {
 }
 
 pub struct SwitchCountCollector {
-    id: CollectorId,
     whose: Whose,
     program: Option<SwitchCountProgram>,
     losses: Losses,
@@ -77,7 +76,6 @@ pub struct SwitchCountCollector {
 impl SwitchCountCollector {
     pub fn new(whose: Whose, predicate: Option<FilterExpr>) -> Self {
         Self {
-            id: CollectorId::new("sched.switches/bpf:raw_tp"),
             whose,
             program: None,
             losses: Losses::default(),
@@ -105,7 +103,7 @@ impl SwitchCountCollector {
             kind: "sched.switches".to_owned(),
             keys: vec![KeyValue::task(row.tid as i32)],
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }
     }
@@ -230,10 +228,6 @@ fn attributes(row: &SwitchCount, window_ns: u64) -> Vec<Attr> {
 }
 
 impl Collector for SwitchCountCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "count"
     }

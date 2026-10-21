@@ -202,7 +202,6 @@ enum Opened {
 }
 
 pub struct Topdown {
-    id: CollectorId,
     scope: Scoped,
     counters: Vec<Counter>,
     opened: Option<Opened>,
@@ -220,7 +219,6 @@ impl Topdown {
             Scoped::Cpus(_) | Scoped::Cgroup(..) => Comm::of(0),
         };
         Self {
-            id: CollectorId::new("cpu.topdown/pmu"),
             scope,
             counters: Vec::new(),
             opened: None,
@@ -268,17 +266,13 @@ impl Topdown {
             kind: "cpu.topdown".to_owned(),
             keys,
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         })
     }
 }
 
 impl Collector for Topdown {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     /// The fraction of slots that did useful work. The other three say where
     /// the rest went and travel on the same event; this is the one a series is
     /// built from, because it is the only one of the four that is better when

@@ -172,7 +172,6 @@ pub(super) fn descendants(root: &Cgroup) -> Result<BTreeSet<u64>, String> {
 }
 
 pub struct AllocationCollector {
-    id: CollectorId,
     allocator: Allocator,
     /// What the two declared modes differ by: `trace` publishes one event per
     /// row per drain, `count` adds the drains up and reports one total per row
@@ -223,10 +222,6 @@ impl AllocationCollector {
         predicate: Option<FilterExpr>,
     ) -> Self {
         Self {
-            id: CollectorId::new(match allocator {
-                Allocator::Pages => "mem.page_alloc/bpf:raw_tp",
-                Allocator::Slab => "mem.kmalloc/bpf:raw_tp",
-            }),
             allocator,
             mode,
             cgroups,
@@ -327,7 +322,7 @@ impl AllocationCollector {
                 kind: self.kind().to_owned(),
                 keys: self.keys_of(&row),
                 attrs: attributes(allocator, &row, window_ns),
-                collector_id: self.id.clone(),
+                collector_id: CollectorId::unstamped(),
                 seq: seq + index,
             };
             if let Some(predicate) = &self.predicate {
@@ -476,10 +471,6 @@ fn page_bytes() -> u64 {
 }
 
 impl Collector for AllocationCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         match self.allocator {
             Allocator::Pages => "pages",
@@ -524,7 +515,7 @@ impl Collector for AllocationCollector {
                     kind: self.kind().to_owned(),
                     keys: self.keys_of(&row),
                     attrs: attributes(allocator, &row, window_ns),
-                    collector_id: self.id.clone(),
+                    collector_id: CollectorId::unstamped(),
                     seq: seq + index as u64,
                 });
             }

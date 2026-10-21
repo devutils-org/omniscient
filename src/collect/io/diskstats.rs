@@ -257,7 +257,6 @@ impl Prepared for Prepare {
 
 /// Reads one line per block device and keeps the ones that stand on their own.
 pub struct Diskstats {
-    id: CollectorId,
     metric: Metric,
     mode: Mode,
     path: PathBuf,
@@ -288,7 +287,6 @@ pub struct Diskstats {
 impl Diskstats {
     pub fn new(metric: Metric, mode: Mode, path: PathBuf) -> Self {
         Self {
-            id: CollectorId::new(format!("{}/fs:proc", metric.source_id())),
             metric,
             mode,
             path,
@@ -437,7 +435,7 @@ impl Diskstats {
                             KeyValue::dir(direction),
                         ],
                         attrs,
-                        collector_id: self.id.clone(),
+                        collector_id: CollectorId::unstamped(),
                         seq: index,
                     });
                     index += 1;
@@ -458,7 +456,7 @@ impl Diskstats {
                     minor: device.minor,
                 }],
                 attrs,
-                collector_id: self.id.clone(),
+                collector_id: CollectorId::unstamped(),
                 seq: index,
             });
             index += 1;
@@ -520,7 +518,7 @@ impl Diskstats {
                         minor: device.minor,
                     }],
                     attrs,
-                    collector_id: self.id.clone(),
+                    collector_id: CollectorId::unstamped(),
                     seq: seq + offset as u64,
                 }
             })
@@ -529,10 +527,6 @@ impl Diskstats {
 }
 
 impl Collector for Diskstats {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         self.metric.value_attr()
     }

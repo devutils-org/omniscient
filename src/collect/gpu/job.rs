@@ -76,7 +76,6 @@ impl Prepared for Prepare {
 }
 
 pub struct JobCollector {
-    id: CollectorId,
     program: Option<GpuJobProgram>,
     losses: Losses,
     /// The kernel's skipped runs of the program, cumulative, as last read.
@@ -92,7 +91,6 @@ pub struct JobCollector {
 impl JobCollector {
     pub fn new(predicate: Option<FilterExpr>) -> Self {
         Self {
-            id: CollectorId::new("gpu.job/bpf:tp"),
             program: None,
             losses: Losses::default(),
             skipped: 0,
@@ -149,7 +147,7 @@ impl JobCollector {
                     KeyValue::task(job.tid as i32),
                 ],
                 attrs: attributes(&job, window_ns),
-                collector_id: self.id.clone(),
+                collector_id: CollectorId::unstamped(),
                 seq: seq + index as u64,
             };
             if let Some(predicate) = &self.predicate {
@@ -245,10 +243,6 @@ fn attributes(job: &GpuJob, window_ns: u64) -> Vec<Attr> {
 }
 
 impl Collector for JobCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "job_ns"
     }
@@ -369,7 +363,6 @@ mod tests {
     /// by context alone would have nothing to join on.
     #[test]
     fn an_event_carries_the_fences_whole_identity() {
-        let collector = JobCollector::new(None);
         let mut events = Vec::new();
         // Built the way `drain_into` builds one, without a program to drain.
         let job = job();
@@ -385,7 +378,7 @@ mod tests {
                 KeyValue::task(job.tid as i32),
             ],
             attrs: attributes(&job, 1),
-            collector_id: collector.id().clone(),
+            collector_id: CollectorId::unstamped(),
             seq: 0,
         });
         let Some(KeyValue::Gpu { fence_ctx, seqno }) = events[0]

@@ -63,7 +63,6 @@ impl Prepared for Prepare {
 }
 
 pub struct Wakeups {
-    id: CollectorId,
     proc_root: PathBuf,
     pid: i32,
     proc_key: Option<KeyValue>,
@@ -75,7 +74,6 @@ pub struct Wakeups {
 impl Wakeups {
     fn new(proc_root: PathBuf, pid: i32) -> Self {
         Self {
-            id: CollectorId::new("power.wakeups/fs:proc"),
             proc_root,
             pid,
             proc_key: None,
@@ -143,10 +141,6 @@ fn wakeups_between(before: &BTreeMap<i32, u64>, after: &BTreeMap<i32, u64>) -> (
 }
 
 impl Collector for Wakeups {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "wakeups"
     }
@@ -208,7 +202,7 @@ impl Collector for Wakeups {
                 Attr::uint("threads_exited", exited),
                 Attr::uint("interval_ns", interval_ns),
             ],
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }])
     }
@@ -229,7 +223,6 @@ impl Collector for Wakeups {
 type Processes = BTreeMap<i32, (String, BTreeMap<i32, u64>)>;
 
 pub struct MachineWakeups {
-    id: CollectorId,
     proc_root: PathBuf,
     /// Each process's threads' voluntary switches at the previous read, and
     /// its name.
@@ -240,7 +233,6 @@ pub struct MachineWakeups {
 impl MachineWakeups {
     fn new(proc_root: PathBuf) -> Self {
         Self {
-            id: CollectorId::new("power.wakeups/fs:proc"),
             proc_root,
             previous: None,
             losses: Losses::default(),
@@ -275,10 +267,6 @@ impl MachineWakeups {
 }
 
 impl Collector for MachineWakeups {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "wakeups"
     }
@@ -328,7 +316,7 @@ impl Collector for MachineWakeups {
                     Attr::uint("threads_exited", exited),
                     Attr::uint("interval_ns", interval_ns),
                 ],
-                collector_id: self.id.clone(),
+                collector_id: CollectorId::unstamped(),
                 seq: seq + events.len() as u64,
             });
         }

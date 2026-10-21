@@ -99,7 +99,6 @@ fn attributes(wakeup: &Wakeup) -> Vec<Attr> {
 }
 
 pub struct WakeupCollector {
-    id: CollectorId,
     /// Whose wakeups are kept, at either end.
     filter: Whose,
     program: Option<WakeupProgram>,
@@ -127,7 +126,6 @@ pub struct WakeupCollector {
 impl WakeupCollector {
     pub fn new(filter: Whose) -> Self {
         Self {
-            id: CollectorId::new("sched.wakeup/bpf:raw_tp"),
             filter,
             program: None,
             losses: Losses::default(),
@@ -147,7 +145,6 @@ impl WakeupCollector {
         let Some(program) = self.program.as_mut() else {
             return;
         };
-        let id = self.id.clone();
         let mut index = seq;
         let mut undecoded = 0;
         let predicate = self.predicate.as_ref();
@@ -167,7 +164,7 @@ impl WakeupCollector {
                     // that event, which is what the join reads.
                     keys: vec![KeyValue::task(wakeup.wakee_tid as i32)],
                     attrs: attributes(&wakeup),
-                    collector_id: id.clone(),
+                    collector_id: CollectorId::unstamped(),
                     seq: index,
                 };
                 // The woken task's parent, as the other sched sources give it.
@@ -238,10 +235,6 @@ impl WakeupCollector {
 }
 
 impl Collector for WakeupCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "count"
     }
@@ -368,24 +361,22 @@ mod tests {
     /// builds.
     #[test]
     fn the_machine_target_filters_on_nothing_and_a_pid_target_filters_on_it() {
-        let collector = Box::new(Prepare {
+        let _collector = Box::new(Prepare {
             mode: Mode::Trace,
             filter: None,
         })
         .attach(&Target::System)
         .expect("a machine-wide collector");
-        assert_eq!(collector.id().as_str(), "sched.wakeup/bpf:raw_tp");
 
         let prepared = Box::new(Prepare {
             mode: Mode::Trace,
             filter: None,
         });
-        let collector = prepared
+        let _collector = prepared
             // A process that exists: inside a container a pid is translated to the
             // kernel's, and one nobody has is refused there.
             .attach(&Target::Pid(vec![std::process::id() as i32]))
             .expect("a per-process collector");
-        assert_eq!(collector.id().as_str(), "sched.wakeup/bpf:raw_tp");
     }
 
     /// Whether this machine lets the tests load a program at all. Without the

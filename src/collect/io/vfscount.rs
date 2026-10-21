@@ -46,7 +46,6 @@ impl Prepared for Prepare {
 }
 
 pub struct VfsCount {
-    id: CollectorId,
     whose: Whose,
     mode: Mode,
     predicate: Option<FilterExpr>,
@@ -65,7 +64,6 @@ pub struct VfsCount {
 impl VfsCount {
     pub fn new(whose: Whose, mode: Mode, predicate: Option<FilterExpr>) -> Self {
         Self {
-            id: CollectorId::new("io.vfs/bpf:fentry"),
             whose,
             mode,
             predicate,
@@ -109,7 +107,7 @@ impl VfsCount {
                     kind: "io.vfs".to_owned(),
                     keys: Vec::new(),
                     attrs: vec![Attr::uint("calls", calls), Attr::text("op", *op)],
-                    collector_id: self.id.clone(),
+                    collector_id: CollectorId::unstamped(),
                     seq,
                 };
                 if !crate::filter::matches(predicate, &probe) {
@@ -138,7 +136,7 @@ impl VfsCount {
                         Attr::uint("interval_ns", interval_ns),
                         Attr::text("op", count.name),
                     ],
-                    collector_id: self.id.clone(),
+                    collector_id: CollectorId::unstamped(),
                     seq: seq + offset as u64,
                 })
                 .collect();
@@ -154,7 +152,7 @@ impl VfsCount {
             kind: "io.vfs".to_owned(),
             keys: Vec::new(),
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }]
     }
@@ -205,10 +203,6 @@ impl VfsCount {
 }
 
 impl Collector for VfsCount {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "calls"
     }

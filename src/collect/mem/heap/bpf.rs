@@ -21,7 +21,7 @@ use crate::collect::runtime::objects;
 use crate::collect::task::Comms;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::emit::STACK_ID_ATTR;
-use crate::event::{Attr, CollectorId, Event};
+use crate::event::{Attr, Event};
 use crate::request::{Emit, Mode, Target};
 use crate::stack::{Frame, RawStack, Symbolizer};
 
@@ -72,7 +72,6 @@ impl Prepared for Prepare {
         })?;
         let library = allocator(&self.target, pid)?;
         Ok(Box::new(HeapUprobes {
-            id: CollectorId::new("mem.heap.alloc/bpf:uprobe"),
             pid,
             library,
             wants_stacks: self.emits.contains(&Emit::Stack),
@@ -89,7 +88,6 @@ impl Prepared for Prepare {
 }
 
 pub struct HeapUprobes {
-    id: CollectorId,
     pid: i32,
     /// The file the uprobes are placed in.
     library: PathBuf,
@@ -190,7 +188,6 @@ impl HeapUprobes {
                     &record,
                     &mut self.live,
                     &mut self.comms,
-                    &self.id,
                     seq + events.len() as u64,
                 );
                 if let (Some(id), true) = (stack, record.op == OP_ALLOC) {
@@ -204,10 +201,6 @@ impl HeapUprobes {
 }
 
 impl Collector for HeapUprobes {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "bytes"
     }
@@ -437,7 +430,6 @@ mod tests {
         let records: Vec<Record> = calls.iter().flat_map(records_of).collect();
         let mut live =
             super::super::live::LiveCollector::new(Fake(records), StdDuration::from_secs(1));
-        assert_eq!(live.id().to_string(), "mem.heap.live/bpf:uprobe");
         let last = live.stop();
         assert_eq!(last[0].attr("bytes").unwrap().as_f64(), Some(300.0));
         assert_eq!(last[0].attr("allocations").unwrap().as_f64(), Some(1.0));
@@ -449,11 +441,10 @@ mod tests {
     fn the_events_are_the_preload_backend_s() {
         let mut live = LiveSet::default();
         let mut comms = Comms::new();
-        let id = CollectorId::new("t");
         let alloc = records_of(&call(OP_MALLOC, 0x4000, 4096, 0));
         let free = records_of(&call(CALL_FREE, 0x4000, 0, 0));
-        let first = event_of(&alloc[0], &mut live, &mut comms, &id, 0);
-        let second = event_of(&free[0], &mut live, &mut comms, &id, 1);
+        let first = event_of(&alloc[0], &mut live, &mut comms, 0);
+        let second = event_of(&free[0], &mut live, &mut comms, 1);
         assert_eq!(first.attr("bytes").unwrap().as_f64(), Some(4096.0));
         assert_eq!(second.attr("freed_bytes").unwrap().as_f64(), Some(4096.0));
     }

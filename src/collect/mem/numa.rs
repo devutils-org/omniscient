@@ -54,7 +54,6 @@ impl Prepared for Prepare {
 
 /// Reads one process's page placement.
 pub struct NumaCollector {
-    id: CollectorId,
     pid: i32,
     path: PathBuf,
     comm: Comm,
@@ -64,7 +63,6 @@ pub struct NumaCollector {
 impl NumaCollector {
     pub fn new(pid: i32, interval: std::time::Duration) -> Self {
         Self {
-            id: CollectorId::new("mem.numa/fs:proc"),
             pid,
             path: PathBuf::from(format!("/proc/{pid}/numa_maps")),
             comm: Comm::of(pid),
@@ -92,10 +90,6 @@ impl NumaCollector {
 }
 
 impl Collector for NumaCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "pages"
     }
@@ -128,7 +122,7 @@ impl Collector for NumaCollector {
                     // task alone folded every node of a process into one.
                     keys: vec![KeyValue::node(node), KeyValue::task(self.pid)],
                     attrs,
-                    collector_id: self.id.clone(),
+                    collector_id: CollectorId::unstamped(),
                     seq,
                 }
             })

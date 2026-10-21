@@ -207,7 +207,6 @@ fn first(pids: &[i32], kind: &str) -> Result<i32, String> {
 }
 
 pub struct BlockCollector {
-    id: CollectorId,
     measure: Measure,
     mode: Mode,
     submitter: Submitter,
@@ -280,7 +279,6 @@ impl BlockCollector {
         predicate: Option<FilterExpr>,
     ) -> Self {
         Self {
-            id: CollectorId::new(format!("{}/bpf:raw_tp", measure.source_id())),
             measure,
             mode,
             submitter,
@@ -351,7 +349,7 @@ impl BlockCollector {
                     Attr::uint("dev_major", u64::from(major)),
                     Attr::uint("dev_minor", u64::from(minor)),
                 ],
-                collector_id: self.id.clone(),
+                collector_id: CollectorId::unstamped(),
                 seq: seq + index as u64,
             });
         }
@@ -533,7 +531,7 @@ impl BlockCollector {
             .chain(direction(record.cmd_flags).map(KeyValue::dir))
             .collect(),
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }
     }
@@ -671,10 +669,6 @@ fn rwbs(cmd_flags: u32) -> String {
 }
 
 impl Collector for BlockCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         self.measure.value_attr()
     }
@@ -747,7 +741,7 @@ impl Collector for BlockCollector {
                     Attr::uint("requests", self.counted),
                     Attr::uint("window_ns", monotonic_ns().saturating_sub(self.opened_ns)),
                 ],
-                collector_id: self.id.clone(),
+                collector_id: CollectorId::unstamped(),
                 seq: u64::MAX / 2,
             });
         }

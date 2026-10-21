@@ -69,7 +69,6 @@ impl Prepared for Prepare {
 }
 
 pub struct IrqCollector {
-    id: CollectorId,
     /// The cpus a `--cpu` run asked about, or none for the machine.
     ///
     /// Applied here rather than in the program, and that is a real difference:
@@ -101,7 +100,6 @@ pub struct IrqCollector {
 impl IrqCollector {
     pub fn new(cpus: Option<Vec<u32>>, mode: Mode, predicate: Option<FilterExpr>) -> Self {
         Self {
-            id: CollectorId::new("sched.irq/bpf:raw_tp"),
             cpus,
             mode,
             program: None,
@@ -151,7 +149,7 @@ impl IrqCollector {
             // time and to which device.
             keys: vec![KeyValue::cpu(row.cpu)],
             attrs: attributes(row, window_ns),
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }
     }
@@ -342,10 +340,6 @@ fn softirq_name(vector: u32) -> String {
 }
 
 impl Collector for IrqCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "handler_ns"
     }

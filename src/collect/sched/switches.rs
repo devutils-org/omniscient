@@ -71,7 +71,6 @@ impl Prepared for Prepare {
 }
 
 pub struct SwitchCollector {
-    id: CollectorId,
     followed: Followed,
     mode: Mode,
     event: Option<ThreadSampler>,
@@ -97,7 +96,6 @@ impl SwitchCollector {
     /// A collector over the process `pid` (0: the calling thread).
     pub fn new(pid: i32, mode: Mode) -> Self {
         Self {
-            id: CollectorId::new("sched.switches/pmu:sw"),
             followed: if pid == 0 {
                 Followed::Task(0)
             } else {
@@ -137,7 +135,6 @@ impl SwitchCollector {
         let Some(event) = self.event.as_mut() else {
             return;
         };
-        let id = self.id.clone();
         let comms = &mut self.comms;
         let tgids = &mut self.tgids;
         let seen = &mut self.sampled_tasks;
@@ -187,7 +184,7 @@ impl SwitchCollector {
                         }
                         attrs
                     },
-                    collector_id: id.clone(),
+                    collector_id: CollectorId::unstamped(),
                     seq: index,
                 });
                 index += 1;
@@ -224,10 +221,6 @@ impl SwitchCollector {
 }
 
 impl Collector for SwitchCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "count"
     }

@@ -52,7 +52,6 @@ impl Prepared for Prepare {
             )
         })?;
         Ok(Box::new(StatusCollector {
-            id: CollectorId::new(format!("{}/fs:proc", self.0.source())),
             counted: self.0,
             pid,
             proc_key: KeyValue::proc_of(pid),
@@ -64,7 +63,6 @@ impl Prepared for Prepare {
 }
 
 pub struct StatusCollector {
-    id: CollectorId,
     counted: Counted,
     pid: i32,
     /// The process across containers (`KeyValue::proc_of`), read once at
@@ -164,10 +162,6 @@ impl StatusCollector {
 }
 
 impl Collector for StatusCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         self.counted.value_attr()
     }
@@ -248,7 +242,7 @@ impl Collector for StatusCollector {
                 .chain(self.proc_key.clone())
                 .collect(),
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }])
     }

@@ -120,7 +120,6 @@ impl Prepared for Prepare {
             }
         };
         Ok(Box::new(InterruptsCollector {
-            id: CollectorId::new("sched.interrupts/fs:proc"),
             counting: self.0 == Mode::Count,
             cpus,
             previous: None,
@@ -131,7 +130,6 @@ impl Prepared for Prepare {
 }
 
 pub struct InterruptsCollector {
-    id: CollectorId,
     counting: bool,
     cpus: Option<Vec<u32>>,
     /// The last read and when it was taken.
@@ -221,7 +219,7 @@ impl InterruptsCollector {
                 kind: "sched.interrupts".to_owned(),
                 keys: vec![KeyValue::cpu(*cpu)],
                 attrs,
-                collector_id: self.id.clone(),
+                collector_id: CollectorId::unstamped(),
                 seq: seq + events.len() as u64,
             });
         }
@@ -230,10 +228,6 @@ impl InterruptsCollector {
 }
 
 impl Collector for InterruptsCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "count"
     }
@@ -338,7 +332,6 @@ mod tests {
         let mut before = Counts::new();
         parse(HARD_TEXT, false, &mut before);
         let mut collector = InterruptsCollector {
-            id: CollectorId::new("sched.interrupts/fs:proc"),
             counting: false,
             cpus: Some(vec![1]),
             previous: Some((1_000, before)),
@@ -384,7 +377,6 @@ mod tests {
             counts
         };
         let mut collector = InterruptsCollector {
-            id: CollectorId::new("sched.interrupts/fs:proc"),
             counting: false,
             cpus: None,
             previous: Some((0, counts(u64::from(u32::MAX) - 99, 5_000))),

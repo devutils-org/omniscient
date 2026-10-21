@@ -168,7 +168,6 @@ impl Prepared for Prepare {
 type Slot = (u32, u64);
 
 pub struct MutexUsdtCollector {
-    id: CollectorId,
     pid: i32,
     only_tid: Option<u32>,
     sites: Vec<Site>,
@@ -201,7 +200,6 @@ pub struct MutexUsdtCollector {
 impl MutexUsdtCollector {
     fn new(pid: i32, only_tid: Option<u32>, sites: Vec<Site>, filter: Option<FilterExpr>) -> Self {
         Self {
-            id: CollectorId::new("sched.mutex/bpf:usdt"),
             pid,
             only_tid,
             sites,
@@ -353,17 +351,13 @@ impl MutexUsdtCollector {
             kind: "sched.mutex".to_owned(),
             keys: vec![KeyValue::task(tid as i32)],
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }
     }
 }
 
 impl Collector for MutexUsdtCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "wait_ns"
     }

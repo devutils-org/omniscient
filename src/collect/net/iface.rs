@@ -108,7 +108,6 @@ impl Prepared for Prepare {
             }
         };
         Ok(Box::new(IfaceCollector {
-            id: CollectorId::new("net.iface/fs:proc"),
             mode: self.0,
             only,
             deltas: Deltas::default(),
@@ -127,7 +126,6 @@ impl Prepared for Prepare {
 /// `docs/scenarios/net.md`). Kept apart, as the catalog requires, and every
 /// one of them reachable by every emit.
 pub struct IfaceCollector {
-    id: CollectorId,
     /// A poll and a count measure an interval; a snapshot cannot, and reports
     /// the counters as they stand instead.
     mode: Mode,
@@ -140,10 +138,6 @@ pub struct IfaceCollector {
 }
 
 impl Collector for IfaceCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     /// A poll and a count measure frames over a window; a snapshot can only
     /// report what the counter stands at. Different numbers, different names.
     fn value_attr(&self) -> &'static str {
@@ -229,7 +223,7 @@ impl Collector for IfaceCollector {
                     kind: "net.iface".to_owned(),
                     keys: vec![series(&interface, kind)],
                     attrs,
-                    collector_id: self.id.clone(),
+                    collector_id: CollectorId::unstamped(),
                     seq: index,
                 });
                 index += 1;
@@ -300,7 +294,7 @@ impl IfaceCollector {
                     kind: "net.iface".to_owned(),
                     keys: vec![series(interface, kind)],
                     attrs,
-                    collector_id: self.id.clone(),
+                    collector_id: CollectorId::unstamped(),
                     seq: seq + offset as u64,
                 }
             })

@@ -282,8 +282,6 @@ impl Prepare {
     fn collector(&self, pid: i32, whole_process: bool) -> ProfileCollector {
         let mut collector =
             ProfileCollector::new(pid, self.mode, self.choice.callchain(), whole_process);
-        collector.id =
-            CollectorId::new(format!("{}/{}", self.sampled.source, self.sampled.backend));
         collector.sampled = self.sampled;
         // A client handed in wins; otherwise the choice's own, which is what
         // `--symbols debuginfod` asked for (`StackChoice::debuginfod`).
@@ -447,7 +445,6 @@ impl MapReads {
 }
 
 pub struct ProfileCollector {
-    id: CollectorId,
     pid: i32,
     mode: Mode,
     /// The event sampled; the cpu clock unless a counting source's `sample`
@@ -548,7 +545,6 @@ impl ProfileCollector {
             unwinders.insert(pid as u32, Unwinder::for_process(pid));
         }
         Self {
-            id: CollectorId::new("cpu.profile/pmu:sw"),
             pid,
             mode,
             sampled: SAMPLED[0],
@@ -671,7 +667,6 @@ impl ProfileCollector {
                 self.refreshes += 1;
             }
         }
-        let id = self.id.clone();
         let unwinders = &mut self.unwinders;
         let stack_ids = &mut self.stack_ids;
         let stack_origins = &mut self.stack_origins;
@@ -781,7 +776,7 @@ impl ProfileCollector {
                         kind: kind.to_owned(),
                         keys,
                         attrs,
-                        collector_id: id.clone(),
+                        collector_id: CollectorId::unstamped(),
                         seq: index,
                     });
                     index += 1;
@@ -858,10 +853,6 @@ impl RingLost {
 }
 
 impl Collector for ProfileCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "count"
     }
@@ -1516,7 +1507,6 @@ mod tests {
             false,
         );
         collector.sampled = sampled;
-        collector.id = CollectorId::new("cpu.cycles/pmu");
         let Ok(counter) = crate::perf::CounterGroup::open_user_mode(
             &[crate::perf::Counter::hardware(
                 "cycles",

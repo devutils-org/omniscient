@@ -112,7 +112,6 @@ impl Prepared for Prepare {
 }
 
 pub struct PageFaultCollector {
-    id: CollectorId,
     pid: i32,
     mode: Mode,
     event: Option<ThreadSampler>,
@@ -163,7 +162,6 @@ fn is_refusal(error: &std::io::Error) -> bool {
 impl PageFaultCollector {
     pub fn new(pid: i32, mode: Mode) -> Self {
         Self {
-            id: CollectorId::new("mem.faults/pmu:sw"),
             pid,
             mode,
             event: None,
@@ -189,7 +187,6 @@ impl PageFaultCollector {
         let Some(event) = self.event.as_mut() else {
             return;
         };
-        let id = self.id.clone();
         let comms = &mut self.comms;
         let seen = &mut self.sampled_tasks;
         let cgroup_key = self.cgroup.as_ref().map(|cgroup| cgroup.key());
@@ -235,7 +232,7 @@ impl PageFaultCollector {
                         }
                         attrs
                     },
-                    collector_id: id.clone(),
+                    collector_id: CollectorId::unstamped(),
                     seq: index,
                 });
                 index += 1;
@@ -271,10 +268,6 @@ impl PageFaultCollector {
 }
 
 impl Collector for PageFaultCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "count"
     }

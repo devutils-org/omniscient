@@ -139,7 +139,6 @@ fn parse_cpulist(text: &str) -> Vec<u32> {
 }
 
 pub struct NumaCollector {
-    id: CollectorId,
     mode: Mode,
     program: Option<NumaProgram>,
     nodes: NodeMap,
@@ -158,7 +157,6 @@ pub struct NumaCollector {
 impl NumaCollector {
     pub fn new(mode: Mode, predicate: Option<FilterExpr>) -> Self {
         Self {
-            id: CollectorId::new("sched.numa_balance/bpf:raw_tp"),
             mode,
             program: None,
             nodes: NodeMap::default(),
@@ -187,7 +185,7 @@ impl NumaCollector {
             // cpus are where it was and where it did not go.
             keys: vec![KeyValue::task(row.tid as i32)],
             attrs: attributes(row, &self.nodes, window_ns),
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }
     }
@@ -322,10 +320,6 @@ fn attributes(row: &NumaStick, nodes: &NodeMap, window_ns: u64) -> Vec<Attr> {
 }
 
 impl Collector for NumaCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "decisions"
     }

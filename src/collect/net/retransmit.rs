@@ -89,7 +89,6 @@ impl Prepared for Prepare {
 }
 
 pub struct RetransmitCollector {
-    id: CollectorId,
     /// `trace` is one event per retransmission; `count` is the single
     /// measurement of one window, totalled per series.
     mode: Mode,
@@ -119,7 +118,6 @@ struct Counted {
 impl RetransmitCollector {
     fn new(mode: Mode, predicate: Option<FilterExpr>) -> Self {
         Self {
-            id: CollectorId::new("net.tcp.retransmit/bpf:raw_tp"),
             mode,
             program: None,
             losses: Losses::default(),
@@ -149,7 +147,7 @@ impl RetransmitCollector {
                 cookie => vec![KeyValue::Sock { cookie }],
             },
             attrs: attributes(again, retransmits, self.has_error),
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }
     }
@@ -258,10 +256,6 @@ fn attributes(again: &Retransmit, retransmits: u64, has_error: bool) -> Vec<Attr
 }
 
 impl Collector for RetransmitCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "retransmits"
     }

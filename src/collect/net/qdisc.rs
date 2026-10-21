@@ -68,7 +68,6 @@ impl Prepared for Prepare {
 }
 
 pub struct QdiscCollector {
-    id: CollectorId,
     /// The interface a `--iface` target named, compared inside the program.
     iface: Option<(u32, String)>,
     program: Option<QdiscProgram>,
@@ -92,7 +91,6 @@ pub struct QdiscCollector {
 impl QdiscCollector {
     fn new(iface: Option<(u32, String)>, predicate: Option<FilterExpr>) -> Self {
         Self {
-            id: CollectorId::new("net.qdisc/bpf:raw_tp"),
             iface,
             program: None,
             losses: Losses::default(),
@@ -146,7 +144,7 @@ impl QdiscCollector {
             // every namespace's disciplines, and an index is per namespace.
             keys: vec![KeyValue::iface_in(row.netns, row.ifindex, name.clone())],
             attrs: attributes(row, &name, window_ns),
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }
     }
@@ -266,10 +264,6 @@ fn attributes(row: &QdiscWait, name: &str, window_ns: u64) -> Vec<Attr> {
 }
 
 impl Collector for QdiscCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "wait_ns"
     }

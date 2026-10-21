@@ -131,7 +131,6 @@ impl Prepared for Prepare {
 
 /// Re-reads a task's cpu totals and reports what it consumed between reads.
 pub struct OnCpuTime {
-    id: CollectorId,
     pid: i32,
     path: PathBuf,
     /// The poll interval, carried only to state the error the tick granularity
@@ -146,7 +145,6 @@ pub struct OnCpuTime {
 impl OnCpuTime {
     pub fn new(pid: i32, path: PathBuf, interval: crate::scalar::Duration) -> Self {
         Self {
-            id: CollectorId::new("cpu.oncpu_time/fs:proc"),
             pid,
             path,
             interval,
@@ -239,17 +237,13 @@ impl OnCpuTime {
             kind: "cpu.oncpu_time".to_owned(),
             keys: vec![KeyValue::task(self.pid)],
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }]
     }
 }
 
 impl Collector for OnCpuTime {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "ns"
     }

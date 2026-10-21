@@ -55,10 +55,6 @@ impl Prepared for Prepare {
         Ok(Box::new(HistogramCollector::new(
             Source {
                 kind: "net.socket",
-                collector: match receives {
-                    Receives::Generic => "net.socket/bpf:fentry",
-                    Receives::Families => "net.socket/bpf:fentry:families",
-                },
                 call: "a send or a receive",
                 load,
                 describe: describe(),

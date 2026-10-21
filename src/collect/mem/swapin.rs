@@ -71,7 +71,6 @@ impl Prepared for Prepare {
             ));
         }
         Ok(Box::new(SwapIn {
-            id: CollectorId::new("mem.swap/perf:kprobe"),
             mode: self.0,
             symbol,
             tids,
@@ -201,7 +200,6 @@ fn read_counter(fd: &OwnedFd) -> std::io::Result<u64> {
 }
 
 pub struct SwapIn {
-    id: CollectorId,
     mode: Mode,
     symbol: &'static str,
     tids: Vec<i32>,
@@ -244,17 +242,13 @@ impl SwapIn {
                 Attr::text("read_from", self.symbol),
                 Attr::text("basis", basis),
             ],
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }
     }
 }
 
 impl Collector for SwapIn {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "in_bytes"
     }

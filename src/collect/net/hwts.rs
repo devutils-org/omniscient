@@ -63,7 +63,6 @@ impl Prepared for Prepare {
             }
         };
         Ok(Box::new(HwtsCollector {
-            id: CollectorId::new("net.hwts/netlink:ethtool"),
             only,
             ethtool: None,
             clocked: Vec::new(),
@@ -126,7 +125,6 @@ struct Clocked {
 }
 
 pub struct HwtsCollector {
-    id: CollectorId,
     /// The interface the request named; every interface when it named none.
     only: Option<String>,
     ethtool: Option<Ethtool>,
@@ -301,17 +299,13 @@ impl HwtsCollector {
             // answers for the devices of the namespace it was opened in.
             keys: vec![KeyValue::iface(clocked.ifindex, clocked.name.clone())],
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         })
     }
 }
 
 impl Collector for HwtsCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "offset_ns"
     }

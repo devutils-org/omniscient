@@ -26,7 +26,6 @@ impl Prepared for Prepare {
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
         match target {
             Target::System => Ok(Box::new(BacklogCollector {
-                id: CollectorId::new("net.backlog/fs:proc"),
                 mode: self.0,
                 deltas: Deltas::default(),
                 pass_first_tick: false,
@@ -42,7 +41,6 @@ impl Prepared for Prepare {
 }
 
 pub struct BacklogCollector {
-    id: CollectorId,
     /// A poll and a count measure an interval; a snapshot cannot, and reports
     /// the counters as they stand instead.
     mode: Mode,
@@ -54,10 +52,6 @@ pub struct BacklogCollector {
 }
 
 impl Collector for BacklogCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     /// A poll and a count measure refusals over a window; a snapshot can only
     /// report what the counters stand at. Different numbers, different names.
     fn value_attr(&self) -> &'static str {
@@ -114,7 +108,7 @@ impl Collector for BacklogCollector {
                         "the counters as they stand: a snapshot observes no window of its own",
                     ),
                 ],
-                collector_id: self.id.clone(),
+                collector_id: CollectorId::unstamped(),
                 seq,
             }]);
         }
@@ -150,7 +144,7 @@ impl Collector for BacklogCollector {
                 Attr::uint("syncookies_sent", syncookies_sent),
                 Attr::uint("syncookies_failed", syncookies_failed),
             ],
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }])
     }

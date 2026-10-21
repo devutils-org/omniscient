@@ -124,7 +124,6 @@ impl Prepared for Prepare {
 }
 
 pub struct StallCollector {
-    id: CollectorId,
     stall: Stall,
     mode: Mode,
     /// The thread group whose episodes are kept, filtered in the program.
@@ -172,10 +171,6 @@ impl StallCollector {
         predicate: Option<FilterExpr>,
     ) -> Self {
         Self {
-            id: CollectorId::new(match stall {
-                Stall::Reclaim => "mem.reclaim/bpf:raw_tp",
-                Stall::Compaction => "mem.compaction/bpf:raw_tp",
-            }),
             stall,
             mode,
             tgid,
@@ -263,7 +258,7 @@ impl StallCollector {
                 kind: source_of(stall).to_owned(),
                 keys: keys_of(stall, &row),
                 attrs,
-                collector_id: self.id.clone(),
+                collector_id: CollectorId::unstamped(),
                 seq: seq + index,
             };
             if let Some(predicate) = &self.predicate {
@@ -417,10 +412,6 @@ fn attributes(stall: Stall, row: &StallRow, window_ns: u64) -> Vec<Attr> {
 }
 
 impl Collector for StallCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "stall_ns"
     }
@@ -471,7 +462,7 @@ impl Collector for StallCollector {
                     kind: source_of(stall).to_owned(),
                     keys: keys_of(stall, &row),
                     attrs: attributes(stall, &row, window_ns),
-                    collector_id: self.id.clone(),
+                    collector_id: CollectorId::unstamped(),
                     seq: seq + index as u64,
                 });
             }
@@ -724,10 +715,9 @@ mod tests {
             mode: Mode::Trace,
             filter: None,
         });
-        let collector = prepared
+        let _collector = prepared
             .attach(&Target::Pid(vec![std::process::id() as i32]))
             .expect("a process is a target reclaim is accounted per");
-        assert_eq!(collector.id().as_str(), "mem.reclaim/bpf:raw_tp");
     }
 
     /// An episode that ended without a beginning happened and has no duration,

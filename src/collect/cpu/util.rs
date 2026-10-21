@@ -170,7 +170,6 @@ impl Which {
 /// Reads the cpu states of a machine or of named cores, and reports what
 /// changed between reads.
 pub struct UtilCollector {
-    id: CollectorId,
     mode: Mode,
     which: Which,
     /// The last reading of each label. One entry for a machine target, one per
@@ -197,7 +196,6 @@ pub struct UtilCollector {
 impl UtilCollector {
     pub fn new(mode: Mode, which: Which) -> Self {
         Self {
-            id: CollectorId::new("cpu.util/fs:proc"),
             mode,
             which,
             previous: BTreeMap::new(),
@@ -233,10 +231,6 @@ impl UtilCollector {
 }
 
 impl Collector for UtilCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "busy"
     }
@@ -448,7 +442,7 @@ impl UtilCollector {
             kind: "cpu.util".to_owned(),
             keys,
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }]
     }

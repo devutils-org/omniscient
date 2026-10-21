@@ -35,13 +35,6 @@ pub enum Scope {
 }
 
 impl Scope {
-    fn backend(self) -> &'static str {
-        match self {
-            Scope::Machine => "fs:proc",
-            Scope::Cgroup => "fs:cgroup",
-        }
-    }
-
     /// The counters read, the kill count first.
     fn fields(self) -> &'static [&'static str] {
         match self {
@@ -112,7 +105,6 @@ impl Prepared for Prepare {
             }
         };
         Ok(Box::new(Oom {
-            id: CollectorId::new(format!("mem.oom/{}", self.scope.backend())),
             mode: self.mode,
             scope,
             path,
@@ -133,7 +125,6 @@ struct Reading {
 }
 
 pub struct Oom {
-    id: CollectorId,
     mode: Mode,
     scope: Scope,
     path: PathBuf,
@@ -199,17 +190,13 @@ impl Oom {
             kind: "mem.oom".to_owned(),
             keys: self.keys.clone(),
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         })
     }
 }
 
 impl Collector for Oom {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "kills"
     }
@@ -275,7 +262,6 @@ mod tests {
 
     fn counted(scope: Scope, path: PathBuf) -> Oom {
         Oom {
-            id: CollectorId::new("mem.oom/test"),
             mode: Mode::Count,
             scope,
             path,

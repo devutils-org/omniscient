@@ -42,7 +42,7 @@ use std::rc::Rc;
 use super::counters::{Common, Inside};
 use super::kernel::{wire, Socket};
 use crate::collect::{Collector, Losses, SampleError};
-use crate::event::{Attr, CollectorId, Event};
+use crate::event::{Attr, Event};
 
 const DRAIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 
@@ -92,7 +92,6 @@ struct Totals {
 }
 
 pub struct ProfileCollector {
-    id: CollectorId,
     common: Common,
     configs: BTreeMap<(u32, u32), Config>,
     stalls: BTreeMap<(u32, u32), String>,
@@ -108,7 +107,6 @@ pub struct ProfileCollector {
 impl ProfileCollector {
     pub(super) fn new(socket: Rc<RefCell<Socket>>, reader: usize, launched: i32) -> Self {
         Self {
-            id: CollectorId::new("gpu.profile/vendor:cupti"),
             common: Common::new(Inside::Profile, socket, reader, launched),
             configs: BTreeMap::new(),
             stalls: BTreeMap::new(),
@@ -236,10 +234,7 @@ impl ProfileCollector {
         // and that window is the error.
         let drain = self.drains.get(&pid).copied().unwrap_or_default();
         let window = drain.at_ns.saturating_sub(drain.since_ns);
-        Some(
-            self.common
-                .event(pid, drain.at_ns, window, attrs, &self.id, seq),
-        )
+        Some(self.common.event(pid, drain.at_ns, window, attrs, seq))
     }
 }
 
@@ -270,10 +265,6 @@ impl ProfileCollector {
 }
 
 impl Collector for ProfileCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "samples"
     }

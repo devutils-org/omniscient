@@ -58,7 +58,6 @@ impl Prepared for Prepare {
 }
 
 pub struct MigrationCollector {
-    id: CollectorId,
     filter: Whose,
     /// What the two declared modes actually differ by.
     ///
@@ -100,7 +99,6 @@ pub struct MigrationCollector {
 impl MigrationCollector {
     pub fn new(filter: Whose, mode: Mode) -> Self {
         Self {
-            id: CollectorId::new("sched.migrations/bpf:raw_tp"),
             filter,
             mode,
             program: None,
@@ -139,7 +137,7 @@ impl MigrationCollector {
                 }
                 attrs
             },
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }
     }
@@ -296,10 +294,6 @@ fn attributes(row: &Migration, window_ns: u64) -> Vec<Attr> {
 }
 
 impl Collector for MigrationCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "migrations"
     }

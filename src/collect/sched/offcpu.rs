@@ -96,7 +96,6 @@ impl Prepared for Prepare {
 }
 
 pub struct OffCpuCollector {
-    id: CollectorId,
     /// Whose blocks are kept.
     filter: Whose,
     program: Option<OffCpuProgram>,
@@ -169,7 +168,6 @@ pub struct OffCpuCollector {
 impl OffCpuCollector {
     pub fn new(filter: Whose, wants_stacks: bool) -> Self {
         Self {
-            id: CollectorId::new("sched.offcpu/bpf:raw_tp"),
             filter,
             program: None,
             parents: super::Parents::default(),
@@ -281,7 +279,7 @@ impl OffCpuCollector {
                 // machine's, and not the time of whatever it was waiting for.
                 keys: vec![KeyValue::task(entry.tid as i32)],
                 attrs,
-                collector_id: self.id.clone(),
+                collector_id: CollectorId::unstamped(),
                 seq: seq + index as u64,
             };
             if let Some(predicate) = &self.predicate {
@@ -564,10 +562,6 @@ fn attributes(entry: &OffCpu, window_ns: u64) -> Vec<Attr> {
 }
 
 impl Collector for OffCpuCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "block_ns"
     }

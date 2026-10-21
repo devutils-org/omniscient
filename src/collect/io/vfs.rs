@@ -63,10 +63,6 @@ impl Prepared for Prepare {
         Ok(Box::new(HistogramCollector::new(
             Source {
                 kind: source,
-                collector: match layer {
-                    Layer::Syscall => "io.syscall/bpf:fentry",
-                    Layer::Fs => "io.fs/bpf:fentry",
-                },
                 call: "a read or a write",
                 load: rows,
                 describe: describe(layer),

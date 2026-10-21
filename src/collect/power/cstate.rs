@@ -99,7 +99,6 @@ struct Reading {
 }
 
 pub struct Residency {
-    id: CollectorId,
     /// `count`: a baseline at the start and one closing read, so `-e rate`
     /// is each cpu's idle share of the window.
     mode: Mode,
@@ -112,7 +111,6 @@ pub struct Residency {
 impl Residency {
     pub fn new(mode: Mode, root: PathBuf, cpus: Vec<u32>) -> Self {
         Self {
-            id: CollectorId::new("power.cstate/fs:sys"),
             mode,
             root,
             cpus,
@@ -249,7 +247,7 @@ impl Residency {
                     kind: "power.cstate".to_owned(),
                     keys: vec![KeyValue::cpu(cpu)],
                     attrs,
-                    collector_id: self.id.clone(),
+                    collector_id: CollectorId::unstamped(),
                     seq: seq + offset as u64,
                 }
             })
@@ -258,10 +256,6 @@ impl Residency {
 }
 
 impl Collector for Residency {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     /// Nanoseconds this cpu spent idle during the tick, which is at most the
     /// tick itself. The same number as a fraction is `idle_ratio`.
     fn value_attr(&self) -> &'static str {

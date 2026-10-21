@@ -73,7 +73,6 @@ impl Prepared for Prepare {
 }
 
 pub struct WritebackCollector {
-    id: CollectorId,
     mode: Mode,
     program: Option<WritebackProgram>,
     /// Runs of the programs the kernel skipped, as last read.
@@ -99,7 +98,6 @@ pub struct WritebackCollector {
 impl WritebackCollector {
     pub fn new(mode: Mode, predicate: Option<FilterExpr>) -> Self {
         Self {
-            id: CollectorId::new("io.writeback/bpf:raw_tp"),
             mode,
             program: None,
             losses: Losses::default(),
@@ -166,7 +164,7 @@ impl WritebackCollector {
                 Attr::uint("bdi_id", record.bdi_id),
                 Attr::uint("cpu", u64::from(record.cpu)),
             ],
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }
     }
@@ -239,10 +237,6 @@ impl WritebackCollector {
 }
 
 impl Collector for WritebackCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "writeback_ns"
     }
@@ -280,7 +274,7 @@ impl Collector for WritebackCollector {
                     Attr::int("pages", self.counted_pages),
                     Attr::uint("window_ns", monotonic_ns().saturating_sub(self.opened_ns)),
                 ],
-                collector_id: self.id.clone(),
+                collector_id: CollectorId::unstamped(),
                 seq: u64::MAX / 2,
             });
         }

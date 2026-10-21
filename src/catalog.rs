@@ -231,6 +231,76 @@ impl Entry {
     }
 }
 
+/// The mechanism a backend works by, read once from its id.
+///
+/// What the resolver and the runner decide from a backend's mechanism --
+/// whether it can narrow a target or a predicate inside a program, how what it
+/// spends inside the target is weighed -- they ask of this, never of the id's
+/// spelling: a new mechanism is a variant here and a compile error wherever it
+/// must be decided, not one more `starts_with` somebody forgets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BackendKind {
+    /// `bpf` and `bpf:*`: loads eBPF programs.
+    Bpf,
+    /// `pmu` and `pmu:*`: a perf counter or sampler.
+    Pmu,
+    /// `perf:*`: a perf event that is not a counter, such as a kprobe event.
+    Perf,
+    /// `fs:*`: reads a file under `/proc`, `/sys` or a cgroup.
+    Fs,
+    /// `netlink` and `netlink:*`.
+    Netlink,
+    /// `preload`: a library loaded into the target.
+    Preload,
+    /// `af_packet`: a capture socket.
+    AfPacket,
+    /// `so_timestamping`: a socket option on the target's own sockets.
+    SoTimestamping,
+    /// `vendor:*`: a vendor's library, named after the colon.
+    Vendor,
+    /// Any other id: a catalog written for a test, or a mechanism no code
+    /// decides anything about yet.
+    Other,
+}
+
+impl BackendKind {
+    /// The kind of a backend id.
+    pub fn of(id: &str) -> Self {
+        match id.split(':').next().unwrap_or(id) {
+            "bpf" => BackendKind::Bpf,
+            "pmu" => BackendKind::Pmu,
+            "perf" => BackendKind::Perf,
+            "fs" => BackendKind::Fs,
+            "netlink" => BackendKind::Netlink,
+            "preload" => BackendKind::Preload,
+            "af_packet" => BackendKind::AfPacket,
+            "so_timestamping" => BackendKind::SoTimestamping,
+            "vendor" => BackendKind::Vendor,
+            _ => BackendKind::Other,
+        }
+    }
+
+    /// Whether the backend loads eBPF programs, whose run time is then the
+    /// kernel's to report, and whose task ids are the kernel's numbering.
+    pub fn loads_programs(self) -> bool {
+        self == BackendKind::Bpf
+    }
+
+    /// Whether the backend can narrow inside the kernel what a userspace
+    /// reader could only discard after delivery: a `bpf_only` target, the
+    /// fields of a predicate.
+    pub fn narrows_in_program(self) -> bool {
+        self == BackendKind::Bpf
+    }
+}
+
+impl Backend {
+    /// The mechanism this backend works by.
+    pub fn kind(&self) -> BackendKind {
+        BackendKind::of(&self.id)
+    }
+}
+
 /// One way of obtaining a source.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1580,6 +1650,29 @@ mod tests {
         assert_eq!("watts".parse::<Unit>().unwrap(), Unit::Watts);
         assert_eq!(Unit::Watts.to_string(), "watts");
         assert_ne!(Unit::Watts, Unit::Joules);
+    }
+
+    /// Every backend the shipped catalog declares is of a kind the code
+    /// decides about: an id that classified as `Other` would be weighed and
+    /// placed by nobody's rule.
+    #[test]
+    fn every_shipped_backend_is_of_a_known_kind() {
+        let catalog = catalog();
+        let unknown: Vec<String> = catalog
+            .entries()
+            .iter()
+            .flat_map(|entry| {
+                entry
+                    .backends
+                    .iter()
+                    .filter(|backend| backend.kind() == BackendKind::Other)
+                    .map(move |backend| format!("{}: {}", entry.id, backend.id))
+            })
+            .collect();
+        assert!(unknown.is_empty(), "{unknown:?}");
+        assert!(BackendKind::of("bpf:raw_tp").narrows_in_program());
+        assert!(BackendKind::of("bpf").loads_programs());
+        assert!(!BackendKind::of("fs:proc").narrows_in_program());
     }
 
     #[test]

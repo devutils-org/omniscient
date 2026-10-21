@@ -67,7 +67,6 @@ pub type Load = Box<dyn FnOnce() -> Result<Box<dyn Rows>, String>>;
 pub struct Source {
     /// The catalog id, which is also each event's kind.
     pub kind: &'static str,
-    pub collector: &'static str,
     /// What one call is, for a note a reader has to understand: "a read or a
     /// write", "a send or a receive".
     pub call: &'static str,
@@ -82,7 +81,6 @@ pub struct Source {
 type Key = (u32, u32, u32, u32, u64, u32, u32);
 
 pub struct HistogramCollector {
-    id: CollectorId,
     kind: &'static str,
     call: &'static str,
     mode: Mode,
@@ -111,7 +109,6 @@ pub struct HistogramCollector {
 impl HistogramCollector {
     pub fn new(source: Source, mode: Mode, predicate: Option<FilterExpr>) -> Self {
         Self {
-            id: CollectorId::new(source.collector),
             kind: source.kind,
             call: source.call,
             mode,
@@ -143,7 +140,7 @@ impl HistogramCollector {
             kind: self.kind.to_owned(),
             keys,
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }
     }
@@ -299,10 +296,6 @@ fn common_attributes(row: &Row, window_ns: u64) -> Vec<Attr> {
 }
 
 impl Collector for HistogramCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "lat_ns"
     }

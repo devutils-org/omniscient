@@ -95,7 +95,6 @@ impl Sensor {
 }
 
 pub struct Temperatures {
-    id: CollectorId,
     mode: Mode,
     root: PathBuf,
     sensors: Vec<Sensor>,
@@ -105,7 +104,6 @@ pub struct Temperatures {
 impl Temperatures {
     pub fn new(mode: Mode, root: PathBuf) -> Self {
         Self {
-            id: CollectorId::new("power.temp/fs:sys"),
             mode,
             root,
             sensors: Vec::new(),
@@ -171,10 +169,6 @@ impl Temperatures {
 }
 
 impl Collector for Temperatures {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "celsius"
     }
@@ -240,7 +234,7 @@ impl Collector for Temperatures {
             kind: "power.temp".to_owned(),
             keys: Vec::new(),
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }])
     }

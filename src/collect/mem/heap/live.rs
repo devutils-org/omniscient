@@ -18,7 +18,6 @@ use crate::collect::{Collector, Losses, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 
 pub struct LiveCollector<F: Feed = Stream> {
-    id: CollectorId,
     stream: F,
     live: LiveSet,
     /// When a value is published, as opposed to how often the pipe is drained.
@@ -32,7 +31,6 @@ impl<F: Feed> LiveCollector<F> {
     pub fn new(stream: F, interval: Duration) -> Self {
         let comm = Comm::of(stream.pid());
         Self {
-            id: CollectorId::new(format!("mem.heap.live/{}", stream.backend())),
             stream,
             live: LiveSet::default(),
             cadence: Cadence::new(interval),
@@ -77,7 +75,7 @@ impl<F: Feed> LiveCollector<F> {
                 }
                 attrs
             },
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq: self.emitted,
         };
         self.emitted += 1;
@@ -86,10 +84,6 @@ impl<F: Feed> LiveCollector<F> {
 }
 
 impl<F: Feed> Collector for LiveCollector<F> {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn start(&mut self) -> Result<(), String> {
         self.stream.start()
     }

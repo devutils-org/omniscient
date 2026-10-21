@@ -208,7 +208,7 @@ fn state_name(state: u32, preempted: bool) -> &'static str {
     }
 }
 
-fn event(slice: &Slice, id: &CollectorId, seq: u64) -> Event {
+fn event(slice: &Slice, seq: u64) -> Event {
     let mut attrs = vec![
         Attr::uint("run_ns", slice.run_ns),
         Attr::uint("count", 1),
@@ -240,13 +240,12 @@ fn event(slice: &Slice, id: &CollectorId, seq: u64) -> Event {
             KeyValue::comm(slice.comm.clone()),
         ],
         attrs,
-        collector_id: id.clone(),
+        collector_id: CollectorId::unstamped(),
         seq,
     }
 }
 
 pub struct SlicesCollector {
-    id: CollectorId,
     whose: Whose,
     program: Option<SwitchCountProgram>,
     pairing: Pairing,
@@ -263,7 +262,6 @@ pub struct SlicesCollector {
 impl SlicesCollector {
     pub fn new(whose: Whose, predicate: Option<FilterExpr>) -> Self {
         Self {
-            id: CollectorId::new("sched.slices/bpf:raw_tp"),
             whose,
             program: None,
             pairing: Pairing::default(),
@@ -315,7 +313,7 @@ impl SlicesCollector {
             let Some(slice) = self.pairing.take(ends) else {
                 continue;
             };
-            let mut event = event(&slice, &self.id, index);
+            let mut event = event(&slice, index);
             if let Some(ppid) = self.parents.of(slice.pid) {
                 event.attrs.push(Attr::uint("ppid", u64::from(ppid)));
             }
@@ -369,10 +367,6 @@ impl SlicesCollector {
 }
 
 impl Collector for SlicesCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "run_ns"
     }

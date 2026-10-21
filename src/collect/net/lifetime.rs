@@ -89,7 +89,6 @@ impl Prepared for Prepare {
 }
 
 pub struct LifetimeCollector {
-    id: CollectorId,
     program: Option<TcpLifetimeProgram>,
     /// Runs of the programs the kernel skipped, as last read.
     skipped: u64,
@@ -191,7 +190,6 @@ impl Tree {
 impl LifetimeCollector {
     fn new(predicate: Option<FilterExpr>) -> Self {
         Self {
-            id: CollectorId::new("net.tcp.lifetime/bpf:raw_tp"),
             program: None,
             losses: Losses::default(),
             notes: Vec::new(),
@@ -223,7 +221,7 @@ impl LifetimeCollector {
                 cookie => vec![KeyValue::Sock { cookie }],
             },
             attrs: attributes(closed),
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }
     }
@@ -414,10 +412,6 @@ fn attributes(closed: &TcpLifetime) -> Vec<Attr> {
 }
 
 impl Collector for LifetimeCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "duration_ns"
     }

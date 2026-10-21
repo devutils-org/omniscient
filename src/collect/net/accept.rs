@@ -32,7 +32,6 @@ impl Prepared for Prepare {
             ));
         }
         Ok(Box::new(AcceptCollector {
-            id: CollectorId::new("net.tcp.accept/bpf:fentry"),
             narrowing: narrowing("net.tcp.accept", target)?,
             program: None,
             losses: Losses::default(),
@@ -47,7 +46,6 @@ impl Prepared for Prepare {
 }
 
 pub struct AcceptCollector {
-    id: CollectorId,
     narrowing: Narrowing,
     program: Option<AcceptProgram>,
     losses: Losses,
@@ -61,7 +59,7 @@ pub struct AcceptCollector {
 }
 
 /// What one accept says.
-fn event(id: &CollectorId, record: &Accept, seq: u64) -> Event {
+fn event(record: &Accept, seq: u64) -> Event {
     let mut attrs = vec![
         Attr::uint("accepts", 1),
         Attr::uint("backlog", u64::from(record.backlog)),
@@ -97,7 +95,7 @@ fn event(id: &CollectorId, record: &Accept, seq: u64) -> Event {
         kind: "net.tcp.accept".to_owned(),
         keys,
         attrs,
-        collector_id: id.clone(),
+        collector_id: CollectorId::unstamped(),
         seq,
     }
 }
@@ -117,7 +115,7 @@ impl AcceptCollector {
         }
         for (index, record) in records.iter().enumerate() {
             self.accepted += 1;
-            let event = event(&self.id, record, seq + index as u64);
+            let event = event(record, seq + index as u64);
             if let Some(predicate) = &self.predicate {
                 if !crate::filter::matches(predicate, &event) {
                     self.filtered_out += 1;
@@ -163,10 +161,6 @@ impl AcceptCollector {
 }
 
 impl Collector for AcceptCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "accepts"
     }
@@ -227,7 +221,7 @@ mod tests {
         bytes[48..52].copy_from_slice(&2u32.to_ne_bytes());
         bytes[8..16].copy_from_slice(&42u64.to_ne_bytes());
         let record = Accept::from_bytes(&bytes).expect("a record");
-        let event = event(&CollectorId::new("t"), &record, 0);
+        let event = event(&record, 0);
         assert_eq!(event.keys[0].to_string(), "sock:42");
         for field in &catalog
             .get(&"net.tcp.accept".parse().expect("a source id"))

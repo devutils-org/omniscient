@@ -47,7 +47,6 @@ const RING_BYTES: usize = 256 * 1024;
 
 /// The bookkeeping every streaming collector in this file does the same way.
 struct Streaming {
-    id: CollectorId,
     losses: Losses,
     /// The program's counter is cumulative, so what is new is the difference.
     dropped: u64,
@@ -56,9 +55,8 @@ struct Streaming {
 }
 
 impl Streaming {
-    fn new(id: &str) -> Self {
+    fn new() -> Self {
         Self {
-            id: CollectorId::new(id),
             losses: Losses::default(),
             dropped: 0,
             skipped: 0,
@@ -379,7 +377,7 @@ impl ExecCollector {
 
     pub fn new(filter: Option<FilterExpr>) -> Self {
         Self {
-            inner: Streaming::new("proc.exec/bpf:raw_tp"),
+            inner: Streaming::new(),
             whose: Whose::Any,
             program: None,
             truncated: 0,
@@ -399,7 +397,6 @@ impl ExecCollector {
         let Some(program) = self.program.as_mut() else {
             return;
         };
-        let id = self.inner.id.clone();
         let mut index = seq;
         let mut undecoded = 0;
         let mut truncated = 0;
@@ -465,7 +462,7 @@ impl ExecCollector {
                 kind: "proc.exec".to_owned(),
                 keys: vec![KeyValue::task(exec.tid as i32), KeyValue::comm(exec.comm())],
                 attrs: exec_attributes(&exec, &filename),
-                collector_id: id.clone(),
+                collector_id: CollectorId::unstamped(),
                 seq: index,
             };
             if self.predicate.keeps(&event) {
@@ -513,10 +510,6 @@ fn exec_attributes(exec: &Exec, filename: &str) -> Vec<Attr> {
 }
 
 impl Collector for ExecCollector {
-    fn id(&self) -> &CollectorId {
-        &self.inner.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "count"
     }
@@ -636,7 +629,7 @@ impl ExitCollector {
 
     pub fn new(filter: Option<FilterExpr>) -> Self {
         Self {
-            inner: Streaming::new("proc.exit/bpf:raw_tp"),
+            inner: Streaming::new(),
             whose: Whose::Any,
             program: None,
             threads: 0,
@@ -649,7 +642,6 @@ impl ExitCollector {
         let Some(program) = self.program.as_mut() else {
             return;
         };
-        let id = self.inner.id.clone();
         let mut index = seq;
         let mut undecoded = 0;
         let mut threads = 0;
@@ -663,7 +655,7 @@ impl ExitCollector {
                     kind: "proc.exit".to_owned(),
                     keys: vec![KeyValue::task(exit.tid as i32), KeyValue::comm(exit.comm())],
                     attrs: exit_attributes(&exit),
-                    collector_id: id.clone(),
+                    collector_id: CollectorId::unstamped(),
                     seq: index,
                 };
                 if !predicate.keeps(&event) {
@@ -726,10 +718,6 @@ fn exit_attributes(exit: &Exit) -> Vec<Attr> {
 }
 
 impl Collector for ExitCollector {
-    fn id(&self) -> &CollectorId {
-        &self.inner.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "count"
     }
@@ -847,7 +835,7 @@ struct Counted {
 impl SignalCollector {
     pub fn new(filter: Whose, mode: Mode) -> Self {
         Self {
-            inner: Streaming::new("proc.signals/bpf:raw_tp"),
+            inner: Streaming::new(),
             filter,
             mode,
             program: None,
@@ -867,7 +855,6 @@ impl SignalCollector {
         let Some(program) = self.program.as_mut() else {
             return;
         };
-        let id = self.inner.id.clone();
         let counting = self.mode == Mode::Count;
         let totals = &mut self.totals;
         let predicate = &mut self.predicate;
@@ -884,7 +871,7 @@ impl SignalCollector {
                         KeyValue::comm(signal.comm()),
                     ],
                     attrs: signal_attributes(&signal),
-                    collector_id: id.clone(),
+                    collector_id: CollectorId::unstamped(),
                     seq: index,
                 };
                 // Built only when something reads it: a counted storm of three
@@ -937,7 +924,7 @@ impl SignalCollector {
                     Attr::text("signame", signal_name(*sig)),
                     Attr::text("comm", row.comm.clone()),
                 ],
-                collector_id: self.inner.id.clone(),
+                collector_id: CollectorId::unstamped(),
                 seq: seq + index as u64,
             })
             .collect()
@@ -1015,10 +1002,6 @@ fn signal_name(sig: i32) -> String {
 }
 
 impl Collector for SignalCollector {
-    fn id(&self) -> &CollectorId {
-        &self.inner.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "count"
     }
@@ -1314,14 +1297,13 @@ mod tests {
 
     #[test]
     fn the_machine_target_filters_on_nothing_and_a_pid_target_filters_on_it() {
-        let collector = Box::new(PrepareSignals {
+        let _collector = Box::new(PrepareSignals {
             mode: Mode::Trace,
             filter: None,
         })
         .attach(&Target::System)
         .expect("a machine-wide collector");
-        assert_eq!(collector.id().as_str(), "proc.signals/bpf:raw_tp");
-        let collector = Box::new(PrepareSignals {
+        let _collector = Box::new(PrepareSignals {
             mode: Mode::Trace,
             filter: None,
         })
@@ -1329,7 +1311,6 @@ mod tests {
         // kernel's, and a pid nobody has is refused there.
         .attach(&Target::Pid(vec![std::process::id() as i32]))
         .expect("a per-process collector");
-        assert_eq!(collector.id().as_str(), "proc.signals/bpf:raw_tp");
     }
 
     #[test]

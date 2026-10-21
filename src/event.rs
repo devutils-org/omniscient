@@ -28,6 +28,21 @@ impl CollectorId {
         Self(id.into())
     }
 
+    /// The id of the collector built for a source through a backend: the
+    /// registry's key, `<source>/<backend>`, which the runner stamps on every
+    /// event a collection hands over (`collect::stamp`).
+    pub fn of(source: &str, backend: &str) -> Self {
+        Self(format!("{source}/{backend}"))
+    }
+
+    /// What a collector writes on the events it builds. The collector does not
+    /// name itself: the runner knows which source and backend it was built
+    /// for, and stamps that ([`CollectorId::of`]) before anything reads the
+    /// event, so the name can never disagree with the registry.
+    pub fn unstamped() -> Self {
+        Self(String::new())
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }

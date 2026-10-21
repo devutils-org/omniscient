@@ -38,7 +38,6 @@ use crate::event::{Attr, CollectorId, Event, KeyValue};
 const RANGE_CAPACITY: usize = 128 * 1024;
 
 pub struct RetainedCollector<F: Feed = Stream> {
-    id: CollectorId,
     stream: F,
     live: LiveSet,
     freed: FreedRanges,
@@ -69,7 +68,6 @@ impl<F: Feed> RetainedCollector<F> {
         })?;
         let comm = Comm::of(stream.pid());
         Ok(Box::new(Self {
-            id: CollectorId::new(format!("mem.heap.retained/{}", stream.backend())),
             stream,
             live: LiveSet::default(),
             freed: FreedRanges::new(capacity),
@@ -157,7 +155,7 @@ impl<F: Feed> RetainedCollector<F> {
             kind: "mem.heap.retained".to_owned(),
             keys: vec![KeyValue::task(self.stream.pid())],
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq: self.emitted,
         };
         self.emitted += 1;
@@ -166,10 +164,6 @@ impl<F: Feed> RetainedCollector<F> {
 }
 
 impl<F: Feed> Collector for RetainedCollector<F> {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn start(&mut self) -> Result<(), String> {
         self.stream.start()
     }

@@ -41,7 +41,6 @@ const TICK: StdDuration = StdDuration::from_millis(10);
 
 /// One source's counters, opened on every cpu of a set and read at the end.
 pub struct PerCpuCounters {
-    id: CollectorId,
     spec: &'static Spec,
     /// The cpus as the request named them, kept so a refusal can say which one
     /// it was refused on before any group exists.
@@ -90,14 +89,13 @@ impl PerCpuCounters {
             kind: self.spec.source.to_owned(),
             keys: vec![KeyValue::cpu(cpu)],
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         })
     }
 
     pub fn new(cpus: Vec<u32>, spec: &'static Spec) -> Self {
         Self {
-            id: CollectorId::new(format!("{}/{}", spec.source, spec.backend)),
             spec,
             cpus,
             groups: None,
@@ -112,10 +110,6 @@ impl PerCpuCounters {
 }
 
 impl Collector for PerCpuCounters {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         self.spec.value_attr()
     }

@@ -208,7 +208,6 @@ struct CountedRow {
 type CountedRows = std::collections::BTreeMap<(u32, u32, u32, u32, String), CountedRow>;
 
 pub struct SyscallCollector {
-    id: CollectorId,
     narrowing: Narrowing,
     mode: Mode,
     program: Option<SyscallProgram>,
@@ -244,7 +243,6 @@ pub struct SyscallCollector {
 impl SyscallCollector {
     pub fn new(narrowing: Narrowing, mode: Mode, predicate: Option<FilterExpr>) -> Self {
         Self {
-            id: CollectorId::new("proc.syscall/bpf:raw_tp"),
             narrowing,
             mode,
             program: None,
@@ -315,7 +313,7 @@ impl SyscallCollector {
                 // bpftrace tools' per-name one.
                 keys: keys(&row),
                 attrs: attributes(&row, window_ns),
-                collector_id: self.id.clone(),
+                collector_id: CollectorId::unstamped(),
                 seq: seq + index as u64,
             };
             if let Some(predicate) = &self.predicate {
@@ -381,7 +379,7 @@ impl SyscallCollector {
                 kind: "proc.syscall".to_owned(),
                 keys: keys(&row),
                 attrs: attributes(&row, window_ns),
-                collector_id: self.id.clone(),
+                collector_id: CollectorId::unstamped(),
                 seq: seq + index as u64,
             });
         }
@@ -498,10 +496,6 @@ fn attributes(row: &SyscallRow, window_ns: u64) -> Vec<Attr> {
 }
 
 impl Collector for SyscallCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "lat_ns"
     }

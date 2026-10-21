@@ -580,7 +580,6 @@ impl LineStat {
 }
 
 pub struct IbsCollector {
-    id: CollectorId,
     question: Question,
     ibs: IbsOp,
     rate: Rate,
@@ -615,7 +614,6 @@ impl IbsCollector {
     ) -> Self {
         let clock = RunClock::for_reach(&reach);
         Self {
-            id: CollectorId::new(format!("{}/pmu:ibs", question.source())),
             question,
             ibs,
             rate,
@@ -881,7 +879,7 @@ impl IbsCollector {
             kind: self.question.source().to_owned(),
             keys,
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }
     }
@@ -914,10 +912,6 @@ fn refusal(cpu: u32, error: &std::io::Error, rate: Rate) -> String {
 }
 
 impl Collector for IbsCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         match self.question {
             Question::Latency => "latency_cycles",

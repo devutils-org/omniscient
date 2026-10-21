@@ -42,7 +42,6 @@ impl Prepared for Prepare {
         }
         let whose = Whose::of(target).map_err(|reason| format!("`mem.oom`'s victims: {reason}"))?;
         Ok(Box::new(Victims {
-            id: CollectorId::new("mem.oom/bpf:raw_tp"),
             whose,
             filter: self.filter,
             program: None,
@@ -56,7 +55,6 @@ impl Prepared for Prepare {
 }
 
 pub struct Victims {
-    id: CollectorId,
     whose: Whose,
     filter: Option<FilterExpr>,
     program: Option<VictimProgram>,
@@ -109,7 +107,7 @@ fn attributes(victim: &Victim, page: u64) -> Vec<Attr> {
     attrs
 }
 
-fn event(victim: &Victim, page: u64, id: &CollectorId, seq: u64) -> Event {
+fn event(victim: &Victim, page: u64, seq: u64) -> Event {
     Event {
         ts_ns: victim.ts_ns,
         ts_err_ns: 0,
@@ -119,7 +117,7 @@ fn event(victim: &Victim, page: u64, id: &CollectorId, seq: u64) -> Event {
             KeyValue::comm(victim.comm()),
         ],
         attrs: attributes(victim, page),
-        collector_id: id.clone(),
+        collector_id: CollectorId::unstamped(),
         seq,
     }
 }
@@ -130,7 +128,6 @@ impl Victims {
             return;
         };
         let page = page_size();
-        let id = self.id.clone();
         let filter = &self.filter;
         let mut index = seq;
         let mut undecoded = 0;
@@ -138,7 +135,7 @@ impl Victims {
         let mut kills = 0;
         program.drain(
             |victim| {
-                let event = event(&victim, page, &id, index);
+                let event = event(&victim, page, index);
                 if filter
                     .as_ref()
                     .is_some_and(|expression| !crate::filter::matches(expression, &event))
@@ -180,10 +177,6 @@ impl Victims {
 }
 
 impl Collector for Victims {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "count"
     }

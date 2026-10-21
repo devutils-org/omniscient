@@ -81,7 +81,6 @@ impl Prepared for Prepare {
 }
 
 pub struct RunqLatCollector {
-    id: CollectorId,
     /// Whose waits are kept.
     filter: Whose,
     /// The cpus whose queues are kept, for a cpu target; every cpu otherwise.
@@ -126,7 +125,6 @@ pub struct RunqLatCollector {
 impl RunqLatCollector {
     pub fn new(filter: Whose, predicate: Option<FilterExpr>) -> Self {
         Self {
-            id: CollectorId::new("sched.runqlat/bpf:raw_tp"),
             filter,
             cpus: None,
             off_target: 0,
@@ -221,7 +219,7 @@ impl RunqLatCollector {
                     KeyValue::cpu(row.cpu),
                 ],
                 attrs: attributes(&row, window_ns),
-                collector_id: self.id.clone(),
+                collector_id: CollectorId::unstamped(),
                 seq: seq + index as u64,
             };
             if let Some(ppid) = self.parents.of(row.tgid) {
@@ -364,10 +362,6 @@ fn summary_fields(
 }
 
 impl Collector for RunqLatCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "wait_ns"
     }

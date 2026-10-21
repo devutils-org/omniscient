@@ -142,7 +142,6 @@ impl Prepared for Prepare {
             _ => Duration::ZERO,
         };
         Ok(Box::new(SlabInfo {
-            id: CollectorId::new("mem.slab/fs:proc"),
             path: PathBuf::from(SLABINFO),
             cadence: Cadence::new(interval),
         }))
@@ -150,16 +149,11 @@ impl Prepared for Prepare {
 }
 
 pub struct SlabInfo {
-    id: CollectorId,
     path: PathBuf,
     cadence: Cadence,
 }
 
 impl Collector for SlabInfo {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "bytes"
     }
@@ -182,7 +176,7 @@ impl Collector for SlabInfo {
                 kind: "mem.slab".to_owned(),
                 keys: Vec::new(),
                 attrs: attributes(cache, page),
-                collector_id: self.id.clone(),
+                collector_id: CollectorId::unstamped(),
                 seq: seq + index as u64,
             })
             .collect())

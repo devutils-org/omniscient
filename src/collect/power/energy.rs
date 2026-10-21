@@ -90,7 +90,6 @@ struct Reading {
 }
 
 pub struct Energy {
-    id: CollectorId,
     mode: Mode,
     root: PathBuf,
     domains: Vec<Domain>,
@@ -102,7 +101,6 @@ pub struct Energy {
 impl Energy {
     pub fn new(mode: Mode, root: PathBuf) -> Self {
         Self {
-            id: CollectorId::new("power.energy/fs:sys"),
             mode,
             root,
             domains: Vec::new(),
@@ -245,17 +243,13 @@ impl Energy {
             kind: "power.energy".to_owned(),
             keys: Vec::new(),
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         })
     }
 }
 
 impl Collector for Energy {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "joules"
     }

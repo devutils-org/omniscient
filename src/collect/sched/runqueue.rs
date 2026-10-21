@@ -72,9 +72,7 @@ pub struct Prepare;
 impl Prepared for Prepare {
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
         match target {
-            Target::System => Ok(Box::new(RunqueueCollector {
-                id: CollectorId::new("sched.runqueue/fs:proc"),
-            })),
+            Target::System => Ok(Box::new(RunqueueCollector {})),
             other => Err(format!(
                 "`{STAT}` counts the machine's runnable tasks, and a {} target is a narrower \
                  scope the file does not split: use --system",
@@ -84,9 +82,7 @@ impl Prepared for Prepare {
     }
 }
 
-pub struct RunqueueCollector {
-    id: CollectorId,
-}
+pub struct RunqueueCollector {}
 
 fn read() -> Result<Reading, SampleError> {
     let stat = std::fs::read_to_string(STAT)
@@ -100,7 +96,7 @@ fn read() -> Result<Reading, SampleError> {
     })
 }
 
-fn event(reading: Reading, ts_ns: u64, id: &CollectorId, seq: u64) -> Event {
+fn event(reading: Reading, ts_ns: u64, seq: u64) -> Event {
     Event {
         ts_ns,
         ts_err_ns: 0,
@@ -114,16 +110,12 @@ fn event(reading: Reading, ts_ns: u64, id: &CollectorId, seq: u64) -> Event {
             Attr::float("load15", reading.load15),
             Attr::uint("tasks", reading.tasks),
         ],
-        collector_id: id.clone(),
+        collector_id: CollectorId::unstamped(),
         seq,
     }
 }
 
 impl Collector for RunqueueCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "running"
     }
@@ -134,7 +126,7 @@ impl Collector for RunqueueCollector {
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
         let reading = read()?;
-        Ok(vec![event(reading, monotonic_ns(), &self.id, seq)])
+        Ok(vec![event(reading, monotonic_ns(), seq)])
     }
 
     fn facts(&self) -> Vec<String> {

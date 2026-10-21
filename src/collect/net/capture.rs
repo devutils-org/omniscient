@@ -49,7 +49,6 @@ impl Prepared for Prepare {
             }
         };
         Ok(Box::new(CaptureCollector {
-            id: CollectorId::new("net.capture/af_packet"),
             ifindex,
             bound_to: name,
             names: BTreeMap::new(),
@@ -64,7 +63,6 @@ impl Prepared for Prepare {
 }
 
 pub struct CaptureCollector {
-    id: CollectorId,
     ifindex: u32,
     /// The interface the request named, when it named one.
     bound_to: Option<String>,
@@ -164,10 +162,6 @@ impl CaptureCollector {
 }
 
 impl Collector for CaptureCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "bytes"
     }
@@ -202,7 +196,6 @@ impl Collector for CaptureCollector {
         }
         let calibration = self.recalibrate()?;
         let step_allowance_ns = self.step_allowance_ns;
-        let id = self.id.clone();
 
         // Drained into a buffer rather than straight into events: a frame
         // borrows the ring block it lives in, and the block has to be given
@@ -296,7 +289,7 @@ impl Collector for CaptureCollector {
                 // other, so the index is one of this namespace's.
                 keys: vec![KeyValue::iface(ifindex, name)],
                 attrs,
-                collector_id: id.clone(),
+                collector_id: CollectorId::unstamped(),
                 seq: index,
             });
         }

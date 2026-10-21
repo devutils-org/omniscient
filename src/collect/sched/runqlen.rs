@@ -44,7 +44,6 @@ impl Prepared for Prepare {
             }
         };
         Ok(Box::new(RunqLen {
-            id: CollectorId::new("sched.runqlen/bpf:perf_event"),
             cpus,
             program: None,
             previous: Vec::new(),
@@ -55,7 +54,6 @@ impl Prepared for Prepare {
 }
 
 pub struct RunqLen {
-    id: CollectorId,
     /// The cpus kept, or every one.
     cpus: Option<Vec<u32>>,
     program: Option<RunqLenProgram>,
@@ -71,7 +69,6 @@ fn events(
     before: &[Vec<u64>],
     after: &[Vec<u64>],
     cpus: Option<&[u32]>,
-    id: &CollectorId,
     ts_ns: u64,
     seq: u64,
 ) -> Vec<Event> {
@@ -103,7 +100,7 @@ fn events(
                 kind: "sched.runqlen".to_owned(),
                 keys: vec![KeyValue::cpu(cpu as u32)],
                 attrs,
-                collector_id: id.clone(),
+                collector_id: CollectorId::unstamped(),
                 seq: seq + events.len() as u64,
             });
         }
@@ -131,7 +128,6 @@ impl RunqLen {
             &self.previous,
             &after,
             self.cpus.as_deref(),
-            &self.id,
             monotonic_ns(),
             seq,
         );
@@ -141,10 +137,6 @@ impl RunqLen {
 }
 
 impl Collector for RunqLen {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "len"
     }
@@ -191,15 +183,14 @@ mod tests {
 
     #[test]
     fn a_drain_publishes_what_grew_per_cpu_and_length() {
-        let id = CollectorId::new("t");
         // Two lengths, three cpus.
         let before = vec![vec![10, 0, 5], vec![0, 0, 1]];
         let after = vec![vec![110, 0, 5], vec![3, 0, 1]];
-        let all = events(&before, &after, None, &id, 1, 0);
+        let all = events(&before, &after, None, 1, 0);
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].attr("ticks").unwrap().as_f64(), Some(100.0));
         assert_eq!(all[1].attr("len").unwrap().as_f64(), Some(1.0));
-        let cpu2 = events(&before, &after, Some(&[2]), &id, 1, 0);
+        let cpu2 = events(&before, &after, Some(&[2]), 1, 0);
         assert!(cpu2.is_empty());
     }
 
@@ -209,7 +200,7 @@ mod tests {
         let entry = catalog
             .get(&"sched.runqlen".parse().expect("an id"))
             .expect("sched.runqlen");
-        let event = &events(&[], &[vec![1]], None, &CollectorId::new("t"), 1, 0)[0];
+        let event = &events(&[], &[vec![1]], None, 1, 0)[0];
         for field in &entry.filter_fields {
             assert!(event.attr(field).is_some(), "{field}");
         }

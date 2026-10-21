@@ -53,11 +53,6 @@ impl Prepared for Prepare {
             [None; PATH_CALLS]
         };
         Ok(Box::new(CallsCollector {
-            id: CollectorId::new(if self.classic {
-                "proc.calls/bpf:tp"
-            } else {
-                "proc.calls/bpf:raw_tp"
-            }),
             classic: self.classic,
             narrowing: CallsNarrowing {
                 whose,
@@ -80,7 +75,6 @@ impl Prepared for Prepare {
 }
 
 pub struct CallsCollector {
-    id: CollectorId,
     /// Over `raw_syscalls:*` rather than the raw tracepoints.
     classic: bool,
     narrowing: CallsNarrowing,
@@ -136,12 +130,7 @@ fn path_call(paths: &[Option<PathCall>; PATH_CALLS], nr: u32) -> Option<PathCall
     paths.iter().flatten().find(|call| call.nr == nr).copied()
 }
 
-fn event_of(
-    call: &Call,
-    id: &CollectorId,
-    seq: u64,
-    paths: &[Option<PathCall>; PATH_CALLS],
-) -> Event {
+fn event_of(call: &Call, seq: u64, paths: &[Option<PathCall>; PATH_CALLS]) -> Event {
     let syscall = syscall_names::label(call.nr);
     let errno = errno_of(call.ret);
     let mut attrs = vec![
@@ -173,7 +162,7 @@ fn event_of(
             KeyValue::comm(call.comm()),
         ],
         attrs,
-        collector_id: id.clone(),
+        collector_id: CollectorId::unstamped(),
         seq,
     }
 }
@@ -199,12 +188,7 @@ impl CallsCollector {
                     self.truncated_paths += 1;
                 }
             }
-            let event = event_of(
-                &call,
-                &self.id,
-                seq + events.len() as u64,
-                &self.narrowing.paths,
-            );
+            let event = event_of(&call, seq + events.len() as u64, &self.narrowing.paths);
             if let Some(predicate) = &self.predicate {
                 if !crate::filter::matches(predicate, &event) {
                     self.filtered_out += 1;
@@ -262,10 +246,6 @@ impl CallsCollector {
 }
 
 impl Collector for CallsCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "lat_ns"
     }
@@ -382,7 +362,7 @@ mod tests {
         bytes[36..40].copy_from_slice(&5i32.to_ne_bytes());
         bytes[56..60].copy_from_slice(b"/etc");
         let call = Call::from_bytes(&bytes).unwrap();
-        let event = event_of(&call, &CollectorId::new("t"), 0, &path_calls());
+        let event = event_of(&call, 0, &path_calls());
         for field in &entry.filter_fields {
             assert!(event.attr(field).is_some(), "`{field}` is not on the event");
         }
@@ -401,7 +381,7 @@ mod tests {
         bytes[36..40].copy_from_slice(&10i32.to_ne_bytes());
         bytes[56..65].copy_from_slice(b"/bin/true");
         let call = Call::from_bytes(&bytes).unwrap();
-        let event = event_of(&call, &CollectorId::new("t"), 0, &path_calls());
+        let event = event_of(&call, 0, &path_calls());
         assert_eq!(
             event.attr("path").map(|value| value.to_string()),
             Some("/bin/true".to_owned())

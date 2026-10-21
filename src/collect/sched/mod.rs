@@ -498,9 +498,6 @@ impl WallWindow {
 }
 
 impl super::Collector for WallWindow {
-    fn id(&self) -> &crate::event::CollectorId {
-        self.0.id()
-    }
     fn value_attr(&self) -> &'static str {
         self.0.value_attr()
     }

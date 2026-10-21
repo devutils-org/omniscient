@@ -71,7 +71,6 @@ impl Prepared for CallbackPrepared {
 }
 
 pub struct CallbackCollector {
-    id: CollectorId,
     socket: Rc<RefCell<Socket>>,
     reader: usize,
     launched: i32,
@@ -94,7 +93,6 @@ fn api_name(name: &str) -> &str {
 impl CallbackCollector {
     fn new(socket: Rc<RefCell<Socket>>, reader: usize, launched: i32) -> Self {
         Self {
-            id: CollectorId::new("gpu.api/vendor:cupti"),
             socket,
             reader,
             launched,
@@ -191,17 +189,13 @@ impl CallbackCollector {
             kind: "gpu.api".to_owned(),
             keys: vec![KeyValue::task(call.tid as i32)],
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }
     }
 }
 
 impl Collector for CallbackCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "latency_ns"
     }

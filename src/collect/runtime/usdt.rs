@@ -178,7 +178,7 @@ fn could_match(filter: &FilterExpr, site: &Site) -> Option<bool> {
                 kind: String::new(),
                 keys: Vec::new(),
                 attrs: site_attributes(site),
-                collector_id: CollectorId::new(""),
+                collector_id: CollectorId::unstamped(),
                 seq: 0,
             };
             Some(crate::filter::matches(filter, &probe_only))
@@ -356,7 +356,6 @@ impl Prepared for Prepare {
 // ----------------------------------------------------------- the collector
 
 pub struct UsdtCollector {
-    id: CollectorId,
     flavour: Flavour,
     mode: Mode,
     filter: Option<FilterExpr>,
@@ -394,7 +393,6 @@ impl UsdtCollector {
         objects: Objects,
     ) -> Self {
         Self {
-            id: CollectorId::new(format!("{}/bpf:usdt", flavour.source())),
             flavour,
             mode,
             filter,
@@ -603,7 +601,7 @@ impl UsdtCollector {
             kind: self.flavour.source().to_owned(),
             keys: vec![KeyValue::task(tid as i32)],
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }
     }
@@ -620,10 +618,6 @@ fn argument(name: &str, signed: bool, raw: u64) -> Attr {
 }
 
 impl Collector for UsdtCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         match self.flavour {
             Flavour::Custom => "count",
@@ -676,7 +670,7 @@ impl Collector for UsdtCollector {
                         Attr::text("provider", provider),
                         Attr::text("probe", name),
                     ],
-                    collector_id: self.id.clone(),
+                    collector_id: CollectorId::unstamped(),
                     seq: u64::MAX / 2 + index as u64,
                 });
             }

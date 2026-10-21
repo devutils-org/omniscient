@@ -144,7 +144,6 @@ impl Prepared for Prepare {
 }
 
 pub struct Frequencies {
-    id: CollectorId,
     #[allow(dead_code)]
     mode: Mode,
     root: PathBuf,
@@ -165,7 +164,6 @@ pub struct Frequencies {
 impl Frequencies {
     pub fn new(mode: Mode, root: PathBuf, cpus: Vec<u32>) -> Self {
         Self {
-            id: CollectorId::new("power.freq/fs:sys"),
             mode,
             root,
             cpus,
@@ -202,10 +200,6 @@ impl Frequencies {
 }
 
 impl Collector for Frequencies {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "hz"
     }
@@ -346,7 +340,7 @@ impl Collector for Frequencies {
                     kind: "power.freq".to_owned(),
                     keys: vec![KeyValue::cpu(cpu)],
                     attrs,
-                    collector_id: self.id.clone(),
+                    collector_id: CollectorId::unstamped(),
                     seq: seq + offset as u64,
                 }
             })

@@ -46,13 +46,6 @@ pub enum Source {
 }
 
 impl Source {
-    fn backend(self) -> &'static str {
-        match self {
-            Source::Sys => "fs:sys",
-            Source::Proc => "fs:proc",
-        }
-    }
-
     fn read_from(self) -> &'static str {
         match self {
             Source::Sys => SYSFS,
@@ -165,7 +158,6 @@ impl Prepared for Prepare {
 
 /// Reads the huge page counters.
 pub struct Thp {
-    id: CollectorId,
     source: Source,
     mode: Mode,
     root: PathBuf,
@@ -185,7 +177,6 @@ impl Thp {
         interval: std::time::Duration,
     ) -> Self {
         Self {
-            id: CollectorId::new(format!("mem.thp/{}", source.backend())),
             source,
             mode,
             root: PathBuf::from(SYSFS),
@@ -398,17 +389,13 @@ impl Thp {
             kind: "mem.thp".to_owned(),
             keys: Vec::new(),
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }
     }
 }
 
 impl Collector for Thp {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         match self.mode {
             Mode::Snapshot => "promotions_since_boot",

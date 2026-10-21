@@ -204,7 +204,6 @@ impl Prepared for Prepare {
 
 /// Reads one cgroup's memory accounting.
 pub struct CgroupCollector {
-    id: CollectorId,
     cgroup: Cgroup,
     cadence: Cadence,
 }
@@ -227,7 +226,6 @@ const BREAKDOWN: [(&str, &str); 4] = [
 impl CgroupCollector {
     pub fn new(cgroup: Cgroup, interval: std::time::Duration) -> Self {
         Self {
-            id: CollectorId::new("mem.cgroup/fs:cgroup"),
             cgroup,
             cadence: Cadence::new(interval),
         }
@@ -235,10 +233,6 @@ impl CgroupCollector {
 }
 
 impl Collector for CgroupCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "bytes"
     }
@@ -296,7 +290,7 @@ impl Collector for CgroupCollector {
             kind: "mem.cgroup".to_owned(),
             keys: vec![self.cgroup.key()],
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }])
     }

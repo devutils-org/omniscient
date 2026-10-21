@@ -11,7 +11,6 @@ use crate::collect::{Collector, Losses, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 
 pub struct AllocCollector {
-    id: CollectorId,
     stream: Stream,
     /// By tid: the shim reports the thread that allocated, and a thread pool
     /// that names its workers is exactly the case `comm` is filtered on.
@@ -25,7 +24,6 @@ pub struct AllocCollector {
 impl AllocCollector {
     pub fn new(stream: Stream) -> Self {
         Self {
-            id: CollectorId::new("mem.heap.alloc/preload"),
             stream,
             comms: Comms::new(),
             live: LiveSet::default(),
@@ -38,7 +36,7 @@ impl AllocCollector {
         records
             .into_iter()
             .map(|record| {
-                let event = event_of(&record, &mut self.live, &mut self.comms, &self.id, index);
+                let event = event_of(&record, &mut self.live, &mut self.comms, index);
                 index += 1;
                 event
             })
@@ -53,7 +51,6 @@ pub(super) fn event_of(
     record: &super::Record,
     live: &mut LiveSet,
     comms: &mut Comms,
-    id: &CollectorId,
     seq: u64,
 ) -> Event {
     let allocated = record.op == OP_ALLOC;
@@ -108,16 +105,12 @@ pub(super) fn event_of(
             }
             attrs
         },
-        collector_id: id.clone(),
+        collector_id: CollectorId::unstamped(),
         seq,
     }
 }
 
 impl Collector for AllocCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "bytes"
     }

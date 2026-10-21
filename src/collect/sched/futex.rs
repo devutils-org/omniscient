@@ -79,7 +79,6 @@ impl Prepared for Prepare {
 }
 
 pub struct FutexCollector {
-    id: CollectorId,
     whose: Whose,
     program: Option<FutexProgram>,
     /// Each process's parent, for the rows' `ppid`.
@@ -108,7 +107,6 @@ pub struct FutexCollector {
 impl FutexCollector {
     pub fn new(whose: Whose, wants_stacks: bool, predicate: Option<FilterExpr>) -> Self {
         Self {
-            id: CollectorId::new("sched.futex/bpf:raw_tp"),
             whose,
             program: None,
             parents: super::Parents::default(),
@@ -192,7 +190,7 @@ impl FutexCollector {
                 // point.
                 keys: vec![KeyValue::task(row.tid as i32)],
                 attrs: attributes(&row, window_ns),
-                collector_id: self.id.clone(),
+                collector_id: CollectorId::unstamped(),
                 seq: seq + index as u64,
             };
             if let Some(predicate) = &self.predicate {
@@ -392,10 +390,6 @@ fn attributes(row: &FutexWait, window_ns: u64) -> Vec<Attr> {
 }
 
 impl Collector for FutexCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "wait_ns"
     }
@@ -532,12 +526,11 @@ mod tests {
     /// thread of the process.
     #[test]
     fn a_thread_target_is_not_turned_into_its_process() {
-        let by_thread = prepare(Mode::Trace)
+        let _by_thread = prepare(Mode::Trace)
             // This thread: a tid nobody has is refused inside a container,
             // where it is translated to the kernel's.
             .attach(&Target::Tid(vec![unsafe { libc::gettid() }]))
             .expect("a tid target is declared");
-        assert_eq!(by_thread.id().as_str(), "sched.futex/bpf:raw_tp");
         // The shape is checked through the program's own tests; here the point
         // is only that both targets are accepted and neither is refused.
         assert!(prepare(Mode::Trace)

@@ -37,11 +37,6 @@ impl Prepared for Prepare {
             ));
         }
         Ok(Box::new(ConnectCollector {
-            id: CollectorId::new(if self.state {
-                "net.tcp.connect/bpf:raw_tp"
-            } else {
-                "net.tcp.connect/bpf:fentry"
-            }),
             state: self.state,
             whose: whose(target)?,
             program: None,
@@ -75,7 +70,6 @@ fn whose(target: &Target) -> Result<Whose, String> {
 }
 
 pub struct ConnectCollector {
-    id: CollectorId,
     /// Over `inet_sock_set_state`: no `failed`, and the cookie as it stands.
     state: bool,
     whose: Whose,
@@ -92,7 +86,7 @@ pub struct ConnectCollector {
 }
 
 /// What one handshake says.
-fn event(id: &CollectorId, record: &Connect, seq: u64) -> Event {
+fn event(record: &Connect, seq: u64) -> Event {
     let outcome = record.outcome.map(Outcome::name).unwrap_or("unknown");
     let mut attrs = vec![
         Attr::uint("lat_ns", record.duration_ns),
@@ -131,7 +125,7 @@ fn event(id: &CollectorId, record: &Connect, seq: u64) -> Event {
         kind: "net.tcp.connect".to_owned(),
         keys,
         attrs,
-        collector_id: id.clone(),
+        collector_id: CollectorId::unstamped(),
         seq,
     }
 }
@@ -153,7 +147,7 @@ impl ConnectCollector {
             if let Some(outcome) = record.outcome {
                 self.by_outcome[outcome as usize] += 1;
             }
-            let event = event(&self.id, record, seq + index as u64);
+            let event = event(record, seq + index as u64);
             if let Some(predicate) = &self.predicate {
                 if !crate::filter::matches(predicate, &event) {
                     self.filtered_out += 1;
@@ -198,10 +192,6 @@ impl ConnectCollector {
 }
 
 impl Collector for ConnectCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "lat_ns"
     }
@@ -290,7 +280,7 @@ mod tests {
         bytes[56..60].copy_from_slice(&2u32.to_ne_bytes());
         bytes[16..24].copy_from_slice(&42u64.to_ne_bytes());
         let record = Connect::from_bytes(&bytes).expect("a record");
-        let event = event(&CollectorId::new("t"), &record, 0);
+        let event = event(&record, 0);
         assert_eq!(event.keys[0].to_string(), "sock:42");
         for field in &catalog
             .get(&"net.tcp.connect".parse().expect("a source id"))

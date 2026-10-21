@@ -261,7 +261,6 @@ const AGAINST_APPLICATION_CLOCKS: [&str; 2] =
 
 /// Reads one number per device per tick.
 pub struct NvmlCollector {
-    id: CollectorId,
     metric: Metric,
     /// The mode the request named. Only `count` changes anything here: it has
     /// no cadence of its own, so the collector supplies both the cadence of its
@@ -561,7 +560,6 @@ impl NvmlCollector {
             .driver_version()
             .unwrap_or_else(|| "unknown".to_owned());
         Ok(Self {
-            id: CollectorId::new(format!("{}/vendor:nvml", metric.source())),
             metric,
             mode,
             last_read_ns: None,
@@ -863,10 +861,6 @@ fn closing_read(
 }
 
 impl Collector for NvmlCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         self.metric.value_attr()
     }
@@ -1060,7 +1054,7 @@ impl Collector for NvmlCollector {
                 kind: self.metric.source().to_owned(),
                 keys,
                 attrs,
-                collector_id: self.id.clone(),
+                collector_id: CollectorId::unstamped(),
                 seq: seq + offset as u64,
             });
         }

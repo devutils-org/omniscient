@@ -58,7 +58,6 @@ impl Prepared for Prepare {
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
         match target {
             Target::System => Ok(Box::new(EnergyPmu {
-                id: CollectorId::new("power.energy/pmu"),
                 mode: self.mode,
                 by_domain: self.by_domain,
                 packages: package_leaders(),
@@ -196,7 +195,6 @@ struct Reading {
 }
 
 pub struct EnergyPmu {
-    id: CollectorId,
     mode: Mode,
     /// Every domain, keyed, or the package alone, unkeyed.
     by_domain: bool,
@@ -248,7 +246,6 @@ impl EnergyPmu {
     /// The energy between two readings of one domain, or nothing and a loss.
     fn delta_event(
         keyed: bool,
-        id: &CollectorId,
         losses: &mut Losses,
         opened: &Opened,
         before: Reading,
@@ -296,17 +293,13 @@ impl EnergyPmu {
                 // domain, one per core for AMD's per-core unit.
                 Attr::uint("counters", opened.groups.len() as u64),
             ],
-            collector_id: id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         })
     }
 }
 
 impl Collector for EnergyPmu {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "joules"
     }
@@ -399,7 +392,6 @@ impl Collector for EnergyPmu {
             };
             if let Some(event) = Self::delta_event(
                 self.by_domain,
-                &self.id,
                 &mut self.losses,
                 opened,
                 previous,
@@ -433,7 +425,6 @@ impl Collector for EnergyPmu {
             };
             if let Some(event) = Self::delta_event(
                 self.by_domain,
-                &self.id,
                 &mut self.losses,
                 opened,
                 baseline,

@@ -88,7 +88,6 @@ pub(in crate::collect) fn directory(target: &Path) -> PathBuf {
 /// One source's counters over one cgroup, on every online cpu, read at the
 /// end.
 pub struct CgroupCounters {
-    id: CollectorId,
     spec: &'static Spec,
     cgroup: Cgroup,
     cpus: Vec<u32>,
@@ -151,13 +150,12 @@ impl CgroupCounters {
             kind: self.spec.source.to_owned(),
             keys: vec![self.cgroup.key()],
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         })
     }
     pub fn new(cgroup: Cgroup, cpus: Vec<u32>, spec: &'static Spec) -> Self {
         Self {
-            id: CollectorId::new(format!("{}/{}", spec.source, spec.backend)),
             spec,
             cgroup,
             cpus,
@@ -173,10 +171,6 @@ impl CgroupCounters {
 }
 
 impl Collector for CgroupCounters {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         self.spec.value_attr()
     }

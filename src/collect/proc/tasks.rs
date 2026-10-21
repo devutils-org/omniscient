@@ -51,7 +51,6 @@ impl Prepared for Prepare {
             }
         };
         Ok(Box::new(TasksCollector {
-            id: CollectorId::new("proc.tasks/fs:proc"),
             whose,
             ticks_per_s: clock_ticks(),
             page_bytes: page_bytes(),
@@ -87,7 +86,6 @@ fn thread_group(tid: i32) -> Option<i32> {
 }
 
 pub struct TasksCollector {
-    id: CollectorId,
     whose: Whose,
     ticks_per_s: u64,
     page_bytes: u64,
@@ -245,10 +243,6 @@ impl TasksCollector {
 }
 
 impl Collector for TasksCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "busy"
     }
@@ -362,7 +356,7 @@ impl Collector for TasksCollector {
                 kind: "proc.tasks".to_owned(),
                 keys: vec![KeyValue::task(tid), KeyValue::comm(stat.comm)],
                 attrs,
-                collector_id: self.id.clone(),
+                collector_id: CollectorId::unstamped(),
                 seq: seq + index as u64,
             });
         }

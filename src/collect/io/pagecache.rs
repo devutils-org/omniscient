@@ -66,13 +66,6 @@ impl Reading {
         }
     }
 
-    fn collector(self) -> &'static str {
-        match self {
-            Reading::Misses => "io.pagecache/bpf:raw_tp",
-            Reading::Ahead => "io.readahead/bpf:raw_tp",
-        }
-    }
-
     fn value_attr(self) -> &'static str {
         match self {
             Reading::Misses => "misses",
@@ -112,7 +105,6 @@ impl Prepared for Prepare {
 }
 
 pub struct PageCacheCollector {
-    id: CollectorId,
     reading: Reading,
     mode: Mode,
     narrowing: PageCacheNarrowing,
@@ -154,7 +146,6 @@ impl PageCacheCollector {
         predicate: Option<FilterExpr>,
     ) -> Self {
         Self {
-            id: CollectorId::new(reading.collector()),
             reading,
             mode,
             narrowing,
@@ -217,7 +208,7 @@ impl PageCacheCollector {
             // file read by two processes is one series.
             keys: vec![file, KeyValue::task(row.tid as i32)],
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }
     }
@@ -338,10 +329,6 @@ fn ahead(row: &PageCacheRow) -> i64 {
 }
 
 impl Collector for PageCacheCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         self.reading.value_attr()
     }

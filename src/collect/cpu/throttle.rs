@@ -123,7 +123,6 @@ impl Prepared for Prepare {
 
 /// Reads one cgroup's throttling counters.
 pub struct ThrottleCollector {
-    id: CollectorId,
     directory: PathBuf,
     mode: Mode,
     previous: Option<Throttling>,
@@ -134,7 +133,6 @@ pub struct ThrottleCollector {
 impl ThrottleCollector {
     pub fn new(directory: PathBuf, mode: Mode) -> Self {
         Self {
-            id: CollectorId::new("cpu.throttle/fs:cgroup"),
             directory,
             mode,
             previous: None,
@@ -159,10 +157,6 @@ impl ThrottleCollector {
 }
 
 impl Collector for ThrottleCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "throttled_ns"
     }
@@ -221,7 +215,7 @@ impl Collector for ThrottleCollector {
                 ),
                 Attr::text("window", window),
             ],
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }])
     }

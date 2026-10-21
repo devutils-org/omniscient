@@ -66,7 +66,6 @@ impl Prepared for Prepare {
             }
         };
         Ok(Box::new(Clocks {
-            id: CollectorId::new("power.freq/pmu"),
             cpus,
             groups: Vec::new(),
             previous: BTreeMap::new(),
@@ -160,7 +159,6 @@ impl Interval {
 }
 
 pub struct Clocks {
-    id: CollectorId,
     cpus: Vec<u32>,
     groups: Vec<(u32, CounterGroup)>,
     previous: BTreeMap<u32, Counts>,
@@ -200,10 +198,6 @@ impl Clocks {
 }
 
 impl Collector for Clocks {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "hz"
     }
@@ -298,7 +292,7 @@ impl Collector for Clocks {
                 kind: "power.freq".to_owned(),
                 keys: vec![KeyValue::cpu(cpu)],
                 attrs,
-                collector_id: self.id.clone(),
+                collector_id: CollectorId::unstamped(),
                 seq: seq + events.len() as u64,
             });
         }

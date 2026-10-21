@@ -98,7 +98,6 @@ impl Prepared for Prepare {
 }
 
 pub struct SoftIrqCollector {
-    id: CollectorId,
     /// The vector numbers the program compares against.
     vectors: Vec<u32>,
     /// The kernel's table, kept so an event can carry a vector's name.
@@ -152,7 +151,6 @@ impl SoftIrqCollector {
         predicate: Option<FilterExpr>,
     ) -> Self {
         Self {
-            id: CollectorId::new("net.softirq/bpf:raw_tp"),
             vectors,
             names,
             cpus,
@@ -242,7 +240,7 @@ impl SoftIrqCollector {
             // process target.
             keys: vec![KeyValue::cpu(row.cpu)],
             attrs: attributes(row, &self.vector_name(row.vec), window_ns),
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }
     }
@@ -388,10 +386,6 @@ fn attributes(row: &SoftIrq, vector_name: &str, window_ns: u64) -> Vec<Attr> {
 }
 
 impl Collector for SoftIrqCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "duration_ns"
     }

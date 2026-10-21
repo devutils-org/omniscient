@@ -51,7 +51,6 @@ impl Prepared for Prepare {
 
 /// Reads how much of a window was spent waiting for a cpu.
 pub struct PressureCollector {
-    id: CollectorId,
     mode: Mode,
     path: PathBuf,
     /// The previous reading, which is what turns a microsecond counter into a
@@ -63,7 +62,6 @@ pub struct PressureCollector {
 impl PressureCollector {
     pub fn new(mode: Mode, path: PathBuf) -> Self {
         Self {
-            id: CollectorId::new("cpu.pressure/fs:proc"),
             mode,
             path,
             previous: None,
@@ -112,17 +110,13 @@ impl PressureCollector {
             kind: "cpu.pressure".to_owned(),
             keys: Vec::new(),
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }
     }
 }
 
 impl Collector for PressureCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     /// A poll measures its own window; a snapshot can only repeat the kernel's.
     /// They are different numbers, so they are not given the same name -- the
     /// names `mem.pressure` and `io.pressure` give them.

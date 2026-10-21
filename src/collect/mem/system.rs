@@ -104,7 +104,6 @@ impl Prepared for Prepare {
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
         machine_only(target, MEMINFO)?;
         Ok(Box::new(MemInfo {
-            id: CollectorId::new("mem.system/fs:proc"),
             path: PathBuf::from(MEMINFO),
             cadence: Cadence::new(interval_of(self.0)),
         }))
@@ -113,7 +112,6 @@ impl Prepared for Prepare {
 
 /// Reads `/proc/meminfo`.
 pub struct MemInfo {
-    id: CollectorId,
     path: PathBuf,
     cadence: Cadence,
 }
@@ -160,10 +158,6 @@ fn meminfo_attrs(fields: &BTreeMap<&str, u64>) -> Option<Vec<Attr>> {
 }
 
 impl Collector for MemInfo {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "used_bytes"
     }
@@ -184,7 +178,7 @@ impl Collector for MemInfo {
             kind: "mem.system".to_owned(),
             keys: Vec::new(),
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }])
     }
@@ -221,7 +215,6 @@ impl Prepared for NodePrepare {
         machine_only(target, "the per-node allocation count")?;
         let nodes = list_nodes(std::path::Path::new(NODES))?;
         Ok(Box::new(NodeStat {
-            id: CollectorId::new("mem.numa/fs:sys"),
             nodes,
             cadence: Cadence::new(interval_of(self.0)),
             previous: BTreeMap::new(),
@@ -276,7 +269,6 @@ fn parse_numastat(text: &str) -> BTreeMap<String, u64> {
 
 /// Reads every node's `numastat` and reports what each counter moved.
 pub struct NodeStat {
-    id: CollectorId,
     nodes: Vec<u32>,
     cadence: Cadence,
     previous: BTreeMap<u32, (u64, BTreeMap<String, u64>)>,
@@ -323,17 +315,13 @@ impl NodeStat {
             kind: "mem.numa".to_owned(),
             keys: vec![KeyValue::Node { node }],
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         })
     }
 }
 
 impl Collector for NodeStat {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     /// The pages filed on a node other than the one asked for: the imbalance
     /// the counters exist to show.
     fn value_attr(&self) -> &'static str {
@@ -410,7 +398,6 @@ mod tests {
     #[test]
     fn the_machine_reads_as_free_prints_it() {
         let mut collector = MemInfo {
-            id: CollectorId::new("mem.system/fs:proc"),
             path: PathBuf::from(MEMINFO),
             cadence: Cadence::new(Duration::ZERO),
         };
@@ -458,7 +445,6 @@ mod tests {
             parse_numastat("numa_hit 150\nnuma_miss 4\nother_node 3\n"),
         );
         let mut collector = NodeStat {
-            id: CollectorId::new("mem.numa/fs:sys"),
             nodes: vec![0],
             cadence: Cadence::new(Duration::ZERO),
             previous: BTreeMap::new(),

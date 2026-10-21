@@ -83,7 +83,6 @@ impl Prepared for Prepare {
             )
         })?;
         Ok(Box::new(ProcessEnergy {
-            id: CollectorId::new("power.process_energy/pmu"),
             pid,
             package: self.inner.attach(&Target::System)?,
             baseline: None,
@@ -94,7 +93,6 @@ impl Prepared for Prepare {
 }
 
 pub struct ProcessEnergy {
-    id: CollectorId,
     pid: i32,
     /// `power.energy`'s counted window, over the machine.
     package: Box<dyn Collector>,
@@ -114,10 +112,6 @@ impl ProcessEnergy {
 }
 
 impl Collector for ProcessEnergy {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "joules"
     }
@@ -187,7 +181,7 @@ impl Collector for ProcessEnergy {
                 Attr::uint("pid", self.pid as u64),
                 Attr::text("estimate", ESTIMATE),
             ],
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq: u64::MAX / 2,
         }]
     }

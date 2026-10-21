@@ -71,7 +71,6 @@ impl Prepared for Prepare {
 }
 
 pub struct Pressure {
-    id: CollectorId,
     mode: Mode,
     path: PathBuf,
     previous: Option<Reading>,
@@ -81,7 +80,6 @@ pub struct Pressure {
 impl Pressure {
     pub fn new(mode: Mode, path: PathBuf) -> Self {
         Self {
-            id: CollectorId::new("io.pressure/fs:proc"),
             mode,
             path,
             previous: None,
@@ -130,17 +128,13 @@ impl Pressure {
             kind: "io.pressure".to_owned(),
             keys: Vec::new(),
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }
     }
 }
 
 impl Collector for Pressure {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     /// A poll measures its own window; a snapshot can only repeat the kernel's.
     /// They are different numbers, so they are not given the same name.
     fn value_attr(&self) -> &'static str {

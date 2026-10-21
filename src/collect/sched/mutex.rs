@@ -55,7 +55,6 @@ pub fn prepare(emits: &[Emit]) -> Result<Box<dyn Prepared>, String> {
 }
 
 pub struct MutexCollector {
-    id: CollectorId,
     stream: Stream,
     comms: Comms,
 }
@@ -63,7 +62,6 @@ pub struct MutexCollector {
 impl MutexCollector {
     fn new(stream: Stream) -> Self {
         Self {
-            id: CollectorId::new("sched.mutex/preload"),
             stream,
             comms: Comms::new(),
         }
@@ -125,17 +123,13 @@ impl MutexCollector {
             kind: "sched.mutex".to_owned(),
             keys: vec![KeyValue::task(record.tid as i32)],
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }
     }
 }
 
 impl Collector for MutexCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "wait_ns"
     }

@@ -120,7 +120,6 @@ impl Prepared for Prepare {
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
         match target {
             Target::System => Ok(Box::new(SnmpCollector {
-                id: CollectorId::new("net.snmp/fs:proc"),
                 mode: self.0,
                 previous: BTreeMap::new(),
                 pass_first_tick: false,
@@ -136,7 +135,6 @@ impl Prepared for Prepare {
 }
 
 pub struct SnmpCollector {
-    id: CollectorId,
     mode: Mode,
     /// Each counter's reading the next increment is measured against.
     previous: BTreeMap<String, i64>,
@@ -166,7 +164,7 @@ impl SnmpCollector {
             kind: "net.snmp".to_owned(),
             keys: Vec::new(),
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }
     }
@@ -211,10 +209,6 @@ impl SnmpCollector {
 }
 
 impl Collector for SnmpCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         match self.mode {
             Mode::Snapshot => "value_since_boot",

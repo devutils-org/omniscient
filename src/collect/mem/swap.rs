@@ -50,13 +50,6 @@ pub enum Scope {
 }
 
 impl Scope {
-    fn backend(self) -> &'static str {
-        match self {
-            Scope::Machine => "fs:proc",
-            Scope::Cgroup => "fs:cgroup",
-        }
-    }
-
     fn read_from(self) -> &'static str {
         match self {
             Scope::Machine => "/proc/vmstat",
@@ -167,7 +160,6 @@ const NO_ZERO_PAGES_PER_CGROUP: &str = "this kernel was booted with `cgroup.memo
 
 /// Reads one pair of swap counters.
 pub struct Swap {
-    id: CollectorId,
     mode: Mode,
     scope: Scope,
     path: PathBuf,
@@ -195,7 +187,6 @@ impl Swap {
             losses.note(NO_ZERO_PAGES_PER_CGROUP);
         }
         Self {
-            id: CollectorId::new(format!("mem.swap/{}", scope.backend())),
             mode,
             scope,
             path,
@@ -320,17 +311,13 @@ impl Swap {
             kind: "mem.swap".to_owned(),
             keys: self.keys.clone(),
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }
     }
 }
 
 impl Collector for Swap {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     /// A poll measures traffic over its own window; a snapshot can only report
     /// what the counter stands at. Different numbers, different names.
     fn value_attr(&self) -> &'static str {

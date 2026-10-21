@@ -100,21 +100,13 @@ impl Prepared for Prepare {
                 ))
             }
         }
-        Ok(Box::new(SockStat {
-            id: CollectorId::new("net.sockstat/fs:proc"),
-        }))
+        Ok(Box::new(SockStat {}))
     }
 }
 
-pub struct SockStat {
-    id: CollectorId,
-}
+pub struct SockStat {}
 
 impl Collector for SockStat {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "inuse"
     }
@@ -136,7 +128,7 @@ impl Collector for SockStat {
                     kind: "net.sockstat".to_owned(),
                     keys: Vec::new(),
                     attrs,
-                    collector_id: self.id.clone(),
+                    collector_id: CollectorId::unstamped(),
                     seq: seq + index as u64,
                 }
             })

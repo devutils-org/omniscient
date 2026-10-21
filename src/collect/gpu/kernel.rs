@@ -355,7 +355,6 @@ struct Hello {
 }
 
 pub struct KernelCollector {
-    id: CollectorId,
     socket: Rc<RefCell<Socket>>,
     reader: usize,
     launched: i32,
@@ -372,7 +371,6 @@ pub struct KernelCollector {
 impl KernelCollector {
     fn new(socket: Rc<RefCell<Socket>>, reader: usize, launched: i32) -> Self {
         Self {
-            id: CollectorId::new("gpu.kernel/vendor:cupti"),
             socket,
             reader,
             launched,
@@ -659,7 +657,7 @@ impl KernelCollector {
             kind: "gpu.kernel".to_owned(),
             keys,
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }
     }
@@ -683,10 +681,6 @@ fn copy_kind(kind: u32) -> &'static str {
 }
 
 impl Collector for KernelCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "duration_ns"
     }

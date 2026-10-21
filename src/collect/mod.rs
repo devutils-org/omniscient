@@ -47,6 +47,7 @@ use std::time::Duration as StdDuration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::catalog::BackendKind;
 use crate::clock::monotonic_ns;
 use crate::event::{CollectorId, Event};
 use crate::request::{Mode, Target, Window};
@@ -996,13 +997,39 @@ impl ProgramStats {
 /// Whether a backend works by loading eBPF programs, whose run time is then
 /// the kernel's to report.
 fn loads_programs(backend: &str) -> bool {
-    backend == "bpf" || backend.starts_with("bpf:")
+    BackendKind::of(backend).loads_programs()
+}
+
+/// Events as a collection hands them over, made the runner's: stamped with
+/// the collector they came from, then their task ids in our numbering.
+fn into_our_ids(serving: Option<&ResolvedRequest>, events: &mut [Event], losses: &mut Losses) {
+    stamp(serving, events);
+    into_our_numbering(serving, events, losses);
+}
+
+/// Each event named after the collector built for its request, the registry's
+/// `<source>/<backend>` key: named here, once, rather than by each collector,
+/// whose own spelling of its pair could drift from the one it is registered
+/// under. An event a collector already named is left alone only when no
+/// request is known to say better, as in the runner's own tests.
+fn stamp(serving: Option<&ResolvedRequest>, events: &mut [Event]) {
+    let Some(serving) = serving else {
+        return;
+    };
+    let id = CollectorId::of(&serving.request.source.to_string(), &serving.backend.id);
+    for event in events {
+        event.collector_id = id.clone();
+    }
 }
 
 /// An eBPF collector's task ids, written by the kernel in its own numbering,
 /// rewritten into the one every other collector uses (`bpf::pidns`), and what
 /// could not be said so.
-fn into_our_ids(serving: Option<&ResolvedRequest>, events: &mut [Event], losses: &mut Losses) {
+fn into_our_numbering(
+    serving: Option<&ResolvedRequest>,
+    events: &mut [Event],
+    losses: &mut Losses,
+) {
     if !serving.is_some_and(|serving| loads_programs(&serving.backend.id)) {
         return;
     }
@@ -1140,21 +1167,21 @@ impl InsideMeter {
             };
         }
         let unknown = |why: &str| InsideMeter::Unknown(why.to_owned());
-        match backend.split(':').next().unwrap_or(backend) {
-            "pmu" => unknown(PMU_INSIDE),
-            "preload" => unknown(
+        match BackendKind::of(backend) {
+            BackendKind::Pmu => unknown(PMU_INSIDE),
+            BackendKind::Preload => unknown(
                 "a preloaded library runs inside the target, and this one keeps no account of \
                  its own time",
             ),
-            "af_packet" => unknown(
+            BackendKind::AfPacket => unknown(
                 "the kernel copies each packet into the capture ring in whichever context \
                  received or sent it, which for a local program is often its own",
             ),
-            "so_timestamping" => unknown(
+            BackendKind::SoTimestamping => unknown(
                 "a timestamping socket option makes the kernel stamp the target's own packets \
                  in its context",
             ),
-            "vendor" if backend != "vendor:nvml" => unknown(
+            BackendKind::Vendor if backend != "vendor:nvml" => unknown(
                 "a vendor profiler injects into or replays the target, and says nothing of what \
                  that cost it",
             ),
@@ -1849,8 +1876,6 @@ pub struct Recorded {
 
 /// One source of events.
 pub trait Collector {
-    fn id(&self) -> &CollectorId;
-
     /// The attribute that holds this collector's measured value.
     fn value_attr(&self) -> &'static str;
 
@@ -5804,6 +5829,31 @@ mod tests {
         }
     }
 
+    /// A collector does not name its events: whatever it wrote, the runner
+    /// names each after the registry's pair for the request it serves, so the
+    /// provenance in a results document is the pair `omn list` shows.
+    #[test]
+    fn every_event_handed_over_is_named_after_the_pair_it_was_built_for() {
+        let serving = resolved_with_filter("mem.rss", None, "comm == 'omn'");
+        let mut events = vec![Event {
+            ts_ns: 1,
+            ts_err_ns: 0,
+            kind: "mem.rss".to_owned(),
+            keys: Vec::new(),
+            attrs: Vec::new(),
+            collector_id: CollectorId::new("a name the collector made up"),
+            seq: 0,
+        }];
+        let mut losses = Losses::default();
+
+        into_our_ids(Some(&serving), &mut events, &mut losses);
+
+        assert_eq!(
+            events[0].collector_id.as_str(),
+            format!("mem.rss/{}", serving.backend.id)
+        );
+    }
+
     /// Builds a resolved request for `mem.rss`, optionally pinned to a backend
     /// so the filter placement can be steered: `fs:proc` returns whole records
     /// and gets a userspace placement, an eBPF backend is credited with pushing
@@ -6215,11 +6265,8 @@ mod tests {
     /// keeps it whatever the request asked for.
     #[test]
     fn each_request_is_paced_by_its_own_mode_and_its_own_collector() {
-        struct Streaming(CollectorId, Option<StdDuration>);
+        struct Streaming(Option<StdDuration>);
         impl Collector for Streaming {
-            fn id(&self) -> &CollectorId {
-                &self.0
-            }
             fn value_attr(&self) -> &'static str {
                 "count"
             }
@@ -6227,14 +6274,11 @@ mod tests {
                 Ok(Vec::new())
             }
             fn tick(&self) -> Option<StdDuration> {
-                self.1
+                self.0
             }
         }
-        let polling = Streaming(CollectorId::new("polling"), None);
-        let streaming = Streaming(
-            CollectorId::new("streaming"),
-            Some(StdDuration::from_millis(10)),
-        );
+        let polling = Streaming(None);
+        let streaming = Streaming(Some(StdDuration::from_millis(10)));
 
         let poll = |ms: u64| crate::request::Mode::Poll {
             interval: crate::scalar::Duration::from_nanos(ms * 1_000_000),
@@ -6343,16 +6387,11 @@ mod tests {
     /// spends does not depend on how contended the machine is; the loop runs
     /// until the thread has been charged what it was asked for.
     struct Burning {
-        id: CollectorId,
         spin_ns: u64,
         spun_ns: std::rc::Rc<std::cell::Cell<u64>>,
     }
 
     impl Collector for Burning {
-        fn id(&self) -> &CollectorId {
-            &self.id
-        }
-
         fn value_attr(&self) -> &'static str {
             "bytes"
         }
@@ -6369,7 +6408,6 @@ mod tests {
     fn burning(spin_ns: u64) -> (Vec<Box<dyn Collector>>, std::rc::Rc<std::cell::Cell<u64>>) {
         let spun_ns = std::rc::Rc::new(std::cell::Cell::new(0u64));
         let collectors: Vec<Box<dyn Collector>> = vec![Box::new(Burning {
-            id: CollectorId::new("burning"),
             spin_ns,
             spun_ns: spun_ns.clone(),
         })];
@@ -6776,16 +6814,11 @@ mod tests {
 
     /// A collector that records nothing but the clock at every call.
     struct Clocked {
-        id: CollectorId,
         reads_ns: std::rc::Rc<std::cell::RefCell<Vec<u64>>>,
         stopped_ns: std::rc::Rc<std::cell::Cell<u64>>,
     }
 
     impl Collector for Clocked {
-        fn id(&self) -> &CollectorId {
-            &self.id
-        }
-
         fn value_attr(&self) -> &'static str {
             "bytes"
         }
@@ -6808,7 +6841,6 @@ mod tests {
     fn a_launched_program_without_a_pidfd_is_noticed_between_reads() {
         let reads_ns = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let mut slots = vec![Slot::Attached(Box::new(Clocked {
-            id: CollectorId::new("clocked"),
             reads_ns: reads_ns.clone(),
             stopped_ns: std::rc::Rc::new(std::cell::Cell::new(0u64)),
         }) as Box<dyn Collector>)];
@@ -6854,7 +6886,6 @@ mod tests {
         let reads_ns = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let stopped_ns = std::rc::Rc::new(std::cell::Cell::new(0u64));
         let mut collectors: Vec<Box<dyn Collector>> = vec![Box::new(Clocked {
-            id: CollectorId::new("clocked"),
             reads_ns: reads_ns.clone(),
             stopped_ns: stopped_ns.clone(),
         })];
@@ -6904,16 +6935,11 @@ mod tests {
 
     /// A collector whose target is gone after a known number of reads.
     struct Vanishing {
-        id: CollectorId,
         reads_left: u32,
         reads: std::rc::Rc<std::cell::Cell<u32>>,
     }
 
     impl Collector for Vanishing {
-        fn id(&self) -> &CollectorId {
-            &self.id
-        }
-
         fn value_attr(&self) -> &'static str {
             "bytes"
         }
@@ -6945,7 +6971,6 @@ mod tests {
         };
         let vanishing = |reads: &std::rc::Rc<std::cell::Cell<u32>>| {
             Box::new(Vanishing {
-                id: CollectorId::new("core"),
                 reads_left: 2,
                 reads: reads.clone(),
             }) as Box<dyn Collector>
@@ -6953,7 +6978,6 @@ mod tests {
         let workload_reads = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let clocked = || {
             Box::new(Clocked {
-                id: CollectorId::new("program"),
                 reads_ns: workload_reads.clone(),
                 stopped_ns: std::rc::Rc::new(std::cell::Cell::new(0)),
             }) as Box<dyn Collector>
@@ -7061,14 +7085,13 @@ mod tests {
     }
 
     fn clocked(
-        name: &str,
+        _name: &str,
     ) -> (
         Box<dyn Collector>,
         std::rc::Rc<std::cell::RefCell<Vec<u64>>>,
     ) {
         let reads_ns = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let collector = Box::new(Clocked {
-            id: CollectorId::new(name),
             reads_ns: reads_ns.clone(),
             stopped_ns: std::rc::Rc::new(std::cell::Cell::new(0)),
         });
@@ -7361,11 +7384,8 @@ mod tests {
     /// the first tick's included, like every other loss.
     #[test]
     fn a_detached_collector_s_losses_are_its_own() {
-        struct Lossy(CollectorId);
+        struct Lossy;
         impl Collector for Lossy {
-            fn id(&self) -> &CollectorId {
-                &self.0
-            }
             fn value_attr(&self) -> &'static str {
                 "count"
             }
@@ -7383,7 +7403,7 @@ mod tests {
         let mut slots = vec![
             Slot::Attached(whole),
             Slot::Waiting(Box::new(Handing {
-                collector: Ok(Box::new(Lossy(CollectorId::new("lossy")))),
+                collector: Ok(Box::new(Lossy)),
                 spin_ns: 0,
                 at_exec: false,
             })),
@@ -7421,15 +7441,11 @@ mod tests {
     #[test]
     fn a_drained_collector_s_drops_are_placed_at_the_drains_that_read_them() {
         struct Dropping {
-            id: CollectorId,
             dropped: u64,
             reads: u64,
             tick: Option<StdDuration>,
         }
         impl Collector for Dropping {
-            fn id(&self) -> &CollectorId {
-                &self.id
-            }
             fn value_attr(&self) -> &'static str {
                 "count"
             }
@@ -7455,9 +7471,8 @@ mod tests {
                 }
             }
         }
-        let dropping = |name: &str, tick| {
+        let dropping = |_name: &str, tick| {
             Box::new(Dropping {
-                id: CollectorId::new(name),
                 dropped: 0,
                 reads: 0,
                 tick,
@@ -7685,7 +7700,7 @@ mod tests {
 
     /// A held collector, its reads, when it was stopped and when attached.
     fn stamping(
-        name: &str,
+        _name: &str,
     ) -> (
         Slot,
         std::rc::Rc<std::cell::RefCell<Vec<u64>>>,
@@ -7697,7 +7712,6 @@ mod tests {
         let attached_ns = std::rc::Rc::new(std::cell::Cell::new(0));
         let slot = Slot::Waiting(Box::new(Stamping {
             collector: Box::new(Clocked {
-                id: CollectorId::new(name),
                 reads_ns: reads_ns.clone(),
                 stopped_ns: stopped_ns.clone(),
             }),
@@ -7987,7 +8001,6 @@ mod tests {
     /// round: the workload whose bursts a recording has to find. It counts its
     /// own reads, which is what the recording's arithmetic is checked against.
     struct Level {
-        id: CollectorId,
         opened_ns: u64,
         /// Spans, in ms after `opened_ns`, where the level is high.
         high_ms: Vec<(u64, u64)>,
@@ -7995,10 +8008,6 @@ mod tests {
     }
 
     impl Collector for Level {
-        fn id(&self) -> &CollectorId {
-            &self.id
-        }
-
         fn value_attr(&self) -> &'static str {
             "open"
         }
@@ -8017,7 +8026,7 @@ mod tests {
                 kind: "proc.fd".to_owned(),
                 keys: Vec::new(),
                 attrs: vec![crate::event::Attr::uint("open", if high { 70 } else { 6 })],
-                collector_id: self.id.clone(),
+                collector_id: CollectorId::unstamped(),
                 seq,
             }])
         }
@@ -8025,15 +8034,10 @@ mod tests {
 
     /// A collector whose read takes a known wall time, and emits nothing.
     struct Stalling {
-        id: CollectorId,
         stall: StdDuration,
     }
 
     impl Collector for Stalling {
-        fn id(&self) -> &CollectorId {
-            &self.id
-        }
-
         fn value_attr(&self) -> &'static str {
             "bytes"
         }
@@ -8056,13 +8060,11 @@ mod tests {
         let reads = std::rc::Rc::new(std::cell::Cell::new(0u64));
         let mut collectors: Vec<Box<dyn Collector>> = vec![
             Box::new(Level {
-                id: CollectorId::new("poller"),
                 opened_ns: monotonic_ns(),
                 high_ms: Vec::new(),
                 reads: reads.clone(),
             }),
             Box::new(Stalling {
-                id: CollectorId::new("stalling"),
                 stall: StdDuration::from_millis(300),
             }),
         ];
@@ -8102,7 +8104,6 @@ mod tests {
         let reads = std::rc::Rc::new(std::cell::Cell::new(0u64));
         let opened_ns = monotonic_ns();
         let mut slots = vec![Slot::Attached(Box::new(Level {
-            id: CollectorId::new("level"),
             opened_ns,
             high_ms,
             reads: reads.clone(),

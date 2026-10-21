@@ -82,7 +82,6 @@ struct Reading {
 }
 
 pub struct Throttling {
-    id: CollectorId,
     #[allow(dead_code)]
     mode: Mode,
     root: PathBuf,
@@ -94,7 +93,6 @@ pub struct Throttling {
 impl Throttling {
     pub fn new(mode: Mode, root: PathBuf, cpus: Vec<u32>) -> Self {
         Self {
-            id: CollectorId::new("power.throttle/fs:sys"),
             mode,
             root,
             cpus,
@@ -155,10 +153,6 @@ impl Throttling {
 }
 
 impl Collector for Throttling {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "throttles"
     }
@@ -218,7 +212,7 @@ impl Collector for Throttling {
                     Attr::uint("cpu", u64::from(*cpu)),
                     Attr::uint("interval_ns", interval_ns),
                 ],
-                collector_id: self.id.clone(),
+                collector_id: CollectorId::unstamped(),
                 seq: seq + events.len() as u64,
             });
         }

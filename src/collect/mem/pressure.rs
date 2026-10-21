@@ -52,13 +52,6 @@ pub enum Scope {
 }
 
 impl Scope {
-    fn backend(self) -> &'static str {
-        match self {
-            Scope::Machine => "fs:proc",
-            Scope::Cgroup => "fs:cgroup",
-        }
-    }
-
     fn read_from(self) -> &'static str {
         match self {
             Scope::Machine => "/proc/pressure/memory",
@@ -128,7 +121,6 @@ impl Prepared for Prepare {
 
 /// Reads one pressure file.
 pub struct Pressure {
-    id: CollectorId,
     mode: Mode,
     scope: Scope,
     path: PathBuf,
@@ -140,7 +132,6 @@ pub struct Pressure {
 impl Pressure {
     pub fn new(mode: Mode, scope: Scope, path: PathBuf, keys: Vec<KeyValue>) -> Self {
         Self {
-            id: CollectorId::new(format!("mem.pressure/{}", scope.backend())),
             mode,
             scope,
             path,
@@ -200,17 +191,13 @@ impl Pressure {
             kind: "mem.pressure".to_owned(),
             keys: self.keys.clone(),
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         }
     }
 }
 
 impl Collector for Pressure {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     /// A poll measures its own window; a snapshot can only repeat the
     /// kernel's. Different numbers, so different names.
     fn value_attr(&self) -> &'static str {

@@ -61,7 +61,6 @@ pub fn prepare() -> Result<Box<dyn Prepared>, String> {
 }
 
 pub struct ApiCollector {
-    id: CollectorId,
     stream: Stream,
     comms: Comms,
     /// Records naming an entry point this build does not know, which can only
@@ -72,7 +71,6 @@ pub struct ApiCollector {
 impl ApiCollector {
     fn new(stream: Stream) -> Self {
         Self {
-            id: CollectorId::new("gpu.api/preload"),
             stream,
             comms: Comms::new(),
             unnamed: 0,
@@ -129,17 +127,13 @@ impl ApiCollector {
             // thread is what the shim knows.
             keys: vec![KeyValue::task(record.tid as i32)],
             attrs,
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         })
     }
 }
 
 impl Collector for ApiCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "latency_ns"
     }

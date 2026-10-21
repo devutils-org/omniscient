@@ -40,7 +40,6 @@ impl Prepared for Prepare {
             }
         };
         Ok(Box::new(TcpRttCollector {
-            id: CollectorId::new("net.tcp.rtt/netlink"),
             only_pid,
             losses: Losses::default(),
             diag: None,
@@ -49,7 +48,6 @@ impl Prepared for Prepare {
 }
 
 pub struct TcpRttCollector {
-    id: CollectorId,
     /// When set, only sockets this process holds open are reported.
     only_pid: Option<i32>,
     losses: Losses,
@@ -124,7 +122,7 @@ impl TcpRttCollector {
                     .map(|name| Attr::text("congestion", name)),
             )
             .collect(),
-            collector_id: self.id.clone(),
+            collector_id: CollectorId::unstamped(),
             seq,
         })
     }
@@ -178,10 +176,6 @@ fn extra_attrs(extra: &TcpInfoExtra) -> Vec<Attr> {
 }
 
 impl Collector for TcpRttCollector {
-    fn id(&self) -> &CollectorId {
-        &self.id
-    }
-
     fn value_attr(&self) -> &'static str {
         "rtt_ns"
     }
