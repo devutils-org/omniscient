@@ -210,6 +210,33 @@ pub fn load_support() -> &'static Support {
     })
 }
 
+/// Whether this kernel creates a map of the type a requirement names: the
+/// `bpf_map:<type>` requirement.
+///
+/// Asked by creating the smallest one and closing it, rather than read off a
+/// release number. `BPF_MAP_TYPE_RINGBUF` is Linux 5.8's, and RHEL backports
+/// it to its 4.18: `kernel>=5.8` refused every program that publishes through
+/// one on Rocky 8 for a release number, not a missing feature.
+pub fn map_type_support(map: crate::need::BpfMap) -> &'static Support {
+    static RINGBUF: OnceLock<Support> = OnceLock::new();
+    match map {
+        crate::need::BpfMap::Ringbuf => RINGBUF.get_or_init(|| {
+            // The smallest ring the kernel takes is one page.
+            let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(4096) as u32;
+            match syscall::map_create(syscall::BPF_MAP_TYPE_RINGBUF, 0, 0, page, "omn_probe_rb") {
+                Ok(_) => Support::Yes,
+                Err(error) if matches!(error.raw_os_error(), Some(libc::EPERM | libc::EACCES)) => {
+                    Support::No(permission_advice("creating a ring buffer map"))
+                }
+                Err(error) => Support::No(format!(
+                    "this kernel creates no BPF ring buffer ({error}): it is older than 5.8 and \
+                     carries no backport of it"
+                )),
+            }
+        }),
+    }
+}
+
 /// Why no program may read kernel memory here, when the kernel is locked down
 /// for confidentiality: `bpf_probe_read_kernel` is then withheld, and every
 /// program that reads a struct -- nearly all of this tool's -- is rejected by
@@ -241,8 +268,9 @@ fn kernel_reads_locked_down() -> Option<&'static str> {
                 Err(error) if error.error.raw_os_error() == Some(libc::EINVAL) => Some(
                     "the kernel withholds bpf_probe_read_kernel from eBPF programs, which is \
                      what kernel lockdown in confidentiality mode does (`lockdown=confidentiality`, \
-                     or a distribution's Secure Boot policy): every program that reads a kernel \
-                     struct is rejected, and these sources all do"
+                     or a distribution's Secure Boot policy), or what a kernel before 5.5 does, \
+                     which has no such helper: every program that reads a kernel struct is \
+                     rejected, and these sources all do"
                         .to_owned(),
                 ),
                 _ => None,
@@ -341,7 +369,7 @@ pub fn raw_tracepoint_support(requirement: &str) -> Support {
 
 /// Splits `name(a, b)|(c)` into the name and the prototypes, each a list of
 /// argument types. A bare name has none, and asks for existence only.
-fn parse_raw_tracepoint(requirement: &str) -> Result<(&str, Vec<Vec<String>>), String> {
+pub(crate) fn parse_raw_tracepoint(requirement: &str) -> Result<(&str, Vec<Vec<String>>), String> {
     let Some(open) = requirement.find('(') else {
         return Ok((requirement.trim(), Vec::new()));
     };

@@ -16,7 +16,7 @@
     # inlined the second into its callers (a clang build with link-time
     # optimisation): it reads the errno out of `sk_err`.
     - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:tcp_v4_connect(sock *, sockaddr_unsized *, int)|(sock *, sockaddr *, int)", "fentry:tcp_finish_connect", "fentry:tcp_done_with_error", "fentry:tcp_done"], cost: low}
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:inet_sock_set_state(sock *, int, int)", "kernel>=5.8"], cost: low,
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:inet_sock_set_state(sock *, int, int)", "bpf_map:ringbuf"], cost: low,
        degraded: "one tracepoint and no trampoline, so no 65 ms detach; but a connect that failed before its SYN left is not seen (no `failed` outcome), and the cookie is the socket's as it stands, zero where nothing asked for one"}
     - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: low, degraded: "no BTF: struct offsets are not portable"}
   modes: [trace]
@@ -73,7 +73,7 @@
   unit: ns
   backends:
     - id: "bpf:raw_tp"
-      requires: ["bpf", "btf", "raw_tracepoint:inet_sock_set_state(sock *, int, int)", "kernel>=5.8"]
+      requires: ["bpf", "btf", "raw_tracepoint:inet_sock_set_state(sock *, int, int)", "bpf_map:ringbuf"]
       join: {key: "sock:cookie", match: eq, ttl: 300s}
       cost: low
     - id: "bpf:tp"
@@ -163,7 +163,7 @@
   summary: "TCP retransmissions"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:tcp_retransmit_skb(sock *, sk_buff *, int)|(sock *, sk_buff *)", "kernel>=5.8"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:tcp_retransmit_skb(sock *, sk_buff *, int)|(sock *, sk_buff *)", "bpf_map:ringbuf"], cost: low}
     - {id: "bpf:tp", requires: ["tracepoint:tcp:tcp_retransmit_skb", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [rate, topk, raw, summary]
@@ -177,7 +177,7 @@
   summary: "Dropped packets with drop reason"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:kfree_skb(sk_buff *, void *, skb_drop_reason, sock *)|(sk_buff *, void *, skb_drop_reason)", "kernel>=5.8"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:kfree_skb(sk_buff *, void *, skb_drop_reason, sock *)|(sk_buff *, void *, skb_drop_reason)", "bpf_map:ringbuf"], cost: low}
     - {id: "bpf:tp", requires: ["tracepoint:skb:kfree_skb", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [rate, topk, raw, summary, stack]
@@ -392,7 +392,7 @@
   backends:
     # Bucketed in the kernel and drained on a tick: one event is one bucket of
     # one window, standing for every packet in it.
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:qdisc_enqueue(Qdisc *, netdev_queue *, sk_buff *)", "raw_tracepoint:qdisc_dequeue(Qdisc *, netdev_queue *, int, sk_buff *)", "kernel>=5.8"], cost: low, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:qdisc_enqueue(Qdisc *, netdev_queue *, sk_buff *)", "raw_tracepoint:qdisc_dequeue(Qdisc *, netdev_queue *, int, sk_buff *)", "bpf_map:ringbuf"], cost: low, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:qdisc:qdisc_enqueue", "tracepoint:qdisc:qdisc_dequeue", "bpf"], cost: low, equivalent: true, drained: true}
   modes: [trace]
   emits: [hist, raw, summary, timeline]
@@ -419,7 +419,7 @@
   unit: ns
   backends:
     # A count and an exact total per (cpu, vector, bucket), drained on a tick.
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:softirq_entry(unsigned int)", "raw_tracepoint:softirq_exit(unsigned int)", "kernel>=5.8"], cost: med, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:softirq_entry(unsigned int)", "raw_tracepoint:softirq_exit(unsigned int)", "bpf_map:ringbuf"], cost: med, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:irq:softirq_entry", "tracepoint:irq:softirq_exit", "bpf"], cost: med, equivalent: true, drained: true}
   modes: [trace, count]
   emits: [hist, rate, raw, summary]

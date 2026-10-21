@@ -190,43 +190,13 @@ pub fn uprobe_type() -> Result<u32, String> {
     dynamic_pmu_type(UPROBE_PMU, "uprobe")
 }
 
-/// The probe behind the `kprobe`, `uprobe` and `fentry:<function>`
-/// requirement strings: every attach kind this file owns that is not a
-/// tracepoint.
-///
-/// Asked of the machine rather than assumed. The type numbers are handed out at
-/// boot in the order the PMUs register, so there is no constant that could be
-/// right, and an event opened on the wrong type does not fail -- it counts
-/// something else.
-///
-/// `capabilities.rs` calls this with every requirement it has not otherwise
-/// answered, which is what let the fentry probe land without an edit there:
-/// until the eighth wave, the eight `fentry:` requirements in the catalog read
-/// `unverified`, and the resolver passed over every `bpf:fentry` backend for a
-/// requirement nobody had asked about.
-pub fn probe_type_support(kind: &str) -> Option<Support> {
-    if let Some(function) = kind.strip_prefix("fentry:") {
-        return Some(fentry::support(function));
-    }
-    // Two requirements that are not attach kinds, answered here because this
-    // is the one hook `capabilities.rs` gives the kernel stream's files: the
-    // `net` collectors' own start, asked in advance.
-    if let Some(answer) = crate::collect::net::probe(kind) {
-        return Some(match answer {
-            Ok(()) => Support::Yes,
-            Err(reason) => Support::No(reason),
-        });
-    }
-    let read = match kind {
-        "kprobe" => kprobe_type(),
-        "uprobe" => return Some(uprobe_support().clone()),
-        "uprobe_multi" => return Some(super::usdt::uprobe_multi_support().clone()),
-        _ => return None,
-    };
-    Some(match read {
+/// Whether this process can open a kprobe: the `kprobe` requirement, read
+/// as the PMU's type number the kernel handed out at boot.
+pub fn kprobe_support() -> Support {
+    match kprobe_type() {
         Ok(_) => Support::Yes,
         Err(reason) => Support::No(reason),
-    })
+    }
 }
 
 /// Whether this process can put a uprobe anywhere: the `uprobe` requirement.
@@ -794,7 +764,7 @@ mod tests {
             // one, which is more than the PMU's existence (see
             // `uprobe_support`); the type number is what is checked here.
             let support = match kind {
-                "kprobe" => probe_type_support(kind).expect("a probe for a kind this module knows"),
+                "kprobe" => kprobe_support(),
                 _ => match uprobe_type() {
                     Ok(_) => Support::Yes,
                     Err(reason) => Support::No(reason),
@@ -822,7 +792,6 @@ mod tests {
                 (published, _) => panic!("{pmu} publishes {published:?} and the probe disagrees"),
             }
         }
-        assert!(probe_type_support("something_else").is_none());
     }
 
     /// `uprobe` is yes when either route is open to this process, and a no

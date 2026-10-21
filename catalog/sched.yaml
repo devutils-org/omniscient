@@ -12,7 +12,7 @@
   unit: count
   backends:
     - id: "bpf:raw_tp"
-      requires: ["bpf", "btf", "raw_tracepoint:sched_waking", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)", "kernel>=5.8"]
+      requires: ["bpf", "btf", "raw_tracepoint:sched_waking", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)", "bpf_map:ringbuf"]
       join: {key: "task:tid", match: wakeup}
       cost: med
     - id: "bpf:tp"
@@ -249,7 +249,7 @@
   summary: "Task migrations between cores"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_migrate_task(task_struct *, int)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)", "kernel>=5.8"], cost: low, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_migrate_task(task_struct *, int)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)", "bpf_map:ringbuf"], cost: low, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_migrate_task", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [rate, topk, raw, summary]
@@ -300,7 +300,7 @@
   summary: "Userspace futex wait"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter(pt_regs *, long int)", "raw_tracepoint:sys_exit(pt_regs *, long int)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)", "kernel>=5.8"], cost: high, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter(pt_regs *, long int)", "raw_tracepoint:sys_exit(pt_regs *, long int)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)", "bpf_map:ringbuf"], cost: high, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit", "bpf"], cost: high, equivalent: true}
   modes: [trace]
   emits: [hist, topk, stack, raw, summary]
@@ -368,7 +368,7 @@
   summary: "Time spent in hard and soft interrupt handlers"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:irq_handler_entry(int, irqaction *)", "raw_tracepoint:irq_handler_exit(int, irqaction *, int)", "raw_tracepoint:softirq_entry(unsigned int)", "raw_tracepoint:softirq_exit(unsigned int)", "kernel>=5.8"], cost: med, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:irq_handler_entry(int, irqaction *)", "raw_tracepoint:irq_handler_exit(int, irqaction *, int)", "raw_tracepoint:softirq_entry(unsigned int)", "raw_tracepoint:softirq_exit(unsigned int)", "bpf_map:ringbuf"], cost: med, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:irq:irq_handler_entry", "tracepoint:irq:irq_handler_exit", "tracepoint:irq:softirq_entry", "tracepoint:irq:softirq_exit", "bpf"], cost: med, equivalent: true}
   modes: [trace, count]
   emits: [hist, topk, rate, raw, summary]
@@ -477,7 +477,7 @@
   summary: "Each cpu's run queue length, sampled on its clock (runqlen)"
   unit: count
   backends:
-    - {id: "bpf:perf_event", requires: ["bpf", "btf", "pmu:PERF_COUNT_SW_CPU_CLOCK", "kernel>=5.8"], cost: low}
+    - {id: "bpf:perf_event", requires: ["bpf", "btf", "pmu:PERF_COUNT_SW_CPU_CLOCK", "bpf_map:ringbuf"], cost: low}
   modes: [sample]
   emits: [hist, topk, raw]
   targets: {system: native, cpu: native}
@@ -498,7 +498,7 @@
   summary: "Automatic NUMA balancing decisions"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_stick_numa(task_struct *, int, task_struct *, int)", "kernel>=5.8"], cost: low, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_stick_numa(task_struct *, int, task_struct *, int)", "bpf_map:ringbuf"], cost: low, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_stick_numa", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [rate, topk, raw, summary]

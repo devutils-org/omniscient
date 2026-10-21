@@ -21,6 +21,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::need::{Need, Word};
+
 /// The answer to "can this machine do that".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "state", content = "detail")]
@@ -956,39 +958,36 @@ impl Capabilities {
     /// without one, such a requirement can only be checked for the current
     /// process, which is what `[pid]` means for a self-test.
     pub fn probe(&self, requirement: &str, pid: Option<i32>) -> Probe {
-        explain_withheld(self.probe_requirement(requirement, pid))
+        match requirement.parse::<Need>() {
+            Ok(need) => self.probe_need(&need, pid),
+            // The catalog loader refuses such a string, so only one written
+            // elsewhere -- a test, a hand-built entry -- reaches here.
+            Err(reason) => Probe::Unknown(reason),
+        }
     }
 
-    fn probe_requirement(&self, requirement: &str, pid: Option<i32>) -> Probe {
-        if let Some(rest) = requirement.strip_prefix("kernel>=") {
-            return match (KernelVersion::parse(rest), self.environment.kernel_version) {
-                (Some(wanted), Some(actual)) if actual >= wanted => Probe::Available,
-                (Some(wanted), Some(actual)) => {
-                    Probe::Missing(format!("kernel {actual} is older than {wanted}"))
-                }
-                _ => Probe::Unknown(format!("cannot compare kernel version against `{rest}`")),
-            };
-        }
+    /// Answers one requirement, read.
+    pub fn probe_need(&self, need: &Need, pid: Option<i32>) -> Probe {
+        explain_withheld(self.probe_requirement(need, pid))
+    }
 
-        if requirement.starts_with('/') {
-            let path = substitute_pid(requirement, pid);
-            return probe_path(&path);
-        }
-
-        // A control file is used by writing it, and some are write-only:
-        // `/proc/[pid]/clear_refs` is `--w-------`, and asked by reading it
-        // answered "not readable by uid 1000" about a file that uid may use.
-        // Finding 21 of `docs/open-findings.md`.
-        if let Some(path) = requirement.strip_prefix("writable:") {
-            return probe_writable(&substitute_pid(path, pid));
-        }
-
-        if let Some(file) = requirement.strip_prefix("cgroup2:") {
-            return self.probe_cgroup_file(file);
-        }
-
-        if let Some(event) = requirement.strip_prefix("tracepoint:") {
-            return match self.environment.tracefs {
+    fn probe_requirement(&self, need: &Need, pid: Option<i32>) -> Probe {
+        match need {
+            Need::KernelAtLeast(wanted) => match self.environment.kernel_version {
+                Some(actual) if actual >= *wanted => Probe::Available,
+                Some(actual) => Probe::Missing(format!("kernel {actual} is older than {wanted}")),
+                None => Probe::Unknown(format!(
+                    "cannot compare the running kernel's version against `{wanted}`"
+                )),
+            },
+            Need::Path(path) => probe_path(&substitute_pid(path, pid)),
+            // A control file is used by writing it, and some are write-only:
+            // `/proc/[pid]/clear_refs` is `--w-------`, and asked by reading it
+            // answered "not readable by uid 1000" about a file that uid may use.
+            // Finding 21 of `docs/open-findings.md`.
+            Need::Writable(path) => probe_writable(&substitute_pid(path, pid)),
+            Need::Cgroup2(file) => self.probe_cgroup_file(file),
+            Need::Tracepoint(event) => match self.environment.tracefs {
                 Access::Absent => Probe::Missing("tracefs is not mounted".into()),
                 Access::Restricted => Probe::Missing(format!(
                     "tracefs is mounted but not readable by uid {}, so `{event}` cannot even be \
@@ -1005,107 +1004,115 @@ impl Capabilities {
                 Access::Readable => {
                     Probe::from(crate::bpf::attach::classic_tracepoint_support(event))
                 }
-            };
-        }
-
-        // `kprobe` and `uprobe` are PMUs whose type numbers the kernel hands
-        // out at boot, in the order the PMUs register. There is no constant
-        // that could be right, and an event opened on the wrong type does not
-        // fail -- it counts something else. Until this was asked, both read
-        // `unverified`, which the resolver treats as a reason to prefer a
-        // backend it could check.
-        // The `kprobe` PMU existing is not the process being let in: the kernel
-        // refuses a perf kprobe to anyone not `perfmon_capable()` --
-        // `CAP_PERFMON` or `CAP_SYS_ADMIN` -- whatever `perf_event_paranoid`
-        // says. The eBPF kprobe backends also ask `bpf`, which hid this until
-        // `mem.swap`'s counting kprobe was listed usable without either.
-        if requirement == "kprobe" {
-            if let Some(missing) = kprobe_not_permitted(privileges().as_ref()) {
-                return Probe::Missing(missing);
+            },
+            // A raw tracepoint is looked for in the kernel's own BTF rather than
+            // in tracefs, because that is how this tool attaches to one: through
+            // `BPF_RAW_TRACEPOINT_OPEN`, which takes a name and needs no tracefs.
+            // With a prototype -- `raw_tracepoint:sched_process_exit(task_struct
+            // *, bool)` -- the probe also compares it with the kernel's, which is
+            // the check the program makes at attach.
+            Need::RawTracepoint(event) => Probe::from(crate::bpf::raw_tracepoint_support(event)),
+            Need::Fentry(function) => Probe::from(crate::bpf::attach::fentry::support(function)),
+            // A member of a kernel struct a program reads, as `struct.member`,
+            // looked up in BTF the way the program looks it up when it is built.
+            Need::BtfMember(field) => Probe::from(crate::bpf::btf_member_support(field)),
+            Need::Pmu(event) => probe_pmu(event),
+            // A model-specific register, read through `/dev/cpu/<n>/msr`. The
+            // question is not whether the register exists -- `aperf` and
+            // `mperf` are architectural on every x86 this tool targets -- but
+            // whether this process may read it, which is a driver and a
+            // permission rather than a cpu feature.
+            Need::Msr(_) => probe_msr(&need.to_string()),
+            // Packet capture is a privilege question, not a kernel-build
+            // question, and the two call for different answers from whoever
+            // reads the report.
+            Need::AfPacket(_) => probe_af_packet(&need.to_string()),
+            Need::BpfMap(map) => Probe::from(crate::bpf::map_type_support(*map)),
+            // A family answers requirement classes of its own -- a vendor
+            // library it loads, a sysfs layout only it reads. The probe lives
+            // with the code that depends on it, so a family cannot be added
+            // without the means to check what it needs.
+            Need::Gpu(text) => crate::collect::gpu::probe(text).unwrap_or_else(|| {
+                Probe::Unknown(format!("the gpu family answers nothing for `{text}`"))
+            }),
+            Need::Symbols(name) => probe_libc_symbol(name),
+            Need::Usdt(provider) => probe_usdt(provider),
+            Need::Rdt(feature) => probe_rdt(feature),
+            // What an allocator keeps, and whether the program links one, is
+            // the program's: before it runs there is no object to ask.
+            Need::Unprobed(text) if text.starts_with("allocator-stats:") => {
+                Probe::Unknown(format!(
+                    "`{text}` is answered by the program's own allocator, which is not known \
+                 before it runs"
+                ))
             }
-            // The capability held is not the kernel letting it in: Debian's and
-            // Ubuntu's `perf_event_paranoid` 3 refuses every event to a process
-            // without CAP_SYS_ADMIN, CAP_PERFMON included. So an event is
-            // opened, the cheapest there is; debian-12 listed `mem.swap`'s
-            // counting kprobe usable and refused it at start until it was.
-            if let Some(refused) = perf_event_refused() {
-                return Probe::Missing(format!("a kprobe is a perf event, and {refused}"));
+            // `net.xdp` stays vocabulary (`DECISIONS.md`): an XDP program can
+            // drop packets, not only count them.
+            Need::Unprobed(text) => Probe::Unknown(format!(
+                "no probe is written for `{text}`: the source it serves is declared and \
+                 deliberately not collected"
+            )),
+            Need::Word(word) => self.probe_word(*word),
+        }
+    }
+
+    fn probe_word(&self, word: Word) -> Probe {
+        match word {
+            // `kprobe` and `uprobe` are PMUs whose type numbers the kernel
+            // hands out at boot, in the order the PMUs register. There is no
+            // constant that could be right, and an event opened on the wrong
+            // type does not fail -- it counts something else.
+            // The `kprobe` PMU existing is not the process being let in: the
+            // kernel refuses a perf kprobe to anyone not `perfmon_capable()` --
+            // `CAP_PERFMON` or `CAP_SYS_ADMIN` -- whatever
+            // `perf_event_paranoid` says. The eBPF kprobe backends also ask
+            // `bpf`, which hid this until `mem.swap`'s counting kprobe was
+            // listed usable without either.
+            Word::Kprobe => {
+                if let Some(missing) = kprobe_not_permitted(privileges().as_ref()) {
+                    return Probe::Missing(missing);
+                }
+                // The capability held is not the kernel letting it in:
+                // Debian's and Ubuntu's `perf_event_paranoid` 3 refuses every
+                // event to a process without CAP_SYS_ADMIN, CAP_PERFMON
+                // included. So an event is opened, the cheapest there is;
+                // debian-12 listed `mem.swap`'s counting kprobe usable and
+                // refused it at start until it was.
+                if let Some(refused) = perf_event_refused() {
+                    return Probe::Missing(format!("a kprobe is a perf event, and {refused}"));
+                }
+                Probe::from(crate::bpf::attach::kprobe_support())
             }
-        }
-        if let Some(support) = crate::bpf::attach::probe_type_support(requirement) {
-            return Probe::from(support);
-        }
-
-        if let Some(event) = requirement.strip_prefix("pmu:") {
-            return probe_pmu(event);
-        }
-
-        // A model-specific register, read through `/dev/cpu/<n>/msr`. The
-        // question is not whether the register exists -- `aperf` and `mperf`
-        // are architectural on every x86 this tool targets -- but whether this
-        // process may read it, which is a driver and a permission rather than a
-        // cpu feature. Both of this catalog's `msr:` requirements read as
-        // `unverified` until this was written, and the resolver treats
-        // unverified as a reason to prefer a backend it could check.
-        if requirement.starts_with("msr:") {
-            return probe_msr(requirement);
-        }
-
-        // A raw tracepoint is looked for in the kernel's own BTF rather than in
-        // tracefs, because that is how this tool attaches to one: through
-        // `BPF_RAW_TRACEPOINT_OPEN`, which takes a name and needs no tracefs.
-        // With a prototype -- `raw_tracepoint:sched_process_exit(task_struct *,
-        // bool)` -- the probe also compares it with the kernel's, which is the
-        // check the program makes at attach.
-        if let Some(event) = requirement.strip_prefix("raw_tracepoint:") {
-            return Probe::from(crate::bpf::raw_tracepoint_support(event));
-        }
-
-        // A member of a kernel struct a program reads, as `struct.member`,
-        // looked up in BTF the way the program looks it up when it is built.
-        if let Some(field) = requirement.strip_prefix("btf_member:") {
-            return Probe::from(crate::bpf::btf_member_support(field));
-        }
-
-        // Netlink families: the question is whether this kernel exposes the
-        // protocol at all, which is answered by trying to open a socket on it.
-        // Opening one is free and changes nothing.
-        if let Some(protocol) = netlink_protocol(requirement) {
-            return probe_netlink(requirement, protocol);
-        }
-
-        // Packet capture is a privilege question, not a kernel-build question,
-        // and the two call for different answers from whoever reads the report.
-        if requirement.starts_with("af_packet") {
-            return probe_af_packet(requirement);
-        }
-
-        // Whether the *target* is dynamically linked cannot be known before it
-        // exists; whether this *build* can preload anything can, and that is
-        // what every preload source is waiting on. Answering it also turns a
-        // `cargo build` without `--workspace` -- no shim beside the binary --
-        // into a `missing` that names the path, where it used to be a `?`.
-        if requirement == "preload:shim" || requirement == "dynamic-linking" {
-            return match crate::collect::find_shim() {
+            Word::Uprobe => Probe::from(crate::bpf::attach::uprobe_support().clone()),
+            Word::UprobeMulti => Probe::from(crate::bpf::usdt::uprobe_multi_support().clone()),
+            // Two requirements answered by the `net` collectors' own start,
+            // asked in advance.
+            Word::Phc | Word::Ethtool => {
+                let text = if word == Word::Phc { "phc" } else { "ethtool" };
+                match crate::collect::net::probe(text) {
+                    Some(Ok(())) => Probe::Available,
+                    Some(Err(reason)) => Probe::Missing(reason),
+                    None => Probe::Unknown(format!("the net family answers nothing for `{text}`")),
+                }
+            }
+            // Netlink families: the question is whether this kernel exposes
+            // the protocol at all, which is answered by trying to open a
+            // socket on it. Opening one is free and changes nothing.
+            Word::Rtnetlink => probe_netlink("rtnetlink", 0),
+            Word::SockDiag => probe_netlink("sock_diag", 4),
+            // Whether the *target* is dynamically linked cannot be known before
+            // it exists; whether this *build* can preload anything can, and
+            // that is what every preload source is waiting on. Answering it
+            // also turns a `cargo build` without `--workspace` -- no shim beside
+            // the binary -- into a `missing` that names the path.
+            Word::PreloadShim | Word::DynamicLinking => match crate::collect::find_shim() {
                 Ok(_) => Probe::Available,
                 Err(reason) => Probe::Missing(reason),
-            };
-        }
-
-        // A family may answer requirement classes of its own -- a vendor
-        // library it loads, a sysfs layout only it reads. The probe lives with
-        // the code that depends on it, so a family cannot be added without the
-        // means to check what it needs.
-        if let Some(probe) = crate::collect::gpu::probe(requirement) {
-            return probe;
-        }
-
-        match requirement {
+            },
             // `power.temp` reads every temperature input hwmon publishes, so
-            // the requirement is that one of them can be read. Unanswered, it
-            // read `?` on every run of a source this machine serves.
-            "hwmon" => probe_hwmon(Path::new("/sys/class/hwmon")),
-            "tracefs" => match self.environment.tracefs {
+            // the requirement is that one of them can be read.
+            Word::Hwmon => probe_hwmon(Path::new("/sys/class/hwmon")),
+            Word::Tracefs => match self.environment.tracefs {
                 Access::Readable => Probe::Available,
                 Access::Restricted => Probe::Missing(format!(
                     "tracefs is mounted but not readable by uid {}: this needs root, not a \
@@ -1114,22 +1121,39 @@ impl Capabilities {
                 )),
                 Access::Absent => Probe::Missing("tracefs is not mounted".into()),
             },
-            // Asked by loading the smallest possible tracing program. The
-            // answer depends on capabilities, on a sysctl and on how the kernel
-            // was built, and only the kernel knows all three.
             // Asked by opening the event a profile would open. Whether the
             // kernel hands a callchain to this user depends on
             // `perf_event_paranoid`, on `CAP_PERFMON` and on how the kernel was
             // built, and the cheapest way to know all three is to ask for one.
-            "callchain" => match crate::perf::SampledEvent::callchain_supported() {
+            Word::Callchain => match crate::perf::SampledEvent::callchain_supported() {
                 Ok(()) => Probe::Available,
                 Err(error) => Probe::Missing(format!(
                     "perf_event_open refused a sampling event carrying a callchain ({error}); \
                      check /proc/sys/kernel/perf_event_paranoid"
                 )),
             },
-            "bpf" => Probe::from(crate::bpf::load_support()),
-            "btf" => match self.environment.kernel_btf {
+            // Asked by loading the smallest possible tracing program. The
+            // answer depends on capabilities, on a sysctl and on how the kernel
+            // was built, and only the kernel knows all three.
+            Word::Bpf => Probe::from(crate::bpf::load_support()),
+            // DAMON is driven by writing its sysfs, which is root's on every
+            // kernel that has it.
+            Word::Damon => {
+                let admin = Path::new("/sys/kernel/mm/damon/admin/kdamonds/nr_kdamonds");
+                if !admin.exists() {
+                    return Probe::Missing(
+                        "/sys/kernel/mm/damon/admin is absent: this kernel is built without \
+                         DAMON's sysfs interface (CONFIG_DAMON_SYSFS)"
+                            .into(),
+                    );
+                }
+                probe_writable(admin)
+            }
+            // Asked by setting the option on a socket of our own, the
+            // software stamps every kernel offers; a device's own stamps are
+            // `phc`'s question.
+            Word::SoTimestamping => probe_so_timestamping(),
+            Word::Btf => match self.environment.kernel_btf {
                 Access::Readable => Probe::Available,
                 Access::Restricted => {
                     Probe::Missing("/sys/kernel/btf/vmlinux is not readable by this user".into())
@@ -1138,8 +1162,134 @@ impl Capabilities {
                     "/sys/kernel/btf/vmlinux is absent, so CO-RE is unavailable".into(),
                 ),
             },
-            other => Probe::Unknown(format!("no probe is written for `{other}` yet")),
         }
+    }
+}
+
+/// Whether the C library on this machine exports a function: the
+/// `symbols:<name>` requirement, asked of the libc this process loaded.
+///
+/// A statically linked program carries its own, which the attach looks up in
+/// the program; this answers for the dynamically linked one, which is what a
+/// requirement can know before the program exists.
+fn probe_libc_symbol(name: &str) -> Probe {
+    let Ok(symbol) = std::ffi::CString::new(name) else {
+        return Probe::Unknown(format!("`{name}` is not a symbol name"));
+    };
+    let found = unsafe { libc::dlsym(libc::RTLD_DEFAULT, symbol.as_ptr()) };
+    if found.is_null() {
+        Probe::Missing(format!(
+            "the C library this process loaded exports no `{name}`"
+        ))
+    } else {
+        Probe::Available
+    }
+}
+
+/// Whether an object on this machine carries USDT probes of a provider: the
+/// `usdt:<provider>` requirement. `libc` is asked of the C library this
+/// process mapped; any other provider is a runtime's, known only once the
+/// program that loads it runs.
+fn probe_usdt(provider: &str) -> Probe {
+    if provider != "libc" {
+        return Probe::Unknown(format!(
+            "`usdt:{provider}` names a runtime's probes, which are in the program that loads \
+             it and are looked for at attach"
+        ));
+    }
+    let Some(path) = std::fs::read_to_string("/proc/self/maps")
+        .ok()
+        .and_then(|maps| {
+            maps.lines()
+                .filter_map(|line| line.split_whitespace().nth(5))
+                .find(|path| {
+                    Path::new(path)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| {
+                            name.starts_with("libc.so") || name.starts_with("libc-")
+                        })
+                })
+                .map(PathBuf::from)
+        })
+    else {
+        return Probe::Missing("this process maps no C library to look in".into());
+    };
+    match crate::bpf::usdt::Object::read(&path).and_then(|object| object.notes()) {
+        Ok(notes) if notes.iter().any(|note| note.provider == "libc") => Probe::Available,
+        Ok(_) => Probe::Missing(format!(
+            "{} carries no `libc` USDT probes: the C library was built without \
+             --enable-systemtap",
+            path.display()
+        )),
+        Err(reason) => Probe::Unknown(reason),
+    }
+}
+
+/// Whether resctrl monitors a feature: the `rdt:<feature>` requirement, `mbm`
+/// for memory bandwidth. Read from resctrl's own list when it is mounted, and
+/// from the cpu's flags when it is not, so the answer says which is missing.
+fn probe_rdt(feature: &str) -> Probe {
+    let wanted = match feature {
+        "mbm" => ["mbm_total_bytes", "mbm_local_bytes"],
+        other => return Probe::Unknown(format!("`rdt:{other}` is not a feature this build asks")),
+    };
+    if let Ok(features) = std::fs::read_to_string("/sys/fs/resctrl/info/L3_MON/mon_features") {
+        return if features.lines().any(|line| wanted.contains(&line.trim())) {
+            Probe::Available
+        } else {
+            Probe::Missing("resctrl is mounted and monitors no memory bandwidth on this cpu".into())
+        };
+    }
+    let flags = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
+    if flags
+        .lines()
+        .filter(|line| line.starts_with("flags"))
+        .any(|line| {
+            line.split_whitespace()
+                .any(|flag| flag.starts_with("cqm_mbm"))
+        })
+    {
+        Probe::Missing(
+            "the cpu monitors memory bandwidth, and resctrl is not mounted at /sys/fs/resctrl \
+             (`mount -t resctrl resctrl /sys/fs/resctrl`, as root)"
+                .into(),
+        )
+    } else {
+        Probe::Missing("this cpu has no memory bandwidth monitoring (no `cqm_mbm` flag)".into())
+    }
+}
+
+/// Whether the kernel stamps a socket's packets when asked: sets
+/// `SO_TIMESTAMPING` with the software flags on a datagram socket of our own.
+fn probe_so_timestamping() -> Probe {
+    let socket = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
+    if socket < 0 {
+        return Probe::Unknown(format!(
+            "cannot open a socket to ask: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let flags: libc::c_int = (libc::SOF_TIMESTAMPING_SOFTWARE
+        | libc::SOF_TIMESTAMPING_RX_SOFTWARE
+        | libc::SOF_TIMESTAMPING_TX_SOFTWARE) as libc::c_int;
+    let set = unsafe {
+        libc::setsockopt(
+            socket,
+            libc::SOL_SOCKET,
+            libc::SO_TIMESTAMPING,
+            (&flags as *const libc::c_int).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    let error = std::io::Error::last_os_error();
+    unsafe { libc::close(socket) };
+    if set == 0 {
+        Probe::Available
+    } else {
+        Probe::Missing(format!(
+            "the kernel refused SO_TIMESTAMPING on a socket: {error}"
+        ))
     }
 }
 
@@ -1672,22 +1822,6 @@ fn probe_ibs_op() -> Probe {
             "perf_event_open failed for `{}` on cpu {cpu}: {error}",
             crate::perf::IbsOp::PMU
         )),
-    }
-}
-
-/// The netlink protocols the catalog names, and their kernel numbers.
-fn netlink_protocol(requirement: &str) -> Option<i32> {
-    match requirement {
-        // NETLINK_SOCK_DIAG
-        "sock_diag" => Some(4),
-        // NETLINK_ROUTE.
-        "rtnetlink" | "netlink" => Some(0),
-        // `ethtool` is deliberately absent: it is a generic-netlink family,
-        // resolved by name through CTRL_CMD_GETFAMILY, not a protocol number.
-        // Answering it as NETLINK_ROUTE would report a different question's
-        // answer, and reporting it unverified is the honest state until the
-        // family lookup exists.
-        _ => None,
     }
 }
 
@@ -2461,11 +2595,11 @@ mod tests {
     #[test]
     fn a_requirement_with_no_probe_is_unknown_rather_than_assumed() {
         let capabilities = Capabilities::detect();
-        // A userspace static probe in a library nobody has enumerated: still
+        // A runtime's static probes, in a program that does not exist yet:
         // genuinely unchecked, so the answer must be "not checked", never
-        // "available". (`pmu:uncore_imc` used to serve here and is now
-        // answered, which is the improvement that moved this test.)
-        let probe = capabilities.probe("usdt:libc", None);
+        // "available". (`pmu:uncore_imc`, then `usdt:libc`, used to serve here
+        // and are now answered, which is the improvement that moved this test.)
+        let probe = capabilities.probe("usdt:jit", None);
         assert!(probe.is_unknown(), "{probe}");
         assert!(
             !probe.is_available(),
@@ -2619,6 +2753,38 @@ mod tests {
             assert!(
                 message.contains("CAP_NET_RAW") || message.contains("without AF_PACKET"),
                 "{message}"
+            );
+        }
+    }
+
+    /// The requirements that read `unverified` until the twenty-sixth wave
+    /// are answered: each says available or missing here, never unknown,
+    /// but for the two that depend on the program (`usdt:jit`, an allocator's
+    /// statistics) and the one deliberately not collected (`xdp`).
+    #[test]
+    fn the_requirements_once_unverified_are_answered() {
+        let capabilities = Capabilities::detect();
+        for requirement in [
+            "symbols:malloc",
+            "so_timestamping",
+            "rdt:mbm",
+            "damon",
+            "usdt:libc",
+        ] {
+            let probe = capabilities.probe(requirement, None);
+            assert!(!probe.is_unknown(), "{requirement}: {probe}");
+        }
+        // Every C library this tool runs against exports `malloc`; one that
+        // did not would not have started this test.
+        assert!(capabilities.probe("symbols:malloc", None).is_available());
+        assert!(capabilities
+            .probe("symbols:omn_no_such_function", None)
+            .to_string()
+            .contains("omn_no_such_function"));
+        for requirement in ["usdt:jit", "allocator-stats:jemalloc|tcmalloc", "xdp"] {
+            assert!(
+                capabilities.probe(requirement, None).is_unknown(),
+                "{requirement}"
             );
         }
     }

@@ -78,7 +78,7 @@
   summary: "Effective CPU frequency"
   unit: hz
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:cpu_frequency", "kernel>=5.8"], cost: free}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:cpu_frequency", "bpf_map:ringbuf"], cost: free}
     - {id: "bpf:tp", requires: ["tracepoint:power:cpu_frequency", "bpf"], cost: free, equivalent: true}
     # APERF, MPERF and the TSC as perf events of the kernel's `msr` unit, which
     # an ordinary user may open where /dev/cpu/*/msr is root's. Every number
@@ -111,7 +111,7 @@
   summary: "Idle state residency"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:cpu_idle", "kernel>=5.8"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:cpu_idle", "bpf_map:ringbuf"], cost: low}
     - {id: "bpf:tp", requires: ["tracepoint:power:cpu_idle", "bpf"], cost: low, equivalent: true}
     - {id: "fs:sys", requires: ["/sys/devices/system/cpu/cpu0/cpuidle"], cost: high, modes: [poll, count],
        degraded: "residency totals only: no transition timeline"}
@@ -163,7 +163,7 @@
   summary: "Thermal and power-limit throttling (PL1 / PL2)"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:thermal_zone_trip", "raw_tracepoint:cdev_update", "kernel>=5.8"], cost: free}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:thermal_zone_trip", "raw_tracepoint:cdev_update", "bpf_map:ringbuf"], cost: free}
     - {id: "bpf:tp", requires: ["tracepoint:thermal:thermal_zone_trip", "tracepoint:thermal:cdev_update", "bpf"], cost: free, equivalent: true}
     - {id: "fs:sys", requires: ["/sys/devices/system/cpu/cpu0/thermal_throttle"], cost: free,
        degraded: "counts, not moments: how many times the part throttled during the interval, not

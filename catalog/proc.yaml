@@ -5,7 +5,7 @@
   summary: "Per-syscall latency and count"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter(pt_regs *, long int)", "raw_tracepoint:sys_exit(pt_regs *, long int)", "kernel>=5.8"], cost: extreme, drained: true,
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter(pt_regs *, long int)", "raw_tracepoint:sys_exit(pt_regs *, long int)", "bpf_map:ringbuf"], cost: extreme, drained: true,
        filter_in_program: [syscall]}
     - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit", "bpf"], cost: extreme, equivalent: true, drained: true}
   modes: [trace, count]
@@ -37,7 +37,7 @@
   summary: "One record per syscall: when, how long, what it returned, and the path an open or exec named"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter(pt_regs *, long int)", "raw_tracepoint:sys_exit(pt_regs *, long int)", "kernel>=5.8"], cost: extreme,
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter(pt_regs *, long int)", "raw_tracepoint:sys_exit(pt_regs *, long int)", "bpf_map:ringbuf"], cost: extreme,
        filter_in_program: [syscall]}
     - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit", "bpf"], cost: extreme, equivalent: true,
        filter_in_program: [syscall]}
@@ -72,7 +72,7 @@
   summary: "Process execution events"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_process_exec(task_struct *, pid_t, linux_binprm *)", "kernel>=5.8"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_process_exec(task_struct *, pid_t, linux_binprm *)", "bpf_map:ringbuf"], cost: low}
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_process_exec", "bpf"], cost: low, equivalent: true}
   modes: [trace]
   emits: [raw, timeline, topk, summary]
@@ -98,7 +98,7 @@
   summary: "Process exit events with exit code"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_process_exit(task_struct *, bool)|(task_struct *)", "kernel>=5.8"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_process_exit(task_struct *, bool)|(task_struct *)", "bpf_map:ringbuf"], cost: low}
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_process_exit", "bpf"], cost: low, equivalent: true}
   modes: [trace]
   emits: [raw, timeline, topk, summary]
@@ -198,7 +198,7 @@
   summary: "Signals delivered"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:signal_generate(int, kernel_siginfo *, task_struct *, int, int)", "kernel>=5.8"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:signal_generate(int, kernel_siginfo *, task_struct *, int, int)", "bpf_map:ringbuf"], cost: low}
     - {id: "bpf:tp", requires: ["tracepoint:signal:signal_generate", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [raw, topk, rate, summary]

@@ -121,6 +121,7 @@ pub fn probe(requirement: &str) -> Option<Probe> {
         "nvml" => return Some(nvml_probe()),
         "cupti" => "libcupti.so",
         "rocprofiler" => "librocprofiler64.so",
+        "rocprofv3" => "librocprofiler-sdk.so",
         "level-zero" => "libze_loader.so",
         _ => return None,
     };

@@ -1156,6 +1156,14 @@ impl Catalog {
             }
             let mut backend_ids = BTreeSet::new();
             for backend in &entry.backends {
+                for requirement in &backend.requires {
+                    if let Err(reason) = requirement.parse::<crate::need::Need>() {
+                        return Err(ParseError::new(format!(
+                            "catalog entry `{}`, backend `{}`: {reason}",
+                            entry.id, backend.id
+                        )));
+                    }
+                }
                 if !backend_ids.insert(backend.id.as_str()) {
                     return Err(ParseError::new(format!(
                         "catalog entry `{}` declares the backend id `{}` twice: ids must be unique \

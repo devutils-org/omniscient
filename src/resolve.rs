@@ -1223,9 +1223,10 @@ pub fn probe_all(
     // way it opens, on a cpu; every other `pmu:` requirement was asked about
     // this process.
     let per_task = backend.requires.iter().any(|needs| {
-        needs
-            .strip_prefix("pmu:")
-            .is_some_and(|event| !event.contains('/') || event.starts_with("cpu/"))
+        matches!(
+            needs.parse(),
+            Ok(crate::need::Need::Pmu(event)) if !event.contains('/') || event.starts_with("cpu/")
+        )
     });
     // A cgroup is one event per cpu as well, filtered to the cgroup's tasks,
     // and the kernel asks it the same question (`perf_allow_cpu`).

@@ -198,8 +198,12 @@ nanoseconds (`Entry::backend_unit`). The loader refuses it on the head of the
 chain, on a backend declared `equivalent`, where it repeats the entry's, and
 where it does not add up while the entry's does (`check_backend_units`).
 
-`requires` lists what the backend needs, each string answered by
-`Capabilities::probe` in `src/capabilities.rs` as available, missing or unknown.
+`requires` lists what the backend needs. Since the twenty-sixth wave each
+string is read into a `Need` (`src/need.rs`) when the catalog loads, and a
+string no rule reads is refused there, by name -- a misspelt requirement is a
+load error, not an `unknown` on the machine that runs it. Each is then answered
+by `Capabilities::probe_need` in `src/capabilities.rs`, one `match` over the
+kinds, as available, missing or unknown.
 The classes it answers include a path (`/proc/diskstats`, with `[pid]`
 substituted), `kernel>=<version>`, `tracepoint:<sys>:<event>` (the event's `id`
 file must be readable, not only its directory), `pmu:<event>`, `kprobe`, and
@@ -239,8 +243,18 @@ still refuse the write. And a qualified `pmu:<unit>/<event>/` answers
 not unknown: a runner without RAPL listed `power.energy` as assumed and refused
 it at the start.
 
-A string no probe answers -- `usdt:libc` today -- reads unknown, and unknown
-never counts as available. A requirement a collector's own start decides is
+`bpf_map:ringbuf` is a map type the kernel creates, asked by creating the
+smallest one: it replaced `kernel>=5.8` on 36 backends in the twenty-sixth
+wave, since RHEL backports the ring buffer to its 4.18 and a release number
+refused it there. `symbols:<name>` is a function the C library exports,
+`usdt:libc` the C library's own USDT probes, `rdt:mbm` resctrl's memory
+bandwidth monitoring (missing names whether the cpu or the mount is what
+lacks), `damon` DAMON's sysfs, writable, and `so_timestamping` the socket
+option, set on a socket of our own.
+
+Three kinds read unknown on purpose, and unknown never counts as available:
+`usdt:<runtime>` and `allocator-stats:<allocator>`, which belong to a program
+that does not exist before the run, and `xdp`, whose source stays vocabulary. A requirement a collector's own start decides is
 probed by that start: `phc` by `hwts::clock_support`, `ethtool` by resolving
 the netlink family. A counter the kernel raises from its own code (a context
 switch, a migration) is probed with the kernel included, and a machine that
