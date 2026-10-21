@@ -27,6 +27,14 @@ and `tmp.sh` are choices, listed below.
      addresses (`192.0.2.x`), if they should not be public;
    - set one commit address for the future (`git config user.email`); the
      history keeps both.
+   - tidy the root, as atfq, distroproof and xpac now are: keep `README.md`,
+     `REFERENCE.md`, `CLAUDE.md` and the licenses there, move `ROADMAP.md`,
+     `DECISIONS.md`, `CATALOG.md`, `GUIDE.md` and `DEMO.md` into `docs/`, and the
+     agent's working notes (`STATE.md`, `BRIEF.md`) into `docs/dev/`. They are
+     cited by name in some 200 files, `src/`, `scripts/` and the `Makefile`
+     included, so the move is one commit that rewrites every reference;
+   - add `CHANGELOG.md` and `SECURITY.md` (`docs/contributing.md` can move to
+     the root as `CONTRIBUTING.md`, where GitHub looks for it).
 2. Decide where it lives. The site builds every repository link as
    `github.com/devutils-org/<repo>`, so either transfer the repository to the
    `devutils-org` organisation (GitHub redirects the old URL and the links in
