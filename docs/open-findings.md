@@ -14416,3 +14416,12 @@ distributions. Not yet investigated. Leads:
 - `runqlat`, `cpu.ipc` and `cpu.cache_misses` are the pairs known to move with
   load on the host; one run each.
 - Ubuntu 18.04 (kernel 4.15) hangs a `net` pair.
+
+Rerun the same day on all nine targets, four VMs at a time, each pinned to an
+L3 cache of its own (`distroproof up --pin-cache --jobs 4`, longest first):
+42 minutes instead of about 108 one at a time, Ubuntu 18.04's timeout being
+42 of them. The same five targets fail, on the same pairs: `vfsstat-reads`
+(Ubuntu 24.04, Rocky 9, Fedora), `tcplife-pid` (Ubuntu 24.04, Rocky 9,
+Alpine), Ubuntu 18.04's timeout; of the load-sensitive pairs, `runqlat` again
+on Rocky and `bpftrace/biolatency` on Alpine, while Fedora's `perfstat` pairs
+held. Debian 12 and 13, Arch and Gentoo pass all eleven checks.
