@@ -14387,3 +14387,32 @@ undefined symbol or a library that does not load now skips its pair
 eleven checks with no pair failed; `vfsstat`, `tcplife` and Gentoo's
 bpftrace scripts skip as not running. `bpftrace/biolatency` held on Debian 13
 this time.
+
+### The eleventh check on the other seven targets (2026-10-21)
+
+The chain rerun on Debian 12, Ubuntu 24.04 and 18.04, Fedora, Rocky 9, Arch and
+Alpine (`target/matrix/devutils-seven.json`, one VM at a time). Ten of the eleven
+checks pass on all seven, `atfq-agrees-with-envprobe` included; Debian 12 and
+Arch pass all eleven. The other five fail `omn-reference-pairs` only:
+
+| Target | Pairs that did not hold |
+|---|---|
+| ubuntu-24.04 | `io/vfsstat-reads`: omn 1657 vs vfsstat 303237; `net/tcplife-pid`: omn 20 vs tcplife 0 |
+| rocky-9 | `bpftrace/runqlat`: p50 4096 vs 2000 us (two buckets); `io/vfsstat-reads`: `sudo: vfsstat: command not found`; `net/tcplife-pid`: 20 vs 0 |
+| fedora-latest | `io/vfsstat-reads`: 331079 vs 300192 (10 %, 3 % allowed); `perfstat/cpu.ipc`: 3.09 vs 3.51; `perfstat/cpu.cache_misses`: +15 % |
+| alpine | `net/tcplife-pid`: 20 vs 0 |
+| ubuntu-18.04 | the pairs timed out after 2400 s, the log ending in `net` after `ss-tuan-sockets` |
+
+Where `vfsstat` and `tcplife` ran before, they were skipped as not running
+(Debian, Gentoo); this is the first time they run against omn on these
+distributions. Not yet investigated. Leads:
+
+- `tcplife-pid` counts 0 sessions on three distributions and 20 (the right
+  count: 10 connections, both ends) on Arch: the witness's `-p` filter, not omn,
+  is the first suspect.
+- `vfsstat-reads` on Ubuntu 24.04 is omn counting 0.5 % of the reads: a real
+  candidate defect of `io.vfs` on 6.8. On Rocky, a witness absent from `PATH`
+  under `sudo` fails the pair where the runner's `BROKEN` rule should skip it.
+- `runqlat`, `cpu.ipc` and `cpu.cache_misses` are the pairs known to move with
+  load on the host; one run each.
+- Ubuntu 18.04 (kernel 4.15) hangs a `net` pair.
