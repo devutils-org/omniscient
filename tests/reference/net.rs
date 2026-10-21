@@ -358,7 +358,18 @@ fn add(out: &mut Values, key: String, v: f64) {
 /// libbpf-tools' `tcplife -p PID`: `PID COMM LADDR LPORT RADDR RPORT TX_KB
 /// RX_KB MS`, one row per TCP session the process closed, counted under
 /// `sessions` and its volumes summed under `tx_kb` and `rx_kb`.
-fn libbpf_tcplife(stdout: &str, _stderr: &str) -> Result<Values, String> {
+fn libbpf_tcplife(stdout: &str, stderr: &str) -> Result<Values, String> {
+    // Both tcplife's print their header once attached: without it, no
+    // session was watched, and none counted would read as zero.
+    if !stdout
+        .lines()
+        .any(|l| l.contains("PID") && l.contains("COMM"))
+    {
+        let why: String = stderr.trim().chars().take(300).collect();
+        return Err(format!(
+            "tcplife printed no header: it never attached ({why})"
+        ));
+    }
     let mut out = Values::new();
     let mut sessions = 0.0;
     for line in stdout.lines() {
@@ -467,6 +478,25 @@ fn omn_captured(stdout: &str, _stderr: &str) -> Result<Values, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tcplife_without_its_header_never_attached() {
+        let bcc = "PID   COMM       LADDR           LPORT RADDR           RPORT TX_KB RX_KB MS\n\
+                   4242  python3    127.0.0.1       40000 127.0.0.1       5000      0     0 0.21\n";
+        assert_eq!(get(&libbpf_tcplife(bcc, "").unwrap(), "sessions"), 1.0);
+        assert_eq!(
+            get(
+                &libbpf_tcplife(bcc.lines().next().unwrap(), "").unwrap(),
+                "sessions"
+            ),
+            0.0
+        );
+        let e = libbpf_tcplife("", "timeout: unrecognized option: preserve-status").unwrap_err();
+        assert!(
+            e.contains("never attached") && e.contains("preserve-status"),
+            "{e}"
+        );
+    }
 
     #[test]
     fn ss_tuan_counts_sockets_by_netid() {

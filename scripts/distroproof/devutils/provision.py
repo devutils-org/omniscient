@@ -152,7 +152,11 @@ def main():
         if shutil.which('sudo'):
             Path('/etc/sudoers.d').mkdir(exist_ok=True)
             policy = Path('/etc/sudoers.d/omn-witnesses')
-            policy.write_text('test ALL=(ALL) NOPASSWD: ALL\n')
+            # Rocky's secure_path leaves out /usr/local/bin, where the
+            # witnesses are linked: `sudo vfsstat` was not found.
+            policy.write_text('Defaults:test secure_path="/usr/local/sbin:/usr/local/bin:'
+                              '/usr/sbin:/usr/bin:/sbin:/bin"\n'
+                              'test ALL=(ALL) NOPASSWD: ALL\n')
             policy.chmod(0o440)
     except Exception as error:
         report['errors'].append(str(error))

@@ -244,10 +244,12 @@
   use: "tcplife -p PID (one process's TCP sessions, libbpf-tools)"
   workload: [python3, tests/reference/workloads/bpftrace/act.py, connect, "10"]
   run: attach
-  settle_ms: 1500
-  omn: [trace, net.tcp.lifetime, --pid, "{pid}", -d, 5s, -m, trace, -e, summary, --format, json, -o, "{out}"]
+  # bcc's Python tcplife compiles its program first: 1.7 to 2.7 s on Rocky 9
+  # and Ubuntu 24.04 guests (2026-10-21), so the workload waits 5 s.
+  settle_ms: 5000
+  omn: [trace, net.tcp.lifetime, --pid, "{pid}", -d, 9s, -m, trace, -e, summary, --format, json, -o, "{out}"]
   reference:
-    command: [sh, -c, 'exec timeout --preserve-status -s INT 5 $SUDO tcplife -p "$1"', sh, "{pid}"]
+    command: [sh, -c, 'exec timeout --preserve-status -s INT 9 $SUDO tcplife -p "$1"', sh, "{pid}"]
     parse: libbpf_tcplife
     requires: [tcplife, timeout, sh]
     privileged: true

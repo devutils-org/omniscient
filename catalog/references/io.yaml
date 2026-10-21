@@ -278,7 +278,11 @@
   run: alongside
   # Both counting before the workload is let go: a debug build of omn takes
   # most of a second to attach, and 300 ms let it miss a third of the reads.
-  settle_ms: 1000
+  # On Ubuntu 24.04 (6.8) the release attaches its twelve fentry programs one
+  # by one in about 1.7 s of wall time, and bcc's vfsstat compiles for 2 s:
+  # let go at 1 s, the reads fell before omn's window (1657 counted); at 2 s
+  # or later omn counted them all (2026-10-21).
+  settle_ms: 3000
   omn: [trace, io.vfs, --system, -m, count, -k, op, -e, summary, -d, 4s, --format, json]
   reference:
     command: [sh, -c, '$SUDO vfsstat 1 4']

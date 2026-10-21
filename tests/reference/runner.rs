@@ -1758,19 +1758,38 @@ fn spawn(cmd: &mut Command) -> Result<Child, String> {
         .spawn()
         .map_err(|e| format!("`{:?}`: {e}", cmd.get_program()))
 }
+/// How long a tool's output may stay open once the tool has ended.
+const PIPE_GRACE: Duration = Duration::from_secs(10);
+
+/// Reads a pipe on a thread into a buffer the caller can take at any time,
+/// and says when the pipe closed.
+fn drain(
+    mut pipe: impl Read + Send + 'static,
+) -> (
+    std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    std::sync::mpsc::Receiver<()>,
+) {
+    let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let into = buf.clone();
+    std::thread::spawn(move || {
+        let mut chunk = [0u8; 8192];
+        while let Ok(n) = pipe.read(&mut chunk) {
+            if n == 0 {
+                break;
+            }
+            into.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend_from_slice(&chunk[..n]);
+        }
+        let _ = tx.send(());
+    });
+    (buf, rx)
+}
+
 fn finish(mut child: Child, limit: Duration) -> Result<Side, String> {
-    let mut out = child.stdout.take().unwrap();
-    let mut err = child.stderr.take().unwrap();
-    let reader = std::thread::spawn(move || {
-        let mut s = String::new();
-        let _ = out.read_to_string(&mut s);
-        s
-    });
-    let err_reader = std::thread::spawn(move || {
-        let mut s = String::new();
-        let _ = err.read_to_string(&mut s);
-        s
-    });
+    let (out, out_closed) = drain(child.stdout.take().unwrap());
+    let (err, err_closed) = drain(child.stderr.take().unwrap());
     let started = Instant::now();
     let mut timed_out = false;
     let status = loop {
@@ -1784,11 +1803,24 @@ fn finish(mut child: Child, limit: Duration) -> Result<Side, String> {
         }
         std::thread::sleep(Duration::from_millis(10));
     };
+    // A process the tool started (a witness under sudo, root, which this user
+    // cannot kill) may outlive it and keep the pipes open: Ubuntu 18.04's
+    // tcplife held the run until its 2400 s limit (docs/open-findings.md,
+    // 2026-10-21). Its output so far is kept, and the side counts as late.
+    let open =
+        out_closed.recv_timeout(PIPE_GRACE).is_err() | err_closed.recv_timeout(PIPE_GRACE).is_err();
+    let text = |b: &std::sync::Arc<std::sync::Mutex<Vec<u8>>>| {
+        String::from_utf8_lossy(&b.lock().unwrap_or_else(|e| e.into_inner())).into_owned()
+    };
+    let mut stderr = text(&err);
+    if open {
+        stderr.push_str("\n(a process the tool started kept its output open after it ended)\n");
+    }
     Ok(Side {
         status,
-        stdout: reader.join().unwrap_or_default(),
-        stderr: err_reader.join().unwrap_or_default(),
-        timed_out,
+        stdout: text(&out),
+        stderr,
+        timed_out: timed_out || open,
     })
 }
 
@@ -2731,5 +2763,21 @@ compare: {omn: a, omn_jq: ".a", tolerance: {abs: 0, side: above, band: 2}, why: 
             t.line("io"),
             "tally: reference io: 3 held, 2 skipped, 1 gaps, 1 known defects, 0 failed"
         );
+    }
+}
+
+#[cfg(test)]
+mod pipe_tests {
+    use super::*;
+
+    #[test]
+    fn an_orphan_holding_the_pipe_does_not_hold_the_run() {
+        let started = Instant::now();
+        let child = spawn(Command::new("sh").args(["-c", "echo early; sleep 60 &"])).unwrap();
+        let side = finish(child, Duration::from_secs(5)).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(30));
+        assert!(side.timed_out);
+        assert_eq!(side.stdout, "early\n");
+        assert!(side.stderr.contains("kept its output open"));
     }
 }
