@@ -2997,18 +2997,19 @@ fn the_kernel_sources_tell_their_three_refusals_apart() {
     // 1 or 3: the classic tracepoint backend, which this machine can reach
     // only through tracefs and which no collector serves either way. Forcing
     // it is the backend comparison these four have -- each has exactly one
-    // implemented backend, so the comparison is with the refusal: the
-    // machine's where tracefs is not readable here, the build's where it is.
-    for source in [
-        "mem.page_alloc",
-        "mem.kmalloc",
-        "mem.reclaim",
-        "mem.compaction",
+    // implemented backend that traces (`mem.page_alloc`'s `/proc/vmstat`
+    // only counts), so the comparison is with the refusal: the machine's
+    // where tracefs is not readable here, the build's where it is.
+    for (source, implemented) in [
+        ("mem.page_alloc", &["bpf:raw_tp", "fs:proc"][..]),
+        ("mem.kmalloc", &["bpf:raw_tp"][..]),
+        ("mem.reclaim", &["bpf:raw_tp"][..]),
+        ("mem.compaction", &["bpf:raw_tp"][..]),
     ] {
         assert_eq!(
             implemented_backends(source),
-            vec!["bpf:raw_tp".to_owned()],
-            "{source} has one implemented backend, so its comparison is with the refusal"
+            implemented,
+            "{source} has one implemented backend that traces, so its comparison is with the refusal"
         );
         assert!(
             declared_backends(source).contains(&"bpf:tp".to_owned()),

@@ -603,13 +603,15 @@ fn the_help_and_the_run_agree_that_a_budget_is_enforced() {
         "io.latency",
         "--system",
         "-m",
-        "trace",
+        "count",
         "-e",
-        "hist",
+        "summary",
         "--budget",
         "0.1%",
         "--dump-request",
     ]));
+    // Counted, because `/proc/diskstats` serves only a count: a traced run has
+    // nothing free below it to degrade onto.
     // Which of the two answers comes back depends on what this machine can
     // serve, and asserting only one of them is asserting the machine. Where the
     // chain's best backend costs more than the ceiling, the note names what it

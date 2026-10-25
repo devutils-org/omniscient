@@ -14,6 +14,7 @@
 //! *processor* sensor, with `sensor` naming which one it was and `basis` saying
 //! how it was chosen.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use crate::clock::monotonic_ns;
@@ -24,6 +25,11 @@ use crate::request::{Mode, Target};
 use super::sysfs;
 
 const HWMON: &str = "/sys/class/hwmon";
+
+/// What a super-I/O chip (`nct67xx`, `it87`) reads on an input no diode is
+/// wired to: -128 C, the 8-bit register's 0x80. It is no temperature, and
+/// taken as one it would be the coldest sensor of the machine.
+const UNWIRED_MILLIDEGREES: i64 = -128_000;
 
 /// hwmon chips that are the processor's own thermal sensors.
 ///
@@ -99,6 +105,8 @@ pub struct Temperatures {
     root: PathBuf,
     sensors: Vec<Sensor>,
     losses: Losses,
+    /// The inputs that read [`UNWIRED_MILLIDEGREES`], left out and said.
+    unwired: BTreeSet<String>,
 }
 
 impl Temperatures {
@@ -108,6 +116,7 @@ impl Temperatures {
             root,
             sensors: Vec::new(),
             losses: Losses::default(),
+            unwired: BTreeSet::new(),
         }
     }
 
@@ -155,6 +164,9 @@ impl Temperatures {
         let mut readings = Vec::new();
         for sensor in &self.sensors {
             match sysfs::signed(&sensor.input) {
+                Ok(UNWIRED_MILLIDEGREES) => {
+                    self.unwired.insert(sensor.name());
+                }
                 // hwmon reports thousandths of a degree.
                 Ok(millidegrees) => readings.push((sensor.clone(), millidegrees as f64 / 1000.0)),
                 Err(error) => {
@@ -248,6 +260,18 @@ impl Collector for Temperatures {
 
     fn losses(&self) -> Losses {
         self.losses.clone()
+    }
+
+    fn notes(&self) -> Vec<String> {
+        self.unwired
+            .iter()
+            .map(|name| {
+                format!(
+                    "{name} reads -128 C, what its chip says of an input no sensor is wired \
+                     to: left out"
+                )
+            })
+            .collect()
     }
 }
 
@@ -446,6 +470,41 @@ mod tests {
         // Nothing to compare is not a failure: most machines expose no zone for
         // their processor. The assertion above is the point.
         let _ = compared;
+    }
+
+    /// A super-I/O input with nothing wired to it reads -128 C: left out of
+    /// the readings, so it is neither a temperature nor a failed read, and
+    /// said in a note.
+    #[test]
+    fn an_unwired_input_is_left_out_and_said() {
+        let root = scratch::tree("temp-unwired");
+        scratch::write(&root, "hwmon0/name", "nct6797");
+        scratch::write(&root, "hwmon0/temp1_input", "31000");
+        scratch::write(&root, "hwmon0/temp1_label", "CPUTIN");
+        scratch::write(&root, "hwmon0/temp2_input", "-128000");
+        scratch::write(&root, "hwmon0/temp2_label", "AUXTIN1");
+
+        let mut collector = Temperatures::new(poll(), root.clone());
+        collector.start().expect("sensors are there");
+        let events = collector.sample(0).expect("a read");
+
+        assert_eq!(celsius(&events[0]), 31.0);
+        assert!(events[0]
+            .attr(
+                &Sensor {
+                    chip: "nct6797".to_owned(),
+                    label: "AUXTIN1".to_owned(),
+                    input: PathBuf::new(),
+                    is_cpu: false,
+                }
+                .attribute()
+            )
+            .is_none());
+        assert_eq!(collector.losses().failed_reads, 0);
+        let notes = collector.notes();
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("nct6797/AUXTIN1"), "{notes:?}");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// Whatever the machine, a sensor reading has to be a temperature.

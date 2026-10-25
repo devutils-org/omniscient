@@ -14533,3 +14533,19 @@ pairs, open:
 
 Debian 13's `runqlat` (p90) held this time; it missed by four buckets once in
 the previous run (2097152 against 256000 ns). One miss in three runs: watched.
+
+### The twenty-sixth wave's full run (2026-10-25)
+
+`claude/w26` rebased on `main`, one `cargo test --workspace --no-fail-fast`
+under `systemd-run`: 3234 passed, 5 failed. Three were the wave's own tests
+not following its counter-file fallbacks (`CATALOG.md`'s cost column for
+`mem.page_alloc`, `net.tcp.retransmit` and `sched.irq`; `io.latency`'s budget
+note, whose `/proc/diskstats` backend now serves only a count; and
+`mem.page_alloc`'s implemented backends), fixed in the tests and the table.
+One was the tool: an `nct6797` input with no diode wired to it reads
+-128 C, and `power.temp` reported it as a temperature; such an input is now
+left out and said in a note.
+
+For the flaky tally: `reference::pairs_io`'s `vfsstat-reads`, omn 305820
+against vfsstat 317385 (-3.6 %, 3 % allowed) while the suite loaded the
+machine; passed alone at once.

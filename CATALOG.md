@@ -403,7 +403,7 @@ never unless asked. Each frame says which of them named it (`elf`,
 | `mem.rss` / `.pss` / `.uss` | resident footprint | `fs:proc` smaps_rollup → smaps | poll, snapshot | pid, cgroup | med / free | medium |
 | `mem.cgroup` | cgroup accounting | `fs:cgroup` memory.current / .peak / .stat | poll | cgroup | free | medium |
 | `mem.faults` | minor/major page faults | `pmu:sw` PAGE_FAULTS_MIN/MAJ · `bpf:tp` | count, sample, trace | all | low | medium |
-| `mem.page_alloc` | kernel page allocations | `bpf:tp` kmem:mm_page_alloc / mm_page_free | trace | system, cgroup | med | medium |
+| `mem.page_alloc` | kernel page allocations | `bpf:tp` kmem:mm_page_alloc / mm_page_free · `fs:proc` vmstat | trace, count | system, cgroup | med / free | medium |
 | `mem.kmalloc` | slab allocations | `bpf:tp` kmem:kmalloc / kfree | trace | system | med | medium |
 | `mem.heap.alloc` | userspace allocations by site | `preload` → `bpf:uprobe` malloc/free · `bpf:usdt` | trace | pid | extreme | high |
 | `mem.heap.live` | live heap | `preload` (delta) · jemalloc/tcmalloc stats | poll | pid | extreme / free | high |
@@ -511,7 +511,7 @@ never unless asked. Each frame says which of them named it (`elf`,
 | `net.tcp.lifetime` | duration + volume per connection, by its owner | `bpf:raw_tp` · `bpf:tp` sock:inet_sock_set_state | trace | pid, tid, launch, system | low | low |
 | `net.tcp.accept` | connections a server accepted, with the listener's queue | `bpf:fentry` inet_csk_accept | trace, count | pid, launch, system | low | low |
 | `net.tcp.rtt` | RTT, cwnd, congestion state | `netlink` sock_diag · `bpf:fentry` on tcp_sock | poll, trace | pid, system | med | low |
-| `net.tcp.retransmit` | retransmissions | `bpf:tp` tcp:tcp_retransmit_skb | trace, count | system, pid | low | low |
+| `net.tcp.retransmit` | retransmissions | `bpf:tp` tcp:tcp_retransmit_skb · `fs:proc` snmp | trace, count | system, pid | low / free | low |
 | `net.drops` | dropped packets (+ reason) | `bpf:tp` skb:kfree_skb (reason on recent kernels) | trace, count | system | low | medium |
 | `net.bytes` / `.packets` | volume | `fs:proc` /proc/net/dev · `netlink` · `bpf:fentry` sock_sendmsg | poll, count | system, iface, pid, cgroup | free / low | low |
 | `net.socket` | socket read/write latency, keyed by socket, task and interface | `bpf:fentry` sock_recvmsg/inet_sendmsg · `bpf:fentry:families` the families' recvmsg/sendmsg · `bpf:kprobe` | trace, count | pid, tid, cgroup, system | low / med | low |
@@ -593,11 +593,11 @@ invisible to every CPU profiler.
 | `sched.offcpu` | blocked time + stack | `bpf:tp:stacks` sched_switch + callchain · `bpf:raw_tp` · `bpf:tp` (no stack) | trace | pid, tid, cgroup, system | high / med | low |
 | `sched.wakeup` | **wakeup chain** (who unblocks whom) | `bpf:raw_tp` · `bpf:tp` sched_wakeup (waker context) | trace | pid, tid, cgroup, system, launch | med | low |
 | `sched.switches` | context switches | `pmu:sw` · `bpf:raw_tp` sched_switch (count, reached first for a cgroup) · `bpf:tp` | count, trace | all | free / low | low |
-| `sched.migrations` | migrations | `bpf:raw_tp` · `bpf:tp` sched_migrate_task | trace, count | pid, cgroup, system | low | low |
+| `sched.migrations` | migrations | `bpf:raw_tp` · `bpf:tp` sched_migrate_task · `pmu:sw` cpu-migrations | trace, count | pid, cgroup, system | low | low |
 | `sched.lock` | kernel lock contention | `bpf:raw_tp` · `bpf:tp` lock:contention_begin/end (probed, mainline 6.1, backported by RHEL 9) · `bpf:kprobe` | trace | pid, tid, cgroup, system, launch | med / high | low |
 | `sched.futex` | userspace futex wait | `bpf:raw_tp` · `bpf:tp` raw_syscalls (futex) | trace | pid, tid, cgroup, launch | high | low |
 | `sched.mutex` | pthread contention | `preload` · `bpf:usdt` · `bpf:uprobe` pthread_mutex_* | trace | pid, tid | extreme | low |
-| `sched.irq` | time in interrupt handlers | `bpf:raw_tp` · `bpf:tp` irq:irq_handler_entry/exit | trace, count | cpu, system | med | low |
+| `sched.irq` | time in interrupt handlers | `bpf:raw_tp` · `bpf:tp` irq:irq_handler_entry/exit · `fs:proc` stat | trace, count | cpu, system | med / free | low |
 | `sched.numa_balance` | automatic NUMA migrations | `bpf:raw_tp` · `bpf:tp` sched:sched_stick_numa etc. | trace, count | system | low | low |
 | `sched.interrupts` | interrupt counts per cpu, line and softirq vector | `fs:proc` /proc/interrupts, /proc/softirqs | poll, count | cpu, system | free | low |
 | `sched.runqueue` | runnable and blocked tasks, load averages | `fs:proc` /proc/stat, /proc/loadavg | poll, snapshot | system | free | low |
