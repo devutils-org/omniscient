@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 use super::cadence::Cadence;
 use super::cgroup::{stat_field, stat_fields};
 use crate::clock::monotonic_ns;
+use crate::collect::poll::{CounterPoll, Cumulative, Interval, Reading};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event};
 use crate::request::{Mode, Target};
@@ -90,6 +91,23 @@ impl Counters {
             (None, None) => None,
             (fault, collapse) => Some(fault.unwrap_or(0) + collapse.unwrap_or(0)),
         }
+    }
+}
+
+impl Cumulative for Counters {
+    /// The flows' increase, and the levels as they stand at the later read.
+    /// The promotions have to have grown; a flow the kernel does not count is
+    /// absent at both ends, and absent from the increase.
+    fn since(&self, earlier: &Self) -> Option<Self> {
+        let delta = |after: Option<u64>, before: Option<u64>| after?.checked_sub(before?);
+        delta(self.promotions(), earlier.promotions())?;
+        Some(Counters {
+            fault_alloc: delta(self.fault_alloc, earlier.fault_alloc),
+            fault_fallback: delta(self.fault_fallback, earlier.fault_fallback),
+            collapse_alloc: delta(self.collapse_alloc, earlier.collapse_alloc),
+            split: delta(self.split, earlier.split),
+            ..*self
+        })
     }
 }
 
@@ -164,7 +182,7 @@ pub struct Thp {
     vmstat: PathBuf,
     /// The PMD huge page size in bytes, zero where the kernel would not say.
     hpage_bytes: u64,
-    previous: Option<Counters>,
+    poll: CounterPoll<(), Counters>,
     cadence: Cadence,
     losses: Losses,
 }
@@ -182,7 +200,7 @@ impl Thp {
             root: PathBuf::from(SYSFS),
             vmstat: PathBuf::from(VMSTAT),
             hpage_bytes,
-            previous: None,
+            poll: CounterPoll::new(mode),
             cadence: Cadence::new(interval),
             losses: Losses::default(),
         }
@@ -202,6 +220,14 @@ impl Thp {
             Source::Sys => self.read_sysfs(),
             Source::Proc => self.read_vmstat(),
         }
+    }
+
+    fn reading(&self) -> Result<Reading<(), Counters>, SampleError> {
+        let counters = self.read()?;
+        Ok(Reading {
+            ts_ns: counters.ts_ns,
+            counters: [((), counters)].into(),
+        })
     }
 
     fn read_sysfs(&self) -> Result<Counters, SampleError> {
@@ -324,13 +350,14 @@ impl Thp {
         attrs
     }
 
-    fn promotion_event(&mut self, before: &Counters, after: &Counters, seq: u64) -> Option<Event> {
-        let interval_ns = after.ts_ns.saturating_sub(before.ts_ns);
-        let delta = |after: Option<u64>, before: Option<u64>| match (after, before) {
-            (Some(after), Some(before)) => after.checked_sub(before),
-            _ => None,
-        };
-        let Some(promotions) = delta(after.promotions(), before.promotions()) else {
+    fn promotion_event(&mut self, interval: Interval<(), Counters>, seq: u64) -> Option<Event> {
+        let interval_ns = interval.interval_ns;
+        let after = interval.after.counters[&()];
+        let Some((moved, promotions)) = interval
+            .moved
+            .first()
+            .and_then(|&((), moved)| Some((moved, moved.promotions()?)))
+        else {
             self.losses.undecoded += 1;
             self.losses.note_times(
                 format!(
@@ -351,23 +378,17 @@ impl Thp {
             attrs.push(Attr::uint("promoted_bytes", promotions * self.hpage_bytes));
         }
         for (name, value) in [
-            ("fault_alloc", delta(after.fault_alloc, before.fault_alloc)),
-            (
-                "fault_fallback",
-                delta(after.fault_fallback, before.fault_fallback),
-            ),
-            (
-                "collapse_alloc",
-                delta(after.collapse_alloc, before.collapse_alloc),
-            ),
-            ("split", delta(after.split, before.split)),
+            ("fault_alloc", moved.fault_alloc),
+            ("fault_fallback", moved.fault_fallback),
+            ("collapse_alloc", moved.collapse_alloc),
+            ("split", moved.split),
         ] {
             if let Some(value) = value {
                 attrs.push(Attr::uint(name, value));
             }
         }
-        attrs.extend(self.common_attrs(after));
-        Some(self.event(after.ts_ns, attrs, seq))
+        attrs.extend(self.common_attrs(&after));
+        Some(self.event(interval.ts_ns, attrs, seq))
     }
 
     fn snapshot_event(&self, counters: &Counters, seq: u64) -> Event {
@@ -407,13 +428,25 @@ impl Collector for Thp {
         if !self.cadence.due(monotonic_ns()) {
             return Ok(Vec::new());
         }
-        let now = self.read()?;
         if self.mode == Mode::Snapshot {
+            let now = self.read()?;
             return Ok(vec![self.snapshot_event(&now, seq)]);
         }
-        let before = self.previous.replace(now);
-        let event = before.and_then(|before| self.promotion_event(&before, &now, seq));
-        Ok(event.into_iter().collect())
+        let mut poll = std::mem::replace(&mut self.poll, CounterPoll::new(self.mode));
+        let ticked = poll.tick(|| self.reading());
+        self.poll = poll;
+        Ok(ticked?
+            .and_then(|interval| self.promotion_event(interval, seq))
+            .into_iter()
+            .collect())
+    }
+
+    /// The baseline, before the observed program is released.
+    fn start(&mut self) -> Result<(), String> {
+        let mut poll = std::mem::replace(&mut self.poll, CounterPoll::new(self.mode));
+        let started = poll.start(|| self.reading());
+        self.poll = poll;
+        started.map_err(|error| format!("{error:?}"))
     }
 
     fn losses(&self) -> Losses {
