@@ -167,9 +167,9 @@ pub struct VfsProgram {
 }
 
 impl VfsProgram {
-    pub fn load(layer: Layer, narrowing: Narrowing) -> Result<Self, String> {
+    pub fn load(layer: Layer, narrowing: Narrowing, selected: Option<Op>) -> Result<Self, String> {
         let btf = crate::bpf::kernel_btf()?;
-        let timed = match layer {
+        let mut timed = match layer {
             Layer::Syscall => {
                 let Some(arch) = fentry::syscall_arch() else {
                     return Err(format!(
@@ -196,6 +196,11 @@ impl VfsProgram {
                 timed("vfs_write", &VFS_RW, Op::Write)?,
             ],
         };
+        if let Some(selected) = selected {
+            // A write-only request needs neither the read entry nor its exit
+            // probe. Avoid running those programs for every read on the host.
+            timed.retain(|timed| timed.op == selected as u32);
+        }
         let offsets = FileOffsets::read(btf)?;
         let gate = |program: &mut Program, _: &Timed| {
             if layer == Layer::Fs {

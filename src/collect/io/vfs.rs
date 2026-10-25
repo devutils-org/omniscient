@@ -19,7 +19,7 @@ use crate::bpf::io_vfs::{self, Layer, Op, VfsProgram};
 use crate::bpf::pidns;
 use crate::collect::{not_built, Collector, Prepared};
 use crate::event::{Attr, KeyValue};
-use crate::filter::FilterExpr;
+use crate::filter::{CompareOp, FilterExpr, Value};
 use crate::request::{Mode, Target};
 
 pub struct Prepare {
@@ -57,8 +57,13 @@ impl Prepared for Prepare {
         }
         let narrowing = narrowing(source, target)?;
         let layer = self.layer;
+        let selected = if layer == Layer::Fs {
+            selected_fs_op(self.filter.as_ref())
+        } else {
+            None
+        };
         let rows = Box::new(move || -> Result<Box<dyn Rows>, String> {
-            Ok(Box::new(VfsProgram::load(layer, narrowing)?))
+            Ok(Box::new(VfsProgram::load(layer, narrowing, selected)?))
         });
         Ok(Box::new(HistogramCollector::new(
             Source {
@@ -72,6 +77,24 @@ impl Prepared for Prepare {
             self.filter,
         )))
     }
+}
+
+/// Only a required equality may remove an entire probe pair. Never pull a
+/// predicate out of a disjunction or a negation; the userspace filter remains
+/// in place for the rest of the expression.
+fn selected_fs_op(filter: Option<&FilterExpr>) -> Option<Op> {
+    filter?.conjuncts().into_iter().find_map(|part| match part {
+        FilterExpr::Compare {
+            field,
+            operator: CompareOp::Eq,
+            value: Value::Str(value),
+        } if field == "op" => match value.as_str() {
+            "read" => Some(Op::Read),
+            "write" => Some(Op::Write),
+            _ => None,
+        },
+        _ => None,
+    })
 }
 
 /// Whose calls the programs keep, or the refusal for a target they cannot
@@ -364,5 +387,28 @@ mod tests {
             under: BTreeMap::new(),
         };
         assert_eq!(mounts.block_devices((0, 43)), None);
+    }
+}
+
+#[cfg(test)]
+mod filter_pushdown_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_required_operation_removes_other_probes() {
+        let parse = |text: &str| text.parse::<FilterExpr>().unwrap();
+        assert_eq!(
+            selected_fs_op(Some(&parse(r#"op == "write""#))),
+            Some(Op::Write)
+        );
+        assert_eq!(
+            selected_fs_op(Some(&parse(r#"op == "read" && bytes > 100"#))),
+            Some(Op::Read)
+        );
+        assert_eq!(
+            selected_fs_op(Some(&parse(r#"op == "read" || op == "write""#))),
+            None
+        );
+        assert_eq!(selected_fs_op(Some(&parse(r#"!(op == "read")"#))), None);
     }
 }

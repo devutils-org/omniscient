@@ -479,9 +479,20 @@ fn still_running(pid: i32) -> bool {
     };
     // The state is the first field after the command, which is in
     // parentheses and may itself hold spaces and parentheses.
-    stat.rsplit_once(')')
-        .and_then(|(_, rest)| rest.split_whitespace().next())
-        .is_some_and(|state| !matches!(state, "Z" | "X" | "x"))
+    has_address_space(&stat)
+}
+
+/// PF_EXITING is set before the process becomes a zombie: procfs can already
+/// return ESRCH while /proc/PID/stat still reports R or S in that interval.
+fn has_address_space(stat: &str) -> bool {
+    let Some((_, rest)) = stat.rsplit_once(')') else {
+        return false;
+    };
+    let fields: Vec<_> = rest.split_whitespace().collect();
+    let state = fields.first().copied();
+    let flags = fields.get(6).and_then(|flags| flags.parse::<u64>().ok());
+    state.is_some_and(|state| !matches!(state, "Z" | "X" | "x"))
+        && flags.is_some_and(|flags| flags & 0x4 == 0)
 }
 
 fn sum_fields(text: &str, fields: &[&str]) -> Option<u64> {
@@ -531,6 +542,14 @@ fn page_size() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exiting_task_has_no_readable_mm_before_it_becomes_a_zombie() {
+        assert!(has_address_space("42 (worker (child)) R 1 2 3 4 5 0 0"));
+        assert!(!has_address_space("42 (worker (child)) R 1 2 3 4 5 4 0"));
+        assert!(!has_address_space("42 (worker) Z 1 2 3 4 5 0 0"));
+        assert!(!has_address_space("malformed"));
+    }
 
     /// The mappings of our own `smaps`, added up per name, sum to what the
     /// whole file sums to, and the heap and the test binary are rows of it.

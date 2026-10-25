@@ -1045,7 +1045,7 @@ const ENTRY_TGID: i16 = -24;
 
 /// Writes the entry half of a timed pair.
 ///
-/// `gate` runs first, with the context in `r6`, and may jump to [`SKIP`] to
+/// `gate` runs after target narrowing, with the context in `r6`, and may jump to [`SKIP`] to
 /// leave a call untimed; it may use `r1` through `r5` and `r7`.
 ///
 /// **A stamp already there is an exit that never ran.** The functions a pair
@@ -1077,7 +1077,6 @@ pub(crate) fn entry_instructions(
 ) -> Result<Vec<Insn>, String> {
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
-    gate(&mut program);
     program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
     program.push(Insn::mov64_reg(7, 0));
     if let Some(tgid) = narrowing.tgid {
@@ -1112,6 +1111,11 @@ pub(crate) fn entry_instructions(
         program.push(Insn::ldx(BPF_W, 1, R10, ENTRY_PEND_KEY));
         program.jump_to(SKIP, Insn::jne_imm(1, tid as i32, 0));
     }
+    // Reject unrelated tasks before touching their file/inode structures.
+    // These hooks fire system-wide even for a scoped request. Doing the
+    // source's gate first lengthened every invocation's recursion-guarded
+    // window, including unrelated processes on a preemptible kernel.
+    gate(&mut program);
     program.push(Insn::call(helper::KTIME_GET_NS));
     program.push(Insn::stx(BPF_DW, R10, ENTRY_PEND_VALUE, 0));
     stamp(&mut program, pending_fd, BPF_NOEXIST);
@@ -1876,6 +1880,37 @@ pub fn function_count() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unrelated_task_skips_the_source_gate_before_reading_its_objects() {
+        let marker = Insn::mov64_imm(7, 1234567);
+        let instructions = entry_instructions(
+            1,
+            2,
+            0,
+            2,
+            Narrowing {
+                tgid: Some(42),
+                tid: None,
+            },
+            None,
+            &|program| {
+                program.push(marker);
+            },
+        )
+        .unwrap();
+        let gate = instructions
+            .iter()
+            .position(|insn| *insn == marker)
+            .unwrap();
+        let rejection = instructions
+            .iter()
+            .position(|insn| insn.code == 0x55 && insn.imm == 42)
+            .unwrap();
+        assert!(rejection < gate);
+        let destination = rejection + 1 + instructions[rejection].off as usize;
+        assert!(destination > gate);
+    }
 
     /// The function tracer is read off the symbols each architecture's ftrace
     /// defines, as distroproof's guests printed them: x86 has `__fentry__`,
