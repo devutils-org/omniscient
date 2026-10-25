@@ -68,6 +68,12 @@ Left on their own state, with why:
 |---|---|
 | `cpu/pressure.rs`, `io/pressure.rs`, `mem/pressure.rs` | their arithmetic is already shared, in `collect::psi`, whose reasons for an unmeasured interval are PSI's own; what each keeps is one `replace` |
 | `power/wakeups.rs` (both) | the keys are threads that are born and die: a thread born in the interval counts from zero, a process gone loses its last reading's threads by count -- a process tracker, not a counter poller |
-| `cpu/oncpu.rs`, `cpu/throttle.rs` | their first poll is an interval by design, measured from a baseline taken at the start; the module's opening tick would remove that leading event. That is a behaviour change to decide (it is the leading-event defect the module's rule was written for), not a refactor |
 | `cpu/counters.rs` | perf counters, multiplexed, scaled by their own enabled and running times |
 | `mem/swapin.rs` | counting kprobes that start at zero when enabled: no baseline to take |
+
+Then `cpu.oncpu_time` and `cpu.throttle` moved too (the user's call,
+2026-10-25): their first poll was an interval from the baseline to a tick
+taken microseconds after the release -- for `oncpu`, a 10 ms-tick count of
+almost nothing, in the series' min and mean. Their first poll now opens the
+window, as every other counter poller's does, and their tests take that
+opening tick the way the runner does.
