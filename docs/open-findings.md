@@ -14549,3 +14549,13 @@ left out and said in a note.
 For the flaky tally: `reference::pairs_io`'s `vfsstat-reads`, omn 305820
 against vfsstat 317385 (-3.6 %, 3 % allowed) while the suite loaded the
 machine; passed alone at once.
+
+For the flaky tally, the same day's second full run (the pollers on
+`collect::poll`; 3240 passed, 4 failed), each passing alone at once:
+`family_sched::a_task_moved_between_two_cpus_is_counted_once_per_move` (no
+move inside the window), `scenario_net::two_mechanisms_measuring_one_wire_agree_to_the_link_header`
+(the capture saw 0 of 4000 frames) and
+`scenario_net::every_datagram_sent_to_a_closed_port_is_a_drop_with_one_reason`
+(25 drops reported). And `collect::mem::footprint::the_rollup_agrees_with_the_per_mapping_walk`,
+once in a `--lib collect::` run: the test process's own mappings move while
+its sibling tests allocate.
