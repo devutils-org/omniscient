@@ -24,6 +24,7 @@
 use std::path::PathBuf;
 
 use crate::clock::monotonic_ns;
+use crate::collect::poll::{CounterPoll, Cumulative, Interval, Reading};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, AttrValue, CollectorId, Event};
 use crate::request::{Mode, Target};
@@ -81,20 +82,40 @@ struct Domain {
     range_uj: u64,
 }
 
-/// One reading of every domain.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Reading {
-    ts_ns: u64,
-    /// Domain name to microjoules.
-    energy_uj: Vec<(String, u64)>,
+/// One domain's counter, keyed by its place in discovery order and its name,
+/// so the event lists the domains as the kernel does.
+type DomainKey = (usize, String);
+
+/// A domain's microjoules, and the range it wraps at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DomainEnergy {
+    uj: u64,
+    range_uj: u64,
+    /// Set on an increase: the counter wrapped once on the way.
+    wrapped: bool,
+}
+
+impl Cumulative for DomainEnergy {
+    /// A decrease is one wrap, recovered: nothing in the file tells one wrap
+    /// from two, which is what the event's `wrapped` and the note say.
+    fn since(&self, earlier: &Self) -> Option<Self> {
+        let (uj, wrapped) = match self.uj.checked_sub(earlier.uj) {
+            Some(delta) => (delta, false),
+            None => ((self.range_uj - earlier.uj) + self.uj, true),
+        };
+        Some(Self {
+            uj,
+            range_uj: self.range_uj,
+            wrapped,
+        })
+    }
 }
 
 pub struct Energy {
     mode: Mode,
     root: PathBuf,
     domains: Vec<Domain>,
-    previous: Option<Reading>,
-    baseline: Option<Reading>,
+    poll: CounterPoll<DomainKey, DomainEnergy>,
     losses: Losses,
 }
 
@@ -104,8 +125,7 @@ impl Energy {
             mode,
             root,
             domains: Vec::new(),
-            previous: None,
-            baseline: None,
+            poll: CounterPoll::new(mode),
             losses: Losses::default(),
         }
     }
@@ -136,11 +156,20 @@ impl Energy {
         Ok(domains)
     }
 
-    fn read(&mut self) -> Result<Reading, SampleError> {
-        let mut energy_uj = Vec::new();
-        for domain in &self.domains {
+    fn read(&mut self) -> Result<Reading<DomainKey, DomainEnergy>, SampleError> {
+        let mut counters = std::collections::BTreeMap::new();
+        for (index, domain) in self.domains.iter().enumerate() {
             match sysfs::number(&domain.energy) {
-                Ok(value) => energy_uj.push((domain.name.clone(), value)),
+                Ok(uj) => {
+                    counters.insert(
+                        (index, domain.name.clone()),
+                        DomainEnergy {
+                            uj,
+                            range_uj: domain.range_uj,
+                            wrapped: false,
+                        },
+                    );
+                }
                 Err(error) => {
                     self.losses.failed_reads += 1;
                     self.losses
@@ -148,19 +177,23 @@ impl Energy {
                 }
             }
         }
-        if energy_uj.is_empty() {
+        if counters.is_empty() {
             return Err(SampleError::TargetGone(
                 "no RAPL domain could be read any more".to_owned(),
             ));
         }
         Ok(Reading {
             ts_ns: monotonic_ns(),
-            energy_uj,
+            counters,
         })
     }
 
-    fn delta_event(&mut self, before: &Reading, after: &Reading, seq: u64) -> Option<Event> {
-        if before.energy_uj.len() != after.energy_uj.len() {
+    fn delta_event(
+        &mut self,
+        interval: Interval<DomainKey, DomainEnergy>,
+        seq: u64,
+    ) -> Option<Event> {
+        if !interval.appeared.is_empty() || !interval.vanished.is_empty() {
             self.losses.undecoded += 1;
             self.losses.note_times(
                 "the set of RAPL domains changed between two reads, so the energy between them is \
@@ -170,7 +203,7 @@ impl Energy {
             );
             return None;
         }
-        let interval_ns = after.ts_ns.saturating_sub(before.ts_ns);
+        let interval_ns = interval.interval_ns;
         if interval_ns == 0 {
             return None;
         }
@@ -178,26 +211,14 @@ impl Energy {
         let mut total_uj = 0u64;
         let mut wrapped = 0u64;
         let mut per_domain = Vec::new();
-        for ((name, after_uj), (_, before_uj)) in after.energy_uj.iter().zip(&before.energy_uj) {
-            let range = self
-                .domains
-                .iter()
-                .find(|domain| domain.name == *name)
-                .map(|domain| domain.range_uj)
-                .unwrap_or(u64::MAX);
-            let delta = match after_uj.checked_sub(*before_uj) {
-                Some(delta) => delta,
-                None => {
-                    // The counter wrapped once, which is recoverable. Twice is
-                    // not, and nothing in the file says which happened, so the
-                    // interval is reported as having wrapped and the reader is
-                    // told what that costs.
-                    wrapped += 1;
-                    (range - before_uj) + after_uj
-                }
-            };
-            total_uj += delta;
-            per_domain.push((name.clone(), delta));
+        for ((_, name), delta) in interval.moved {
+            // The counter wrapped once, which is recoverable. Twice is not,
+            // and nothing in the file says which happened, so the interval is
+            // reported as having wrapped and the reader is told what that
+            // costs.
+            wrapped += u64::from(delta.wrapped);
+            total_uj += delta.uj;
+            per_domain.push((name, delta.uj));
         }
 
         let joules = total_uj as f64 / 1_000_000.0;
@@ -238,7 +259,7 @@ impl Energy {
         }
 
         Some(Event {
-            ts_ns: after.ts_ns,
+            ts_ns: interval.ts_ns,
             ts_err_ns: 0,
             kind: "power.energy".to_owned(),
             keys: Vec::new(),
@@ -278,37 +299,29 @@ impl Collector for Energy {
                 other => other.to_string(),
             });
         }
-        if self.mode == Mode::Count {
-            self.baseline = Some(
-                self.read()
-                    .map_err(|error| format!("cannot read the RAPL domains: {error:?}"))?,
-            );
-        }
-        Ok(())
+        let mut poll = std::mem::replace(&mut self.poll, CounterPoll::new(self.mode));
+        let started = poll.start(|| self.read());
+        self.poll = poll;
+        started.map_err(|error| format!("cannot read the RAPL domains: {error:?}"))
     }
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
-        if self.mode == Mode::Count {
-            return Ok(Vec::new());
-        }
-        let after = self.read()?;
-        let before = self.previous.replace(after.clone());
-        let event = before.and_then(|before| self.delta_event(&before, &after, seq));
-        Ok(event.into_iter().collect())
+        let mut poll = std::mem::replace(&mut self.poll, CounterPoll::new(self.mode));
+        let ticked = poll.tick(|| self.read());
+        self.poll = poll;
+        Ok(ticked?
+            .and_then(|interval| self.delta_event(interval, seq))
+            .into_iter()
+            .collect())
     }
 
     fn stop(&mut self) -> Vec<Event> {
-        if self.mode != Mode::Count {
-            return Vec::new();
-        }
-        let Some(before) = self.baseline.clone() else {
-            return Vec::new();
-        };
-        match self.read() {
-            Ok(after) => self
-                .delta_event(&before, &after, u64::MAX / 2)
-                .into_iter()
-                .collect(),
+        let mut poll = std::mem::replace(&mut self.poll, CounterPoll::new(self.mode));
+        let stopped = poll.stop(|| self.read());
+        self.poll = poll;
+        match stopped {
+            Ok(Some(total)) => self.delta_event(total, u64::MAX / 2).into_iter().collect(),
+            Ok(None) => Vec::new(),
             Err(error) => {
                 self.losses.failed_reads += 1;
                 self.losses.note_times(

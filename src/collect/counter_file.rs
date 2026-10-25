@@ -307,6 +307,7 @@ mod tests {
             moved,
             appeared: Vec::new(),
             went_back: Vec::new(),
+            vanished: Vec::new(),
             after: Reading {
                 ts_ns: 10,
                 counters: BTreeMap::new(),

@@ -73,6 +73,8 @@ pub struct Interval<K, C> {
     pub appeared: Vec<K>,
     /// Counters that went backwards: replaced, no interval to report.
     pub went_back: Vec<K>,
+    /// Counters present only at the start: unread at the end.
+    pub vanished: Vec<K>,
     /// The later reading whole, for what a collector reports as it stands --
     /// a gauge among the counters.
     pub after: Reading<K, C>,
@@ -92,12 +94,19 @@ impl<K: Ord + Clone, C: Cumulative> Interval<K, C> {
                 },
             }
         }
+        let vanished = before
+            .counters
+            .keys()
+            .filter(|key| !after.counters.contains_key(*key))
+            .cloned()
+            .collect();
         Interval {
             ts_ns: after.ts_ns,
             interval_ns: after.ts_ns.saturating_sub(before.ts_ns),
             moved,
             appeared,
             went_back,
+            vanished,
             after,
         }
     }
@@ -267,6 +276,20 @@ mod tests {
         assert_eq!(total.moved, vec![("kept", 3)]);
         assert_eq!(total.appeared, vec!["new"]);
         assert_eq!(total.went_back, vec!["reset"]);
+        assert!(total.vanished.is_empty());
+    }
+
+    #[test]
+    fn a_counter_unread_at_the_end_is_handed_back_as_vanished() {
+        let mut poll = CounterPoll::new(Mode::Count);
+        poll.start(|| Ok(reading(0, &[("kept", 1), ("gone", 5)])))
+            .unwrap();
+        let total = poll
+            .stop(|| Ok(reading(5, &[("kept", 4)])))
+            .unwrap()
+            .expect("the total");
+        assert_eq!(total.moved, vec![("kept", 3)]);
+        assert_eq!(total.vanished, vec!["gone"]);
     }
 
     #[test]
