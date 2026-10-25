@@ -325,10 +325,12 @@ the eighteen and twenty-six collectors moved onto `UserFilter` and
    through typed pointers, which a kprobe cannot: each is a program that
    reads through `bpf_probe_read_kernel`, and Rocky 8, Alpine and Ubuntu
    22.04 are the cells that would show them.
-4. **The pollers' move onto `collect::poll`**: eighteen collectors still keep
-   their own `previous` reading (`grep -rn "previous: Option<" src/collect`),
-   and twelve eBPF collectors that count only what their filter removed keep
-   their own wording.
+4. **The pollers' move onto `collect::poll`**: eight moved on 2026-10-25
+   (`docs/fixes/w26-poller.md`, "Phase 1"); nine keep their own `previous`
+   reading, each with its reason there. One is a decision: `cpu.oncpu_time`
+   and `cpu.throttle` report their first poll as an interval from the start,
+   which the module's opening tick would remove. Twelve eBPF collectors that
+   count only what their filter removed keep their own wording.
 5. **perftp** (`BRIEF.md`): a counting perf tracepoint needs the event's id
    from tracefs, which only root reads here; under lockdown and in a
    container it is as out of reach as eBPF. Not written.
