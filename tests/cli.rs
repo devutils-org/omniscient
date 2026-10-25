@@ -51,6 +51,8 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// Parsing, not this machine: `--no-resolve`, so the test holds without the
+/// capabilities a traced `io.latency` needs.
 #[test]
 fn a_source_needs_no_subcommand() {
     let implicit = run(&[
@@ -60,6 +62,7 @@ fn a_source_needs_no_subcommand() {
         "trace",
         "-e",
         "hist",
+        "--no-resolve",
         "--dump-request",
     ]);
     let explicit = run(&[
@@ -70,6 +73,7 @@ fn a_source_needs_no_subcommand() {
         "trace",
         "-e",
         "hist",
+        "--no-resolve",
         "--dump-request",
     ]);
     assert!(implicit.status.success(), "{}", stderr(&implicit));
@@ -286,6 +290,7 @@ fn the_same_session_reads_from_yaml_json_and_toml() {
             "yaml",
             "--format",
             "json",
+            "--no-resolve",
             "--dump-request",
         ],
         "requests: [{source: io.latency, target: system, mode: trace, emit: [hist]}]",
@@ -298,6 +303,7 @@ fn the_same_session_reads_from_yaml_json_and_toml() {
             "json",
             "--format",
             "json",
+            "--no-resolve",
             "--dump-request",
         ],
         r#"{"requests":[{"source":"io.latency","target":"system","mode":"trace","emit":["hist"]}]}"#,

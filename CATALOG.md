@@ -469,7 +469,7 @@ never unless asked. Each frame says which of them named it (`elf`,
 | `io.pagecache` | page cache hit/miss | `bpf:tp` filemap:mm_filemap_add_to_page_cache + faults | trace | pid, system | med | low |
 | `io.readahead` | readahead effectiveness | `bpf:tp` readahead tracepoints | trace | system | low | low |
 | `io.writeback` | deferred writeback | `bpf:tp` writeback:* | trace | system, cgroup | low | low |
-| `io.fsync` | sync latency | `bpf:fentry` vfs_fsync · ext4_sync_file | trace | pid | high | low |
+| `io.fsync` | sync latency | `bpf:fentry` do_fsync · vfs_fsync · vfs_fsync_range · `bpf:fentry:syscall` fsync, fdatasync | trace | pid | high | low |
 | `io.pressure` | PSI I/O | `fs:proc` /proc/pressure/io | poll | system, cgroup | low / free | low |
 | `io.util` | the share of the window a request was outstanding (`iostat`'s `%util`), `queue` (aqu-sz) beside it | `fs:proc` diskstats | poll, count | system | free | low |
 | `io.vfs` | VFS calls by operation, of any file: one event per interval, each function's count beside the total, `--filter 'op == "vfs_open"'` | `bpf:fentry` on twelve VFS entry points (`vfs_read`, `vfs_write`, `vfs_open`, `do_fsync`, ...) | count, poll | pid, tid, cgroup, system, launch | high | medium |

@@ -19,6 +19,14 @@
 //! | `do_fsync(fd, datasync)` | `fsync(2)`, `fdatasync(2)` | the caller's descriptor table |
 //! | `vfs_fsync(file, datasync)` | the two syscalls, where it is not inlined | the argument |
 //! | `vfs_fsync_range(file, start, end, datasync)` | `msync(MS_SYNC)`, nfsd, and the rest | the argument |
+//! | `__{arch}_sys_fsync`, `__{arch}_sys_fdatasync` | the two syscalls, on a kernel that inlined `do_fsync` | the caller's descriptor table |
+//!
+//! The last row is its own backend, `bpf:fentry:syscall`, for the kernels
+//! that inlined `do_fsync` *and* `vfs_fsync` into the syscalls (Ubuntu 22.04
+//! and 24.04, Rocky 9: `do_fsync` absent from BTF, `vfs_fsync`'s out-of-line
+//! copy off the path): the syscalls' own wrappers are never inlined, so a
+//! sync is timed at the call itself, beside `vfs_fsync_range` for
+//! `msync(MS_SYNC)`.
 //!
 //! The stamp records **which function opened it**. The entry half of a nested
 //! call finds the thread already stamped and leaves it alone, and the exit half
@@ -56,6 +64,8 @@ const GET_CURRENT_TASK: i32 = 35;
 
 /// The prototypes these programs read.
 const FD_SIGNATURE: [&str; 2] = ["unsigned int", "int"];
+/// A syscall wrapper's: the saved registers.
+const WRAPPER_SIGNATURE: [&str; 1] = ["pt_regs *"];
 const WHOLE_SIGNATURE: [&str; 2] = ["file *", "int"];
 const RANGE_SIGNATURE: [&str; 4] = ["file *", "loff_t", "loff_t", "int"];
 
@@ -93,6 +103,11 @@ pub enum Via {
     Whole = 2,
     /// `vfs_fsync_range`: a byte range, by argument.
     Range = 3,
+    /// `fsync(2)`'s wrapper: the file through the descriptor in the saved
+    /// registers.
+    Fsync = 4,
+    /// `fdatasync(2)`'s wrapper.
+    Fdatasync = 5,
 }
 
 impl Via {
@@ -101,6 +116,8 @@ impl Via {
             1 => Some(Via::Descriptor),
             2 => Some(Via::Whole),
             3 => Some(Via::Range),
+            4 => Some(Via::Fsync),
+            5 => Some(Via::Fdatasync),
             _ => None,
         }
     }
@@ -110,6 +127,17 @@ impl Via {
             Via::Descriptor => "do_fsync",
             Via::Whole => "vfs_fsync",
             Via::Range => "vfs_fsync_range",
+            Via::Fsync => "fsync",
+            Via::Fdatasync => "fdatasync",
+        }
+    }
+
+    /// The syscall a wrapper is the entry point of.
+    fn syscall(self) -> Option<&'static str> {
+        match self {
+            Via::Fsync => Some("fsync"),
+            Via::Fdatasync => Some("fdatasync"),
+            _ => None,
         }
     }
 }
@@ -211,6 +239,8 @@ impl Fsync {
 /// Where the fields of a file's identity, and of the walk to one, sit on this
 /// kernel.
 struct Offsets {
+    /// The first argument's register in a syscall wrapper's `pt_regs`.
+    regs_di: i32,
     f_inode: i32,
     i_mode: i32,
     i_ino: i32,
@@ -225,6 +255,7 @@ struct Offsets {
 impl Offsets {
     fn read(btf: &Btf) -> Result<Self, String> {
         Ok(Self {
+            regs_di: btf.syscall_argument(0)?,
             f_inode: btf.member_offset("file", "f_inode")?,
             i_mode: btf.member_offset("inode", "i_mode")?,
             i_ino: btf.member_offset("inode", "i_ino")?,
@@ -364,9 +395,14 @@ fn typed_identity(program: &mut Program, function: &Function, at: &Offsets) {
 /// when it grows, and another thread can close the descriptor while the sync
 /// runs. A step that finds a null pointer leaves the identity at zero, which the
 /// collector reports as a sync it could not name rather than as file zero.
-fn descriptor_identity(program: &mut Program, function: &Function, at: &Offsets) {
-    // The descriptor, zero-extended: a word store and a word load.
+fn descriptor_identity(program: &mut Program, function: &Function, at: &Offsets, wrapper: bool) {
+    // The descriptor, zero-extended: a word store and a word load. A
+    // wrapper's is the first argument in the saved registers, a typed load
+    // through its one argument.
     program.push(Insn::ldx(BPF_DW, 1, 6, function.arg(0)));
+    if wrapper {
+        program.push(Insn::ldx(BPF_DW, 1, 1, at.regs_di as i16));
+    }
     program.push(Insn::stx(BPF_W, R10, EVENT + R_FD, 1));
     program.push(Insn::call(GET_CURRENT_TASK));
     program.push(Insn::mov64_reg(7, 0));
@@ -448,8 +484,9 @@ fn exit_instructions(
     program.push(Insn::st_imm(BPF_W, R10, EVENT + R_FD, -1));
 
     let datasync_arg = match shape.via {
-        Via::Descriptor | Via::Whole => 1,
-        Via::Range => 3,
+        Via::Descriptor | Via::Whole => Some(1),
+        Via::Range => Some(3),
+        Via::Fsync | Via::Fdatasync => None,
     };
     match shape.via {
         Via::Range => {
@@ -458,7 +495,7 @@ fn exit_instructions(
             program.push(Insn::ldx(BPF_DW, 1, 6, function.arg(2)));
             program.push(Insn::stx(BPF_DW, R10, EVENT + R_END, 1));
         }
-        Via::Descriptor | Via::Whole => {
+        Via::Descriptor | Via::Whole | Via::Fsync | Via::Fdatasync => {
             // A whole-file sync is `vfs_fsync_range(file, 0, LLONG_MAX, ...)`
             // and the record says so in the same numbers. `LLONG_MAX` does not
             // fit an immediate, so it is built: all ones, shifted right once.
@@ -467,13 +504,27 @@ fn exit_instructions(
             program.push(Insn::stx(BPF_DW, R10, EVENT + R_END, 1));
         }
     }
-    program.push(Insn::ldx(BPF_DW, 1, 6, function.arg(datasync_arg)));
-    program.push(Insn::stx(BPF_W, R10, EVENT + R_DATASYNC, 1));
+    match datasync_arg {
+        Some(arg) => {
+            program.push(Insn::ldx(BPF_DW, 1, 6, function.arg(arg)));
+            program.push(Insn::stx(BPF_W, R10, EVENT + R_DATASYNC, 1));
+        }
+        // Which wrapper it is says it.
+        None => {
+            program.push(Insn::st_imm(
+                BPF_W,
+                R10,
+                EVENT + R_DATASYNC,
+                i32::from(shape.via == Via::Fdatasync),
+            ));
+        }
+    }
     program.push(Insn::ldx(BPF_DW, 1, 6, function.ret()));
     program.push(Insn::stx(BPF_W, R10, EVENT + R_RET, 1));
 
     match shape.via {
-        Via::Descriptor => descriptor_identity(&mut program, function, at),
+        Via::Descriptor => descriptor_identity(&mut program, function, at, false),
+        Via::Fsync | Via::Fdatasync => descriptor_identity(&mut program, function, at, true),
         Via::Whole | Via::Range => typed_identity(&mut program, function, at),
     }
 
@@ -514,8 +565,13 @@ pub struct FsyncProgram {
 }
 
 impl FsyncProgram {
-    pub fn load(narrowing: Narrowing) -> Result<Self, String> {
+    /// `at_syscalls`: the `bpf:fentry:syscall` backend, timed at the two
+    /// syscalls' wrappers and `vfs_fsync_range`, rather than at the VFS.
+    pub fn load(narrowing: Narrowing, at_syscalls: bool) -> Result<Self, String> {
         let btf = crate::bpf::kernel_btf()?;
+        if at_syscalls {
+            return Self::load_at_syscalls(btf, narrowing);
+        }
         // `do_fsync` is static: a kernel that inlines it into the two
         // syscalls has no `FUNC` for it, and on that kernel `vfs_fsync` is the
         // one the syscalls call out of line. So it is timed where it exists
@@ -542,6 +598,43 @@ impl FsyncProgram {
                 },
             );
         }
+        Self::attach(btf, narrowing, &shapes, by_descriptor.is_some())
+    }
+
+    fn load_at_syscalls(btf: &Btf, narrowing: Narrowing) -> Result<Self, String> {
+        let Some(arch) = fentry::syscall_arch() else {
+            return Err(format!(
+                "the syscall wrappers take the saved registers, and this build reads \
+                 x86-64's and aarch64's, not {}'s",
+                std::env::consts::ARCH
+            ));
+        };
+        let mut wrappers = Vec::new();
+        for via in [Via::Fsync, Via::Fdatasync] {
+            let name = format!("__{arch}_sys_{}", via.syscall().expect("a wrapper"));
+            wrappers.push((fentry::expect(&name, &[&WRAPPER_SIGNATURE])?, via));
+        }
+        let range = fentry::expect("vfs_fsync_range", &[&RANGE_SIGNATURE])?;
+        let mut shapes: Vec<Shape<'_>> = wrappers
+            .iter()
+            .map(|(function, via)| Shape {
+                function,
+                via: *via,
+            })
+            .collect();
+        shapes.push(Shape {
+            function: &range,
+            via: Via::Range,
+        });
+        Self::attach(btf, narrowing, &shapes, true)
+    }
+
+    fn attach(
+        btf: &Btf,
+        narrowing: Narrowing,
+        shapes: &[Shape<'_>],
+        by_descriptor: bool,
+    ) -> Result<Self, String> {
         let offsets = Offsets::read(btf)?;
         let descendants = match narrowing.tgid {
             Some(root) => Some(crate::bpf::sched_common::Descendants::follow(root)?),
@@ -561,7 +654,7 @@ impl FsyncProgram {
             .map_err(|error| map_failure("fsync pending map", error))?;
 
         let mut built = Vec::new();
-        for shape in &shapes {
+        for shape in shapes {
             let entry = entry_instructions(
                 shape,
                 narrowing,
@@ -608,7 +701,7 @@ impl FsyncProgram {
             drops,
             pending,
             links,
-            by_descriptor: by_descriptor.is_some(),
+            by_descriptor,
             descendants,
         })
     }

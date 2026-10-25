@@ -31,6 +31,8 @@ const S_IFREG: u32 = 0o100000;
 pub struct Prepare {
     pub mode: Mode,
     pub filter: Option<FilterExpr>,
+    /// `bpf:fentry:syscall`: timed at the syscalls' wrappers.
+    pub at_syscalls: bool,
 }
 
 impl Prepared for Prepare {
@@ -45,6 +47,7 @@ impl Prepared for Prepare {
         let narrowing = super::vfs::narrowing("io.fsync", target)?;
         Ok(Box::new(FsyncCollector {
             narrowing,
+            at_syscalls: self.at_syscalls,
             program: None,
             losses: Losses::default(),
             predicate: self.filter,
@@ -66,6 +69,7 @@ impl Prepared for Prepare {
 
 pub struct FsyncCollector {
     narrowing: Narrowing,
+    at_syscalls: bool,
     program: Option<FsyncProgram>,
     losses: Losses,
     predicate: Option<FilterExpr>,
@@ -255,7 +259,7 @@ impl Collector for FsyncCollector {
 
     fn start(&mut self) -> Result<(), String> {
         self.mounts = Some(Mounts::read());
-        let program = FsyncProgram::load(self.narrowing)?;
+        let program = FsyncProgram::load(self.narrowing, self.at_syscalls)?;
         self.by_descriptor = program.by_descriptor;
         self.program = Some(program);
         Ok(())
@@ -303,12 +307,16 @@ impl Collector for FsyncCollector {
     }
 
     fn notes(&self) -> Vec<String> {
-        let mut notes = vec![
+        let mut notes = vec![if self.at_syscalls {
+            "fsync, fdatasync and msync(MS_SYNC) are here, and sync(2), syncfs(2) and \
+             sync_file_range(2) are not"
+                .to_owned()
+        } else {
             "timed at do_fsync, vfs_fsync and vfs_fsync_range, whichever a sync reaches first: \
              fsync, fdatasync and msync(MS_SYNC) are here, and sync(2), syncfs(2) and \
              sync_file_range(2) are not"
-                .to_owned(),
-        ];
+                .to_owned()
+        }];
         if !self.by_descriptor {
             notes.push(
                 "this kernel has no do_fsync in its BTF, so fsync and fdatasync are timed where \
@@ -380,6 +388,7 @@ mod tests {
     fn collector() -> FsyncCollector {
         FsyncCollector {
             narrowing: Narrowing::default(),
+            at_syscalls: false,
             program: None,
             losses: Losses::default(),
             predicate: None,
@@ -433,6 +442,7 @@ mod tests {
         let refused = Box::new(Prepare {
             mode: Mode::Count,
             filter: None,
+            at_syscalls: false,
         })
         .attach(&Target::System);
         let Err(reason) = refused else {

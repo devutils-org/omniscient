@@ -3819,6 +3819,19 @@ fn no_fentry_here() -> Option<String> {
 /// The CLI takes one source; a session takes any number on one target, which is
 /// what lets two layers be measured over the same calls.
 fn run_on_launch(name: &str, requests: &[(&str, &str, &str, &str)], argv: &[&str]) -> Output {
+    run_on_launch_pinned(name, requests, None, argv)
+}
+
+/// The same, every request pinned to `backend` when one is given.
+fn run_on_launch_pinned(
+    name: &str,
+    requests: &[(&str, &str, &str, &str)],
+    backend: Option<&str>,
+    argv: &[&str],
+) -> Output {
+    let pinned = backend
+        .map(|backend| format!("    backend: force:{backend}\n"))
+        .unwrap_or_default();
     let launch = argv
         .iter()
         .map(|arg| {
@@ -3833,7 +3846,7 @@ fn run_on_launch(name: &str, requests: &[(&str, &str, &str, &str)], argv: &[&str
     for (label, source, mode, emits) in requests {
         text.push_str(&format!(
             "  - label: {label}\n    source: {source}\n    target:\n      launch:\n{launch}\n    \
-             mode: {mode}\n    emit: [{emits}]\n"
+             mode: {mode}\n    emit: [{emits}]\n{pinned}"
         ));
     }
     let path = scratch(&format!("{name}.yml"));
@@ -4258,6 +4271,70 @@ fn every_sync_is_one_event_on_the_file_it_named() {
          apart by more than an order of magnitude",
         median(&whole),
         median(&clean)
+    );
+}
+
+/// The same twenty-eight syncs through `bpf:fentry:syscall`, the backend for
+/// a kernel that inlined `do_fsync` and `vfs_fsync` into the syscalls: timed
+/// at the two syscalls' wrappers, the file found through the descriptor in the
+/// saved registers, and the msyncs at `vfs_fsync_range` as before. A sync the
+/// wrapper opened and `vfs_fsync_range` reached inside it is one event.
+#[test]
+fn every_sync_at_the_syscalls_is_one_event_on_the_file_it_named() {
+    if let Some(reason) = no_fentry_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let path = scratch("fentry-syscall-syncs.bin");
+    let account_path = scratch("fentry-syscall-syncs.json");
+    let workload = script("fentry-syscall-syncs.py", SYNCS);
+    let output = run_on_launch_pinned(
+        "fentry-syscall-syncs",
+        &[("fsync", "io.fsync", "trace", "raw")],
+        Some("bpf:fentry:syscall"),
+        &[
+            "python3",
+            workload.to_str().expect("a path"),
+            path.to_str().expect("a path"),
+            account_path.to_str().expect("a path"),
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    let did = account(&account_path);
+    let (dev, _) = mounted_device(&path);
+    let file = (dev, did["ino"].as_u64().expect("an inode"));
+    let document = json(&output);
+    let events = raw_with_keys(result(&document, "fsync"));
+    let mine: Vec<_> = events
+        .iter()
+        .filter(|(raw, _)| file_key(raw) == Some(file))
+        .collect();
+    let count = |call: &str, via: &str| {
+        mine.iter()
+            .filter(|(_, event)| attr_text(event, "call") == call && attr_text(event, "via") == via)
+            .count()
+    };
+    assert_eq!(
+        (
+            count("fsync", "fsync"),
+            count("fdatasync", "fdatasync"),
+            count("fdatasync", "vfs_fsync_range")
+        ),
+        (20, 5, 3),
+        "twenty fsyncs, five fdatasyncs and three msyncs on {file:?}, and nothing else: {mine:?}"
+    );
+    assert_eq!(
+        mine.len(),
+        events.len(),
+        "the program synced one file, and every event must name it: {events:?}"
+    );
+    let fd = did["fd"].as_i64().expect("a descriptor");
+    assert!(
+        mine.iter().all(|(_, event)| {
+            attr_text(event, "via") == "vfs_fsync_range"
+                || event.get("fd").and_then(serde_json::Value::as_i64) == Some(fd)
+        }),
+        "a sync timed at its syscall carries descriptor {fd}"
     );
 }
 

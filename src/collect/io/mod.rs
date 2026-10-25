@@ -173,6 +173,16 @@ pub fn factories() -> Vec<Factory> {
             Ok(Box::new(fsync::Prepare {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
+                at_syscalls: false,
+            }))
+        }),
+        // Where the compiler inlined `do_fsync` and `vfs_fsync` into the
+        // syscalls: the syscalls' own wrappers, which it never inlines.
+        Factory::new("io.fsync", "bpf:fentry:syscall", |resolved| {
+            Ok(Box::new(fsync::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+                at_syscalls: true,
             }))
         }),
         // The page cache, from the two tracepoints on either side of a read:
