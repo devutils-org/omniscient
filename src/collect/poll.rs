@@ -53,6 +53,14 @@ impl Cumulative for i64 {
     }
 }
 
+/// Counters read together, such as a time and a count: grown only when both
+/// grew, or stood still.
+impl<A: Cumulative, B: Cumulative> Cumulative for (A, B) {
+    fn since(&self, earlier: &Self) -> Option<Self> {
+        Some((self.0.since(&earlier.0)?, self.1.since(&earlier.1)?))
+    }
+}
+
 /// One reading: every counter, by key, and when it was read.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Reading<K, C> {

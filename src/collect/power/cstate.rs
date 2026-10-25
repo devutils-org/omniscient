@@ -26,6 +26,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::clock::monotonic_ns;
+use crate::collect::poll::{CounterPoll, Interval, Reading};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, AttrValue, CollectorId, Event, KeyValue};
 use crate::request::{Mode, Target};
@@ -84,19 +85,15 @@ struct CpuResidency {
     per_state: Vec<(String, u64, u64)>,
 }
 
-/// Time and entries per idle state, for every cpu being watched.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct Reading {
-    ts_ns: u64,
-    /// (cpu, state name) to (microseconds of residency, entries).
-    ///
-    /// Kept apart per cpu rather than summed. A residency averaged over
-    /// twenty-four cores says the machine was 90 % idle while one core was
-    /// pinned at 100 %, which is the shape of exactly the problem someone
-    /// reads this to find; and the catalog declares `cpu` as a filter field
-    /// here, which an aggregate cannot carry.
-    states: BTreeMap<(u32, String), (u64, u64)>,
-}
+/// Time and entries per idle state, for every cpu being watched:
+/// (cpu, state name) to (microseconds of residency, entries).
+///
+/// Kept apart per cpu rather than summed. A residency averaged over
+/// twenty-four cores says the machine was 90 % idle while one core was
+/// pinned at 100 %, which is the shape of exactly the problem someone
+/// reads this to find; and the catalog declares `cpu` as a filter field
+/// here, which an aggregate cannot carry.
+type States = Reading<(u32, String), (u64, u64)>;
 
 pub struct Residency {
     /// `count`: a baseline at the start and one closing read, so `-e rate`
@@ -104,7 +101,7 @@ pub struct Residency {
     mode: Mode,
     root: PathBuf,
     cpus: Vec<u32>,
-    previous: Option<Reading>,
+    poll: CounterPoll<(u32, String), (u64, u64)>,
     losses: Losses,
 }
 
@@ -114,12 +111,12 @@ impl Residency {
             mode,
             root,
             cpus,
-            previous: None,
+            poll: CounterPoll::new(mode),
             losses: Losses::default(),
         }
     }
 
-    fn read(&mut self) -> Result<Reading, SampleError> {
+    fn read(&mut self) -> Result<States, SampleError> {
         let mut states: BTreeMap<(u32, String), (u64, u64)> = BTreeMap::new();
         let mut read_any = false;
         for &cpu in &self.cpus {
@@ -158,13 +155,17 @@ impl Residency {
         }
         Ok(Reading {
             ts_ns: monotonic_ns(),
-            states,
+            counters: states,
         })
     }
 
     /// One event per cpu for the increase between two readings.
-    fn delta_events(&mut self, before: &Reading, after: &Reading, seq: u64) -> Vec<Event> {
-        if before.states.keys().ne(after.states.keys()) {
+    fn delta_events(
+        &mut self,
+        interval: Interval<(u32, String), (u64, u64)>,
+        seq: u64,
+    ) -> Vec<Event> {
+        if !interval.appeared.is_empty() || !interval.vanished.is_empty() {
             self.losses.undecoded += 1;
             self.losses.note_times(
                 "the set of idle states changed between two reads, so the increase between them \
@@ -174,40 +175,32 @@ impl Residency {
             );
             return Vec::new();
         }
-        let interval_ns = after.ts_ns.saturating_sub(before.ts_ns);
+        let interval_ns = interval.interval_ns;
         if interval_ns == 0 {
+            return Vec::new();
+        }
+        if let Some((cpu, name)) = interval.went_back.first() {
+            self.losses.undecoded += 1;
+            self.losses.note_times(
+                format!(
+                    "the residency counter for cpu{cpu} state `{name}` went backwards, so this \
+                     interval cannot be attributed"
+                ),
+                1,
+            );
             return Vec::new();
         }
 
         // Grouped by cpu, keeping the states of each together.
         let mut per_cpu: BTreeMap<u32, CpuResidency> = BTreeMap::new();
-        for ((cpu, name), (time, usage)) in &after.states {
-            let (before_time, before_usage) = before
-                .states
-                .get(&(*cpu, name.clone()))
-                .copied()
-                .unwrap_or((0, 0));
-            let (Some(time), Some(usage)) = (
-                time.checked_sub(before_time),
-                usage.checked_sub(before_usage),
-            ) else {
-                self.losses.undecoded += 1;
-                self.losses.note_times(
-                    format!(
-                    "the residency counter for cpu{cpu} state `{name}` went backwards, so this \
-                     interval cannot be attributed"
-                ),
-                    1,
-                );
-                return Vec::new();
-            };
+        for ((cpu, name), (time, usage)) in interval.moved {
             // cpuidle counts microseconds; everything in this tool is
             // nanoseconds.
             let nanos = time * 1_000;
-            let entry = per_cpu.entry(*cpu).or_default();
+            let entry = per_cpu.entry(cpu).or_default();
             entry.idle_ns += nanos;
             entry.entries += usage;
-            entry.per_state.push((name.clone(), nanos, usage));
+            entry.per_state.push((name, nanos, usage));
         }
 
         per_cpu
@@ -242,7 +235,7 @@ impl Residency {
                     attrs.push(Attr::uint(format!("{key}_entries"), usage));
                 }
                 Event {
-                    ts_ns: after.ts_ns,
+                    ts_ns: interval.ts_ns,
                     ts_err_ns: 0,
                     kind: "power.cstate".to_owned(),
                     keys: vec![KeyValue::cpu(cpu)],
@@ -274,35 +267,32 @@ impl Collector for Residency {
                 directory.display()
             ));
         }
-        if self.mode == Mode::Count {
-            self.previous = Some(self.read().map_err(|error| format!("{error:?}"))?);
-        }
-        Ok(())
+        let mut poll = std::mem::replace(&mut self.poll, CounterPoll::new(self.mode));
+        let started = poll.start(|| self.read());
+        self.poll = poll;
+        started.map_err(|error| format!("{error:?}"))
     }
 
+    /// A counted window closes at `stop`, from the baseline `start` read; a
+    /// polled run's first tick opens its window (`collect::poll`).
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
-        // A counted window closes at `stop`, from the baseline `start` read.
-        if self.mode == Mode::Count {
-            return Ok(Vec::new());
-        }
-        let after = self.read()?;
-        let before = self.previous.replace(after.clone());
-        Ok(before
-            .map(|before| self.delta_events(&before, &after, seq))
+        let mut poll = std::mem::replace(&mut self.poll, CounterPoll::new(self.mode));
+        let ticked = poll.tick(|| self.read());
+        self.poll = poll;
+        Ok(ticked?
+            .map(|interval| self.delta_events(interval, seq))
             .unwrap_or_default())
     }
 
     /// The closing read of a counted window; a polled run reads nothing here
     /// (the runner's last round of `sample` closed it).
     fn stop(&mut self) -> Vec<Event> {
-        if self.mode != Mode::Count {
-            return Vec::new();
-        }
-        let Some(before) = self.previous.take() else {
-            return Vec::new();
-        };
-        match self.read() {
-            Ok(after) => self.delta_events(&before, &after, 0),
+        let mut poll = std::mem::replace(&mut self.poll, CounterPoll::new(self.mode));
+        let stopped = poll.stop(|| self.read());
+        self.poll = poll;
+        match stopped {
+            Ok(Some(total)) => self.delta_events(total, 0),
+            Ok(None) => Vec::new(),
             Err(error) => {
                 self.losses.failed_reads += 1;
                 self.losses.note_times(
