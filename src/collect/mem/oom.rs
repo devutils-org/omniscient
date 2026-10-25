@@ -21,6 +21,7 @@ use std::path::PathBuf;
 
 use super::cgroup::{stat_field, stat_fields, Cgroup};
 use crate::clock::monotonic_ns;
+use crate::collect::poll::{CounterPoll, Interval, Reading};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::request::{Mode, Target};
@@ -110,19 +111,15 @@ impl Prepared for Prepare {
             path,
             keys,
             note,
-            previous: None,
-            opened: None,
+            poll: CounterPoll::new(self.mode).closing_on_the_last_read(),
             losses: Losses::default(),
         }))
     }
 }
 
-/// The counters at one instant, in [`Scope::fields`] order.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Reading {
-    ts_ns: u64,
-    values: Vec<Option<u64>>,
-}
+/// A counter of [`Scope::fields`], by its place there and its name, so the
+/// event lists them in that order.
+type Field = (usize, &'static str);
 
 pub struct Oom {
     mode: Mode,
@@ -131,13 +128,16 @@ pub struct Oom {
     keys: Vec<KeyValue>,
     /// Said once per run when the cgroup asked for is read another way.
     note: Option<String>,
-    previous: Option<Reading>,
-    opened: Option<Reading>,
+    /// A cgroup can be removed with the program it held, and a kill that ends
+    /// a launched program lands after the last tick saw it alive: a counted
+    /// run reads at every tick and at the stop, and closes on the last that
+    /// read.
+    poll: CounterPoll<Field, u64>,
     losses: Losses,
 }
 
 impl Oom {
-    fn read(&self) -> Result<Reading, SampleError> {
+    fn read(&self) -> Result<Reading<Field, u64>, SampleError> {
         let text = std::fs::read_to_string(&self.path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 SampleError::TargetGone(format!("{} is gone", self.path.display()))
@@ -148,44 +148,37 @@ impl Oom {
         let fields = stat_fields(&text);
         Ok(Reading {
             ts_ns: monotonic_ns(),
-            values: self
+            counters: self
                 .scope
                 .fields()
                 .iter()
-                .map(|name| stat_field(&fields, name))
+                .enumerate()
+                .filter_map(|(index, name)| Some(((index, *name), stat_field(&fields, name)?)))
                 .collect(),
         })
     }
 
-    fn event(&mut self, before: &Reading, after: &Reading, seq: u64, basis: &str) -> Option<Event> {
+    fn event(&mut self, interval: Interval<Field, u64>, seq: u64, basis: &str) -> Option<Event> {
+        if let Some((_, name)) = interval.went_back.first() {
+            self.losses.undecoded += 1;
+            self.losses.note_times(
+                format!(
+                    "{name} in {} went backwards, so that interval is not reported",
+                    self.path.display()
+                ),
+                1,
+            );
+            return None;
+        }
         let mut attrs = Vec::with_capacity(self.scope.fields().len() + 3);
-        for (index, name) in self.scope.fields().iter().enumerate() {
-            let (Some(Some(now)), Some(Some(then))) =
-                (after.values.get(index), before.values.get(index))
-            else {
-                continue;
-            };
-            let Some(moved) = now.checked_sub(*then) else {
-                self.losses.undecoded += 1;
-                self.losses.note_times(
-                    format!(
-                        "{name} in {} went backwards, so that interval is not reported",
-                        self.path.display()
-                    ),
-                    1,
-                );
-                return None;
-            };
-            let attr = if *name == "oom_kill" { "kills" } else { name };
+        for ((_, name), moved) in interval.moved {
+            let attr = if name == "oom_kill" { "kills" } else { name };
             attrs.push(Attr::uint(attr, moved));
         }
-        attrs.push(Attr::uint(
-            "interval_ns",
-            after.ts_ns.saturating_sub(before.ts_ns),
-        ));
+        attrs.push(Attr::uint("interval_ns", interval.interval_ns));
         attrs.push(Attr::text("basis", basis));
         Some(Event {
-            ts_ns: after.ts_ns,
+            ts_ns: interval.ts_ns,
             ts_err_ns: 0,
             kind: "mem.oom".to_owned(),
             keys: self.keys.clone(),
@@ -201,48 +194,52 @@ impl Collector for Oom {
         "kills"
     }
 
+    /// The baseline, before the observed program is released.
+    fn start(&mut self) -> Result<(), String> {
+        let mut poll = std::mem::replace(&mut self.poll, CounterPoll::new(self.mode));
+        let started = poll.start(|| self.read());
+        self.poll = poll;
+        started.map_err(|error| format!("{error:?}"))
+    }
+
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
-        let now = self.read()?;
-        if self.mode == Mode::Count {
-            self.opened.get_or_insert_with(|| now.clone());
-            self.previous = Some(now);
-            return Ok(Vec::new());
-        }
-        let before = self.previous.replace(now.clone());
-        Ok(before
-            .and_then(|before| {
-                self.event(
-                    &before,
-                    &now,
-                    seq,
-                    "the kill counter's increase over this tick",
-                )
+        let mut poll = std::mem::replace(&mut self.poll, CounterPoll::new(self.mode));
+        let ticked = poll.tick(|| self.read());
+        self.poll = poll;
+        Ok(ticked?
+            .and_then(|interval| {
+                self.event(interval, seq, "the kill counter's increase over this tick")
             })
             .into_iter()
             .collect())
     }
 
-    /// A counted run's one event, from the first read to the last; a final
+    /// A counted run's one event, from the baseline to the last read; a final
     /// read here as well, because the kill that ends a launched program lands
     /// after the last tick saw it alive.
     fn stop(&mut self) -> Vec<Event> {
-        if self.mode != Mode::Count {
-            return Vec::new();
+        let mut poll = std::mem::replace(&mut self.poll, CounterPoll::new(self.mode));
+        let stopped = poll.stop(|| self.read());
+        self.poll = poll;
+        match stopped {
+            Ok(Some(total)) => self
+                .event(
+                    total,
+                    u64::MAX / 2,
+                    "the kill counter's increase over the window",
+                )
+                .into_iter()
+                .collect(),
+            Ok(None) => Vec::new(),
+            Err(error) => {
+                self.losses.failed_reads += 1;
+                self.losses.note_times(
+                    format!("the closing read failed ({error:?}), so this run has no total"),
+                    1,
+                );
+                Vec::new()
+            }
         }
-        if let Ok(now) = self.read() {
-            self.previous = Some(now);
-        }
-        let (Some(opened), Some(closed)) = (self.opened.clone(), self.previous.clone()) else {
-            return Vec::new();
-        };
-        self.event(
-            &opened,
-            &closed,
-            u64::MAX / 2,
-            "the kill counter's increase over the window",
-        )
-        .into_iter()
-        .collect()
     }
 
     fn losses(&self) -> Losses {
@@ -267,8 +264,7 @@ mod tests {
             path,
             keys: Vec::new(),
             note: None,
-            previous: None,
-            opened: None,
+            poll: CounterPoll::new(Mode::Count).closing_on_the_last_read(),
             losses: Losses::default(),
         }
     }
@@ -297,6 +293,7 @@ mod tests {
     #[test]
     fn the_machine_counter_reads_and_a_quiet_window_counts_none() {
         let mut collector = counted(Scope::Machine, PathBuf::from(VMSTAT));
+        collector.start().expect("vmstat");
         collector.sample(0).expect("vmstat");
         let events = collector.stop();
         // Another process on the machine could be killed in between; what is
@@ -308,15 +305,14 @@ mod tests {
     #[test]
     fn a_counter_that_goes_backwards_is_a_loss_not_a_negative() {
         let mut collector = counted(Scope::Cgroup, PathBuf::from("/nonexistent"));
-        let before = Reading {
-            ts_ns: 0,
-            values: vec![Some(5), Some(5), Some(0), Some(9)],
+        let reading = |kills| Reading {
+            ts_ns: kills,
+            counters: [((0, "oom_kill"), kills), ((1, "oom"), 5)].into(),
         };
-        let after = Reading {
-            ts_ns: 1,
-            values: vec![Some(3), Some(5), Some(0), Some(9)],
-        };
-        assert!(collector.event(&before, &after, 0, "test").is_none());
+        let mut poll = CounterPoll::new(Mode::Count);
+        poll.start(|| Ok(reading(5))).unwrap();
+        let interval = poll.stop(|| Ok(reading(3))).unwrap().expect("an interval");
+        assert!(collector.event(interval, 0, "test").is_none());
         assert_eq!(collector.losses.undecoded, 1);
     }
 
@@ -338,6 +334,7 @@ mod tests {
         let mut collector = Box::new(Prepare::new(Scope::Cgroup, Mode::Count).expect("count"))
             .attach(&target)
             .expect("the scratch cgroup's memory.events");
+        collector.start().expect("the baseline");
         collector.sample(0).expect("the first read");
         let mut child = scratch.spawn_doomed_toucher(128 << 20);
         let signal = child.wait_for_end(Duration::from_secs(30));

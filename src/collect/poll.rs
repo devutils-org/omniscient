@@ -23,6 +23,13 @@
 //!   counters reset). Both are handed back by key, for the collector to count
 //!   and say in its own words, never folded into a zero.
 //!
+//! - **A target that can end closes on its last reading.** A cgroup removed
+//!   with the program it held, or a process reaped before the stop, has
+//!   nothing to read at the close. A counted run over such a target
+//!   ([`CounterPoll::closing_on_the_last_read`]) reads at every tick, and its
+//!   total ends at the stop's read or, when that fails, at the last that
+//!   did not.
+//!
 //! A collector supplies the reading -- [`Reading`], keyed counters of any
 //! shape that knows its own increase ([`Cumulative`]) -- and turns an
 //! [`Interval`] into events. What a snapshot or a gauge reports is the
@@ -128,6 +135,9 @@ pub struct CounterPoll<K, C> {
     previous: Option<Reading<K, C>>,
     /// Set from the start until the first tick has opened the window.
     opening: bool,
+    /// A counted run's latest reading, kept at every tick, when the target
+    /// can end before the stop.
+    last: Option<Option<Reading<K, C>>>,
 }
 
 impl<K: Ord + Clone, C: Cumulative> CounterPoll<K, C> {
@@ -138,7 +148,16 @@ impl<K: Ord + Clone, C: Cumulative> CounterPoll<K, C> {
             mode,
             previous: None,
             opening: false,
+            last: None,
         }
+    }
+
+    /// For a target that can end before the stop: a counted run reads at
+    /// every tick, and closes on the last reading taken when the stop's
+    /// own read fails.
+    pub fn closing_on_the_last_read(mut self) -> Self {
+        self.last = Some(None);
+        self
     }
 
     fn measures(&self) -> bool {
@@ -167,6 +186,11 @@ impl<K: Ord + Clone, C: Cumulative> CounterPoll<K, C> {
         read: impl FnOnce() -> Result<Reading<K, C>, SampleError>,
     ) -> Result<Option<Interval<K, C>>, SampleError> {
         let Mode::Poll { interval } = self.mode else {
+            if self.mode == Mode::Count {
+                if let Some(last) = &mut self.last {
+                    *last = Some(read()?);
+                }
+            }
             return Ok(None);
         };
         if std::mem::take(&mut self.opening) {
@@ -197,7 +221,12 @@ impl<K: Ord + Clone, C: Cumulative> CounterPoll<K, C> {
         let Some(before) = self.previous.take() else {
             return Ok(None);
         };
-        Ok(Some(Interval::between(&before, read()?)))
+        let after = match (read(), self.last.take().flatten()) {
+            (Ok(after), _) => after,
+            (Err(_), Some(last)) => last,
+            (Err(error), None) => return Err(error),
+        };
+        Ok(Some(Interval::between(&before, after)))
     }
 }
 
@@ -298,6 +327,20 @@ mod tests {
             .expect("the total");
         assert_eq!(total.moved, vec![("kept", 3)]);
         assert_eq!(total.vanished, vec!["gone"]);
+    }
+
+    #[test]
+    fn a_target_that_ended_closes_on_its_last_reading() {
+        let mut poll = CounterPoll::new(Mode::Count).closing_on_the_last_read();
+        poll.start(|| Ok(reading(0, &[("a", 10)]))).unwrap();
+        assert_eq!(poll.tick(|| Ok(reading(5, &[("a", 12)]))).unwrap(), None);
+        assert_eq!(poll.tick(|| Ok(reading(9, &[("a", 17)]))).unwrap(), None);
+        let total = poll
+            .stop(|| Err(SampleError::TargetGone("removed".to_owned())))
+            .unwrap()
+            .expect("the total, to the last reading");
+        assert_eq!(total.moved, vec![("a", 7)]);
+        assert_eq!(total.ts_ns, 9);
     }
 
     #[test]
