@@ -288,6 +288,58 @@ fn kernel_reads_locked_down() -> Option<&'static str> {
         .as_deref()
 }
 
+/// This process's `RLIMIT_MEMLOCK` as it was before [`lift_memlock`] raised
+/// it, when it did: what a launched program is given back before its exec,
+/// so the program runs under its own limit and not the tool's.
+pub static MEMLOCK_BEFORE: OnceLock<libc::rlimit> = OnceLock::new();
+
+/// Whether a 1 MiB map is refused where a small one is created: the kernel
+/// charges maps to `RLIMIT_MEMLOCK`, and the limit is below what this tool's
+/// maps take.
+fn memlock_refuses_maps() -> bool {
+    const BPF_MAP_TYPE_ARRAY: u32 = 2;
+    let large = syscall::map_create(BPF_MAP_TYPE_ARRAY, 4, 4096, 256, "omn_memlock");
+    let refused =
+        matches!(&large, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied);
+    refused && syscall::map_create(BPF_MAP_TYPE_ARRAY, 4, 8, 1, "omn_memlock").is_ok()
+}
+
+/// Raises `RLIMIT_MEMLOCK` where the kernel charges eBPF maps to it (before
+/// 5.11) and the limit refuses them, as libbpf does: to unlimited when this
+/// process may (root, `CAP_SYS_RESOURCE`), else the soft limit to the hard.
+/// Before 5.11 no capability exempts a map from the charge, so a root run on
+/// Debian 10 or Ubuntu 20.04, at the distribution's 64 KiB, was refused every
+/// eBPF source. Called once, at the start; the limit before is kept for the
+/// launched program ([`MEMLOCK_BEFORE`]).
+pub fn lift_memlock() {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: a valid pointer to an rlimit this frame owns.
+    if unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut limit) } != 0
+        || limit.rlim_cur == libc::RLIM_INFINITY
+        || !memlock_refuses_maps()
+    {
+        return;
+    }
+    let unlimited = libc::rlimit {
+        rlim_cur: libc::RLIM_INFINITY,
+        rlim_max: libc::RLIM_INFINITY,
+    };
+    let to_hard = libc::rlimit {
+        rlim_cur: limit.rlim_max,
+        rlim_max: limit.rlim_max,
+    };
+    // SAFETY: setrlimit with valid pointers to rlimits this frame owns.
+    let raised = unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &unlimited) } == 0
+        || (limit.rlim_cur < limit.rlim_max
+            && unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &to_hard) } == 0);
+    if raised {
+        let _ = MEMLOCK_BEFORE.set(limit);
+    }
+}
+
 /// Why this process cannot create the maps its programs need, when the
 /// kernel charges them to `RLIMIT_MEMLOCK`: kernels before memory-cgroup
 /// accounting of BPF memory (5.11) do, and a distribution's default limit is
@@ -299,7 +351,6 @@ pub fn maps_charged_to_memlock() -> Option<&'static str> {
     static ANSWER: OnceLock<Option<String>> = OnceLock::new();
     ANSWER
         .get_or_init(|| {
-            const BPF_MAP_TYPE_ARRAY: u32 = 2;
             let mut limit = libc::rlimit {
                 rlim_cur: 0,
                 rlim_max: 0,
@@ -307,15 +358,10 @@ pub fn maps_charged_to_memlock() -> Option<&'static str> {
             // SAFETY: a valid pointer to an rlimit this frame owns.
             if unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut limit) } != 0
                 || limit.rlim_cur == libc::RLIM_INFINITY
+                || !memlock_refuses_maps()
             {
                 return None;
             }
-            let large = syscall::map_create(BPF_MAP_TYPE_ARRAY, 4, 4096, 256, "omn_memlock");
-            let refused = matches!(&large, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied);
-            if !refused {
-                return None;
-            }
-            syscall::map_create(BPF_MAP_TYPE_ARRAY, 4, 8, 1, "omn_memlock").ok()?;
             let kib = |bytes: libc::rlim_t| {
                 if bytes == libc::RLIM_INFINITY {
                     "unlimited".to_owned()

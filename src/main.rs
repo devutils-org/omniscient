@@ -17,6 +17,9 @@ use omn::command::{
 fn main() -> ExitCode {
     let _ = STARTED_NS.set(omn::clock::monotonic_ns());
     restore_own_dumpability();
+    // Before any probe: a kernel that charges eBPF maps to RLIMIT_MEMLOCK
+    // refuses them at a distribution's 64 KiB, root's runs included.
+    omn::bpf::lift_memlock();
     // A launched program's orphans are reparented here, where a stop can
     // still end them (`collect::adopt_orphans`). This process starts nothing
     // else that outlives the call that started it.

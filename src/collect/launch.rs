@@ -779,6 +779,7 @@ fn gated_with(
     }
     let (read_fd, write_fd) = (pipe_fds[0], pipe_fds[1]);
 
+    let memlock_before = crate::bpf::MEMLOCK_BEFORE.get().copied();
     // SAFETY: this process is single threaded at launch time, and the child
     // path below calls only async-signal-safe functions before exec.
     let pid = unsafe { libc::fork() };
@@ -804,6 +805,11 @@ fn gated_with(
             // only once the tool has been given capabilities, which is the
             // worst time to discover it.
             libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0);
+            // The memory-lock limit this tool raised for its own maps
+            // (`bpf::lift_memlock`) is not the program's: it gets its own back.
+            if let Some(before) = memlock_before {
+                libc::setrlimit(libc::RLIMIT_MEMLOCK, &before);
+            }
             libc::close(write_fd);
             let mut go = [0u8; 1];
             // A short read or an interrupted one still means "go": the parent
@@ -1016,6 +1022,43 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         panic!("the child never finished");
+    }
+
+    /// A memory-lock limit this tool raised for its own maps is not the
+    /// program's: the child gets the limit from before back, before its exec.
+    /// Shown with a lower soft limit than this process has, as the "before".
+    #[test]
+    fn a_launched_program_runs_under_the_memlock_limit_from_before_the_lift() {
+        let mut now = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: a valid pointer to an rlimit this frame owns.
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut now) },
+            0
+        );
+        let before = libc::rlimit {
+            rlim_cur: 32 * 1024,
+            rlim_max: now.rlim_max,
+        };
+        if crate::bpf::MEMLOCK_BEFORE.set(before).is_err() {
+            return eprintln!("skipped: the limit from before is already set in this process");
+        }
+        let out = std::env::temp_dir().join(format!("omn-memlock-{}", std::process::id()));
+        let mut child = gated(
+            &[
+                "sh".to_owned(),
+                "-c".to_owned(),
+                format!("ulimit -l > {}", out.display()),
+            ],
+            &[],
+        )
+        .expect("fork");
+        ended_by_itself(&mut child);
+        let said = std::fs::read_to_string(&out).expect("the child wrote its limit");
+        let _ = std::fs::remove_file(&out);
+        assert_eq!(said.trim(), "32", "ulimit -l is in KiB");
     }
 
     fn ended_by_itself(child: &mut Gated) {
