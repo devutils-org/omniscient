@@ -20,6 +20,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::clock::monotonic_ns;
+use crate::collect::poll::{CounterPoll, Reading};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::request::{Mode, Target};
@@ -69,24 +70,20 @@ impl Prepared for Prepare {
     }
 }
 
-/// Throttle counts summed over the cpus being watched.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct Reading {
-    ts_ns: u64,
-    /// Per cpu, not summed. A machine-wide throttle count says a core was held
-    /// back somewhere; which core is the question, because a single core
-    /// throttling under an AVX-512 licence and a package throttling under a
-    /// thermal limit are different problems with the same total. `cpu` is also
-    /// a declared filter field here, which a sum cannot carry.
-    per_cpu: BTreeMap<u32, (u64, u64)>,
-}
+/// Core and package throttle counts, per cpu being watched.
+///
+/// Per cpu, not summed. A machine-wide throttle count says a core was held
+/// back somewhere; which core is the question, because a single core
+/// throttling under an AVX-512 licence and a package throttling under a
+/// thermal limit are different problems with the same total. `cpu` is also
+/// a declared filter field here, which a sum cannot carry.
+type Counts = Reading<u32, (u64, u64)>;
 
 pub struct Throttling {
-    #[allow(dead_code)]
     mode: Mode,
     root: PathBuf,
     cpus: Vec<u32>,
-    previous: Option<Reading>,
+    poll: CounterPoll<u32, (u64, u64)>,
     losses: Losses,
 }
 
@@ -96,7 +93,7 @@ impl Throttling {
             mode,
             root,
             cpus,
-            previous: None,
+            poll: CounterPoll::new(mode),
             losses: Losses::default(),
         }
     }
@@ -113,10 +110,10 @@ impl Throttling {
             .count()
     }
 
-    fn read(&mut self) -> Result<Reading, SampleError> {
+    fn read(&mut self) -> Result<Counts, SampleError> {
         let mut reading = Reading {
             ts_ns: 0,
-            per_cpu: BTreeMap::new(),
+            counters: BTreeMap::new(),
         };
         let mut read_any = false;
         for &cpu in &self.cpus {
@@ -138,7 +135,7 @@ impl Throttling {
                 seen = true;
             }
             if seen {
-                reading.per_cpu.insert(cpu, counts);
+                reading.counters.insert(cpu, counts);
                 read_any = true;
             }
         }
@@ -173,43 +170,53 @@ impl Collector for Throttling {
                 self.root.display()
             ));
         }
-        Ok(())
+        // The baseline: the counts it holds are from boot.
+        let mut poll = std::mem::replace(&mut self.poll, CounterPoll::new(self.mode));
+        let started = poll.start(|| self.read());
+        self.poll = poll;
+        started.map_err(|error| format!("{error:?}"))
     }
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
-        let after = self.read()?;
-        let Some(before) = self.previous.replace(after.clone()) else {
-            // The first read is a baseline: the counts it holds are from boot.
+        let mut poll = std::mem::replace(&mut self.poll, CounterPoll::new(self.mode));
+        let ticked = poll.tick(|| self.read());
+        self.poll = poll;
+        let Some(interval) = ticked? else {
             return Ok(Vec::new());
         };
-        let interval_ns = after.ts_ns.saturating_sub(before.ts_ns);
-        let mut events = Vec::new();
-        for (cpu, (core_after, package_after)) in &after.per_cpu {
-            let (core_before, package_before) = before.per_cpu.get(cpu).copied().unwrap_or((0, 0));
-            let (Some(core), Some(package)) = (
-                core_after.checked_sub(core_before),
-                package_after.checked_sub(package_before),
-            ) else {
-                self.losses.undecoded += 1;
-                self.losses.note_times(
-                    format!(
-                        "the throttle counter for cpu{cpu} went backwards, which means it went \
+        for cpu in &interval.went_back {
+            self.losses.undecoded += 1;
+            self.losses.note_times(
+                format!(
+                    "the throttle counter for cpu{cpu} went backwards, which means it went \
                      offline and came back; this interval cannot be attributed"
-                    ),
-                    1,
-                );
-                continue;
-            };
+                ),
+                1,
+            );
+        }
+        for cpu in &interval.appeared {
+            self.losses.undecoded += 1;
+            self.losses.note_times(
+                format!(
+                    "cpu{cpu}'s throttle counters appeared during the run, so its first interval \
+                     has nothing to be measured against"
+                ),
+                1,
+            );
+        }
+        let interval_ns = interval.interval_ns;
+        let mut events = Vec::new();
+        for (cpu, (core, package)) in interval.moved {
             events.push(Event {
-                ts_ns: after.ts_ns,
+                ts_ns: interval.ts_ns,
                 ts_err_ns: 0,
                 kind: "power.throttle".to_owned(),
-                keys: vec![KeyValue::cpu(*cpu)],
+                keys: vec![KeyValue::cpu(cpu)],
                 attrs: vec![
                     Attr::uint("throttles", core + package),
                     Attr::uint("core_throttles", core),
                     Attr::uint("package_throttles", package),
-                    Attr::uint("cpu", u64::from(*cpu)),
+                    Attr::uint("cpu", u64::from(cpu)),
                     Attr::uint("interval_ns", interval_ns),
                 ],
                 collector_id: CollectorId::unstamped(),
