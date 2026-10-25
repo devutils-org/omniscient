@@ -296,6 +296,19 @@ pub fn prog_load_for(
     name: &str,
     license: &str,
 ) -> Result<OwnedFd, LoadError> {
+    let portable = crate::bpf::portable(instructions);
+    prog_load_exactly(prog_type, expected_attach_type, &portable, name, license)
+}
+
+/// Loads `instructions` as they are, with no helper rewritten for an older
+/// kernel: what the probes that decide the rewrite load.
+pub fn prog_load_exactly(
+    prog_type: u32,
+    expected_attach_type: u32,
+    instructions: &[crate::bpf::insn::Insn],
+    name: &str,
+    license: &str,
+) -> Result<OwnedFd, LoadError> {
     let license = CString::new(license).expect("a license has no interior NUL");
     let mut log = vec![0u8; LOG_BYTES];
     let mut attr = ProgLoadAttr {

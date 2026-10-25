@@ -246,6 +246,85 @@ pub fn map_type_support(map: crate::need::BpfMap) -> &'static Support {
     }
 }
 
+/// Whether this kernel reads memory through the helpers before 5.5's split:
+/// `bpf_probe_read` and `bpf_probe_read_str`, where `bpf_probe_read_kernel`,
+/// `_user` and `_kernel_str` do not exist yet (Debian 10's 4.19, Ubuntu
+/// 20.04's 5.4). Asked by loading the smallest program that calls the new
+/// helper, and the old one when the new is refused; locked down, both are.
+fn reads_through_probe_read() -> bool {
+    static ANSWER: OnceLock<bool> = OnceLock::new();
+    *ANSWER.get_or_init(|| {
+        !loads_a_read(insn::helper::PROBE_READ_KERNEL) && loads_a_read(BPF_PROBE_READ)
+    })
+}
+
+/// `bpf_probe_read` and `bpf_probe_read_str`: one helper for kernel and user
+/// memory alike, before 5.5.
+const BPF_PROBE_READ: i32 = 4;
+const BPF_PROBE_READ_STR: i32 = 45;
+
+/// Whether the smallest program calling the read helper `helper` loads.
+fn loads_a_read(helper: i32) -> bool {
+    use insn::{Insn, BPF_DW, R10};
+    let probe = [
+        Insn::st_imm(BPF_DW, R10, -8, 0),
+        Insn::mov64_reg(1, R10),
+        Insn::add64_imm(1, -8),
+        Insn::mov64_imm(2, 8),
+        Insn::mov64_imm(3, 0),
+        Insn::call(helper),
+        Insn::mov64_imm(0, 0),
+        Insn::exit(),
+    ];
+    syscall::prog_load_exactly(
+        syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
+        0,
+        &probe,
+        "omn_probe_read",
+        "Dual MIT/GPL",
+    )
+    .is_ok()
+}
+
+/// A program as this kernel can load it: on a kernel before 5.5, every call
+/// of a read helper made after it ([`reads_through_probe_read`]) is the
+/// helper it replaced. The verifier holds both to the same arguments, and
+/// before 5.5 `bpf_probe_read` is what reads kernel and user memory alike.
+pub fn portable(instructions: &[insn::Insn]) -> std::borrow::Cow<'_, [insn::Insn]> {
+    if !instructions.iter().any(|insn| old_read(insn).is_some()) || !reads_through_probe_read() {
+        return std::borrow::Cow::Borrowed(instructions);
+    }
+    std::borrow::Cow::Owned(with_old_reads(instructions))
+}
+
+/// The helper before 5.5 that a call of a read helper stands for. A helper
+/// call is `BPF_JMP | BPF_CALL` with no source register; a call to a function
+/// of the program's own carries one, and its immediate is an offset.
+fn old_read(insn: &insn::Insn) -> Option<i32> {
+    use insn::helper;
+    if insn.code != 0x85 || insn.regs >> 4 != 0 {
+        return None;
+    }
+    match insn.imm {
+        helper::PROBE_READ_KERNEL | helper::PROBE_READ_USER => Some(BPF_PROBE_READ),
+        helper::PROBE_READ_KERNEL_STR => Some(BPF_PROBE_READ_STR),
+        _ => None,
+    }
+}
+
+fn with_old_reads(instructions: &[insn::Insn]) -> Vec<insn::Insn> {
+    instructions
+        .iter()
+        .map(|insn| {
+            let mut insn = *insn;
+            if let Some(old) = old_read(&insn) {
+                insn.imm = old;
+            }
+            insn
+        })
+        .collect()
+}
+
 /// Why no program may read kernel memory here, when the kernel is locked down
 /// for confidentiality: `bpf_probe_read_kernel` is then withheld, and every
 /// program that reads a struct -- nearly all of this tool's -- is rejected by
@@ -257,33 +336,19 @@ fn kernel_reads_locked_down() -> Option<&'static str> {
     static ANSWER: OnceLock<Option<String>> = OnceLock::new();
     ANSWER
         .get_or_init(|| {
-            use insn::{helper, Insn, BPF_DW, R10};
-            let probe = [
-                Insn::st_imm(BPF_DW, R10, -8, 0),
-                Insn::mov64_reg(1, R10),
-                Insn::add64_imm(1, -8),
-                Insn::mov64_imm(2, 8),
-                Insn::mov64_imm(3, 0),
-                Insn::call(helper::PROBE_READ_KERNEL),
-                Insn::mov64_imm(0, 0),
-                Insn::exit(),
-            ];
-            match syscall::prog_load(
-                syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
-                &probe,
-                "omn_probe_read",
-                "Dual MIT/GPL",
-            ) {
-                Err(error) if error.error.raw_os_error() == Some(libc::EINVAL) => Some(
-                    "the kernel withholds bpf_probe_read_kernel from eBPF programs, which is \
-                     what kernel lockdown in confidentiality mode does (`lockdown=confidentiality`, \
-                     or a distribution's Secure Boot policy), or what a kernel before 5.5 does, \
-                     which has no such helper: every program that reads a kernel struct is \
-                     rejected, and these sources all do"
-                        .to_owned(),
-                ),
-                _ => None,
+            // Before 5.5 the reads go through `bpf_probe_read`, and the
+            // programs are rewritten to it ([`portable`]).
+            if loads_a_read(insn::helper::PROBE_READ_KERNEL) || reads_through_probe_read() {
+                return None;
             }
+            Some(
+                "the kernel withholds every read helper from eBPF programs -- \
+                 bpf_probe_read_kernel and bpf_probe_read alike -- which is what kernel lockdown \
+                 in confidentiality mode does (`lockdown=confidentiality`, or a distribution's \
+                 Secure Boot policy): every program that reads a kernel struct is rejected, and \
+                 these sources all do"
+                    .to_owned(),
+            )
         })
         .as_deref()
 }
@@ -622,6 +687,41 @@ fn advice_for(action: &str, disabled: &str, withheld: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Before 5.5 every read helper is the one it replaced, and nothing else
+    /// moves: not another helper, and not a call to the program's own
+    /// function, whose immediate is an offset that may equal a helper's id.
+    #[test]
+    fn a_read_helper_is_the_old_one_and_nothing_else_moves() {
+        use insn::{helper, Insn};
+        let own_call = Insn {
+            code: 0x85,
+            regs: 1 << 4,
+            off: 0,
+            imm: helper::PROBE_READ_KERNEL,
+        };
+        let program = [
+            Insn::call(helper::PROBE_READ_KERNEL),
+            Insn::call(helper::PROBE_READ_USER),
+            Insn::call(helper::PROBE_READ_KERNEL_STR),
+            Insn::call(helper::KTIME_GET_NS),
+            own_call,
+            Insn::exit(),
+        ];
+        let old = with_old_reads(&program);
+        let imms: Vec<i32> = old.iter().map(|insn| insn.imm).collect();
+        assert_eq!(
+            imms,
+            vec![
+                BPF_PROBE_READ,
+                BPF_PROBE_READ,
+                BPF_PROBE_READ_STR,
+                helper::KTIME_GET_NS,
+                helper::PROBE_READ_KERNEL,
+                0
+            ]
+        );
+    }
 
     /// A grant already made is not advised again: where the binary carries the
     /// capabilities and this process was not given them, the advice is why,
