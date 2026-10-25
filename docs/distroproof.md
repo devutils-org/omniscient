@@ -59,6 +59,24 @@ reference pairs -- Omniscient against `perf`, `bpftrace`, `strace`, the bcc
 tools, on the same workload, within a declared tolerance -- on six
 distributions with the witnesses their own packages carry.
 
+## After the twenty-sixth wave's follow-up (2026-10-26)
+
+Swept target by target as each change landed, release archives of
+`claude/w26`, the judges of `cargo test --test portability` green after
+each:
+
+| Cell | Before | After | What moved it |
+|---|---|---|---|
+| `ubuntu-22.04`, `ubuntu-24.04`, `rocky-9` | 86, 94, 91 | 87, 95, 92 | `io.fsync` through `bpf:fentry:syscall`: these kernels inlined `do_fsync` and `vfs_fsync` into the syscalls. Under `distroproof run`, 25 fsyncs and 10 fdatasyncs were 35 events on the file, on all three |
+| `debian-10-root` | 57 | 58 | `RLIMIT_MEMLOCK` raised where the kernel charges maps to it (before 5.11 no capability exempts a map, root's included), and the read helpers loaded as `bpf_probe_read` before 5.5 |
+| `ubuntu-20.04-root` | 60 | 64 | the same |
+| `debian-10`, `ubuntu-20.04`, `debian-12`, `fedora-latest-lockdown`, `rocky-8-root` | 40, 43, 77, 60, 87 | the same | controls: lockdown still refuses both read helpers, with its reason |
+
+What still stands between the two old root cells and the rest is
+structural: no kernel BTF, no BPF ring buffer (5.8), and tracepoints these
+kernels do not define. A perf-event-array transport would be the next step,
+not a probe.
+
 ## After the twenty-sixth wave
 
 Swept on 2026-10-22 with `claude/w26` at `2c15697` (release archives, both

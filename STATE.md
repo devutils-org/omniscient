@@ -316,15 +316,22 @@ the eighteen and twenty-six collectors moved onto `UserFilter` and
    sets the frequency; here `amd-pstate-epp` lets the hardware choose),
    `power.throttle` through the thermal tracepoints (a cpu with a thermal
    zone), and the hardware the user chose to wait for (`DECISIONS.md`).
-2. **Root on a kernel without BTF**: the `bpf:tp` rows. Each is another
-   program where the tracepoint's arguments are pointers; the syscall ones
-   can go through `bpf::context::Syscall`. The matrix's three root cells on
-   old kernels are where they would be shown.
-3. **Kernels without fentry**: the `bpf:kprobe` rows (`io.fsync`, `io.fs`,
-   `net.socket`, `net.tcp.connect`, `sched.lock`). The fentry programs read
-   through typed pointers, which a kprobe cannot: each is a program that
-   reads through `bpf_probe_read_kernel`, and Rocky 8, Alpine and Ubuntu
-   22.04 are the cells that would show them.
+2. **Root on a kernel without BTF**: the cheap walls are down
+   (2026-10-26, `docs/distroproof.md`, "follow-up"): `RLIMIT_MEMLOCK` is
+   raised where the kernel charges maps to it, and the read helpers load as
+   `bpf_probe_read` before 5.5 -- Debian 10 root 57 to 58, Ubuntu 20.04 root
+   60 to 64. What is left there is no BTF, no ring buffer and tracepoints
+   these kernels lack: a perf-event-array transport, a wave of its own.
+3. **The `bpf:kprobe` rows**: the sweep says where they would serve.
+   `io.fsync` was refused on five cells only because the compiler inlined
+   `do_fsync` and `vfs_fsync`; a kprobe would not have reached them either,
+   and `bpf:fentry:syscall` now serves it there (Ubuntu 22.04 and 24.04,
+   Rocky 9, shown under `distroproof run`). Rocky 8 has trampolines (RHEL's
+   backport). What a kprobe alone would serve: Alpine, built without ftrace
+   (`io.fs`, `io.fsync`, `net.socket`), and `sched.lock` on Rocky 8 and
+   Ubuntu 22.04, which have no contention tracepoints -- a kprobe flavour of
+   the timed-pair programs (the fill at entry, a wider pending value, reads
+   through `bpf_probe_read`), for one cell and one source.
 4. **The pollers' move onto `collect::poll`**: ten moved on 2026-10-25
    (`docs/fixes/w26-poller.md`, "Phase 1"); seven keep their own `previous`
    reading, each with its reason there. Twelve eBPF collectors that count
