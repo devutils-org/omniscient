@@ -36,6 +36,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::clock::monotonic_ns;
+use crate::collect::poll::{CounterPoll, Reading};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, AttrValue, CollectorId, Event, KeyValue};
 use crate::request::{Mode, Target};
@@ -144,7 +145,6 @@ impl Prepared for Prepare {
 }
 
 pub struct Frequencies {
-    #[allow(dead_code)]
     mode: Mode,
     root: PathBuf,
     cpus: Vec<u32>,
@@ -154,8 +154,8 @@ pub struct Frequencies {
     driver: String,
     /// Where each cpu's time is accounted, `/proc/stat` outside the tests.
     stat: PathBuf,
-    /// The previous read: each event covers the interval since it.
-    previous: Option<(u64, BTreeMap<u32, sysfs::CpuTime>)>,
+    /// Each cpu's time: each event covers the interval since the last read.
+    poll: CounterPoll<u32, sysfs::CpuTime>,
     /// Per cpu, the setpoints its driver declares, in kHz, by file.
     setpoints: BTreeMap<u32, Vec<(&'static str, u64)>>,
     losses: Losses,
@@ -170,7 +170,7 @@ impl Frequencies {
             source: None,
             driver: "unknown".to_owned(),
             stat: PathBuf::from(PROC_STAT),
-            previous: None,
+            poll: CounterPoll::new(mode),
             setpoints: BTreeMap::new(),
             losses: Losses::default(),
         }
@@ -196,6 +196,23 @@ impl Frequencies {
 
     fn cpufreq(&self, cpu: u32) -> PathBuf {
         self.root.join(format!("cpu{cpu}")).join("cpufreq")
+    }
+
+    /// Every cpu's time, and when it was read. A `/proc/stat` that cannot be
+    /// read is a reading of no cpu: the frequencies are still reported, and
+    /// the shares are said to be missing.
+    fn times(&mut self) -> Result<Reading<u32, sysfs::CpuTime>, SampleError> {
+        let ts_ns = monotonic_ns();
+        let counters = match sysfs::cpu_times(&self.stat) {
+            Ok(times) => times,
+            Err(error) => {
+                self.losses.failed_reads += 1;
+                self.losses
+                    .note(format!("the busy and idle shares are missing: {error}"));
+                BTreeMap::new()
+            }
+        };
+        Ok(Reading { ts_ns, counters })
     }
 }
 
@@ -232,7 +249,12 @@ impl Collector for Frequencies {
             }
         }
         match self.source {
-            Some(_) => Ok(()),
+            Some(_) => {
+                let mut poll = std::mem::replace(&mut self.poll, CounterPoll::new(self.mode));
+                let started = poll.start(|| self.times());
+                self.poll = poll;
+                started.map_err(|error| format!("{error:?}"))
+            }
             None => Err(format!(
                 "none of {} is readable under {}",
                 Source::ORDER
@@ -262,25 +284,18 @@ impl Collector for Frequencies {
                 "no cpu's frequency could be read any more".to_owned(),
             ));
         }
-        let ts_ns = monotonic_ns();
-        let times = match sysfs::cpu_times(&self.stat) {
-            Ok(times) => times,
-            Err(error) => {
-                self.losses.failed_reads += 1;
-                self.losses
-                    .note(format!("the busy and idle shares are missing: {error}"));
-                BTreeMap::new()
-            }
-        };
-
         // The read at window open describes the machine before the run: before
         // a program launched beside it started, before the load it was asked
-        // about. It is the baseline the first interval is measured from, and
-        // nothing else.
-        let Some((before_ns, before)) = self.previous.replace((ts_ns, times.clone())) else {
+        // about. It opens the window (`collect::poll`), and nothing else.
+        let mut poll = std::mem::replace(&mut self.poll, CounterPoll::new(self.mode));
+        let ticked = poll.tick(|| self.times());
+        self.poll = poll;
+        let Some(interval) = ticked? else {
             return Ok(Vec::new());
         };
-        let interval_ns = ts_ns.saturating_sub(before_ns);
+        let ts_ns = interval.ts_ns;
+        let interval_ns = interval.interval_ns;
+        let moved: BTreeMap<u32, sysfs::CpuTime> = interval.moved.into_iter().collect();
 
         let float = |name: &str, value: f64| Attr {
             name: name.to_owned(),
@@ -325,10 +340,7 @@ impl Collector for Frequencies {
                     Attr::text("measures", measures),
                     Attr::uint("interval_ns", interval_ns),
                 ];
-                let shares = times
-                    .get(&cpu)
-                    .zip(before.get(&cpu))
-                    .and_then(|(after, before)| after.shares_since(*before));
+                let shares = moved.get(&cpu).and_then(|time| time.shares());
                 if let Some((busy, idle)) = shares {
                     attrs.push(float("busy", busy));
                     attrs.push(float("idle", idle));

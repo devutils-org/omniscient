@@ -7,6 +7,7 @@
 //! is the resolver's rule, and a collector that collapsed the two at read time
 //! would undo it at the last moment.
 
+use crate::collect::poll::Cumulative;
 use std::path::{Path, PathBuf};
 
 /// Why a sysfs read did not produce a number.
@@ -147,17 +148,28 @@ pub struct CpuTime {
 }
 
 impl CpuTime {
-    /// The share of the interval since `before` this cpu spent busy and idle,
-    /// or nothing when no jiffy passed -- an interval shorter than one tick
-    /// has no share to give, and zero would read as an idle cpu.
-    pub fn shares_since(self, before: CpuTime) -> Option<(f64, f64)> {
-        let busy = self.busy.checked_sub(before.busy)?;
-        let idle = self.idle.checked_sub(before.idle)?;
-        let total = busy + idle;
+    /// The share of an interval -- an increase, `since` an earlier reading --
+    /// this cpu spent busy and idle, or nothing when no jiffy passed: an
+    /// interval shorter than one tick has no share to give, and zero would
+    /// read as an idle cpu.
+    pub fn shares(self) -> Option<(f64, f64)> {
+        let total = self.busy + self.idle;
         if total == 0 {
             return None;
         }
-        Some((busy as f64 / total as f64, idle as f64 / total as f64))
+        Some((
+            self.busy as f64 / total as f64,
+            self.idle as f64 / total as f64,
+        ))
+    }
+}
+
+impl Cumulative for CpuTime {
+    fn since(&self, earlier: &Self) -> Option<Self> {
+        Some(CpuTime {
+            busy: self.busy.checked_sub(earlier.busy)?,
+            idle: self.idle.checked_sub(earlier.idle)?,
+        })
     }
 }
 
@@ -280,10 +292,11 @@ mod tests {
         assert_eq!(times[&0], CpuTime { busy: 27, idle: 45 });
         assert_eq!(times[&3], CpuTime { busy: 0, idle: 10 });
         let (busy, idle) = CpuTime { busy: 37, idle: 75 }
-            .shares_since(times[&0])
+            .since(&times[&0])
+            .and_then(CpuTime::shares)
             .expect("jiffies passed");
         assert!((busy - 0.25).abs() < 1e-12 && (idle - 0.75).abs() < 1e-12);
-        assert_eq!(times[&0].shares_since(times[&0]), None);
+        assert_eq!(times[&0].since(&times[&0]).and_then(CpuTime::shares), None);
         std::fs::remove_dir_all(&root).ok();
     }
 
