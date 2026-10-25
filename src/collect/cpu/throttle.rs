@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration as StdDuration;
 
 use crate::clock::monotonic_ns;
+use crate::collect::poll::{CounterPoll, Cumulative, Reading};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::request::{Mode, Target};
@@ -61,6 +62,16 @@ impl Throttling {
             periods: *fields.get("nr_periods")?,
             throttled: *fields.get("nr_throttled")?,
             throttled_us: *fields.get("throttled_usec")?,
+        })
+    }
+}
+
+impl Cumulative for Throttling {
+    fn since(&self, earlier: &Self) -> Option<Self> {
+        Some(Throttling {
+            periods: self.periods.checked_sub(earlier.periods)?,
+            throttled: self.throttled.checked_sub(earlier.throttled)?,
+            throttled_us: self.throttled_us.checked_sub(earlier.throttled_us)?,
         })
     }
 }
@@ -125,7 +136,7 @@ impl Prepared for Prepare {
 pub struct ThrottleCollector {
     directory: PathBuf,
     mode: Mode,
-    previous: Option<Throttling>,
+    poll: CounterPoll<(), Throttling>,
     losses: Losses,
     notes: Vec<String>,
 }
@@ -135,7 +146,7 @@ impl ThrottleCollector {
         Self {
             directory,
             mode,
-            previous: None,
+            poll: CounterPoll::new(mode),
             losses: Losses::default(),
             notes: Vec::new(),
         }
@@ -154,44 +165,24 @@ impl ThrottleCollector {
         })?;
         Ok(Throttling::parse(&text))
     }
-}
 
-impl Collector for ThrottleCollector {
-    fn value_attr(&self) -> &'static str {
-        "throttled_ns"
+    /// The counters as a reading: none at all where the cgroup has no
+    /// controller, which is no interval rather than a zero.
+    fn reading(&self) -> Result<Reading<(), Throttling>, SampleError> {
+        let counters = self.read()?.map(|now| ((), now)).into_iter().collect();
+        Ok(Reading {
+            ts_ns: monotonic_ns(),
+            counters,
+        })
     }
 
-    fn start(&mut self) -> Result<(), String> {
-        let baseline = self.read().map_err(|error| format!("{error:?}"))?;
-        if let Some(note) = cannot_be_throttled(&self.directory, baseline.is_some()) {
-            self.notes.push(note);
-        }
-        // A snapshot of these counters is a statement about the cgroup's whole
-        // life, which is the only thing a single read can honestly be.
-        if self.mode == Mode::Snapshot {
-            return Ok(());
-        }
-        self.previous = baseline;
-        Ok(())
-    }
-
-    fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
-        let Some(now) = self.read()? else {
-            // No quota, so nothing to report. Said once, in `start`, rather
-            // than counted as a failure on every tick.
-            return Ok(Vec::new());
-        };
-        let ts_ns = monotonic_ns();
-        let (window, previous) = match self.previous.replace(now) {
-            Some(previous) => ("since the previous read", previous),
-            None => ("since the cgroup was created", Throttling::default()),
-        };
-
-        let throttled_us = now.throttled_us.saturating_sub(previous.throttled_us);
-        let periods = now.periods.saturating_sub(previous.periods);
-        let throttled = now.throttled.saturating_sub(previous.throttled);
-
-        Ok(vec![Event {
+    fn event(&self, ts_ns: u64, moved: Throttling, window: &str, seq: u64) -> Event {
+        let Throttling {
+            periods,
+            throttled,
+            throttled_us,
+        } = moved;
+        Event {
             ts_ns,
             ts_err_ns: 0,
             kind: "cpu.throttle".to_owned(),
@@ -217,7 +208,79 @@ impl Collector for ThrottleCollector {
             ],
             collector_id: CollectorId::unstamped(),
             seq,
-        }])
+        }
+    }
+}
+
+impl Collector for ThrottleCollector {
+    fn value_attr(&self) -> &'static str {
+        "throttled_ns"
+    }
+
+    fn start(&mut self) -> Result<(), String> {
+        let baseline = self.read().map_err(|error| format!("{error:?}"))?;
+        if let Some(note) = cannot_be_throttled(&self.directory, baseline.is_some()) {
+            self.notes.push(note);
+        }
+        // A snapshot of these counters is a statement about the cgroup's whole
+        // life, which is the only thing a single read can honestly be.
+        if self.mode == Mode::Snapshot {
+            return Ok(());
+        }
+        // The baseline, before the program is released; the first tick opens
+        // the window (`collect::poll`).
+        let mut poll = std::mem::replace(&mut self.poll, CounterPoll::new(self.mode));
+        let started = poll.start(|| self.reading());
+        self.poll = poll;
+        started.map_err(|error| format!("{error:?}"))
+    }
+
+    fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
+        if self.mode == Mode::Snapshot {
+            // No quota, so nothing to report. Said once, in `start`, rather
+            // than counted as a failure on every tick.
+            let Some(now) = self.read()? else {
+                return Ok(Vec::new());
+            };
+            return Ok(vec![self.event(
+                monotonic_ns(),
+                now,
+                "since the cgroup was created",
+                seq,
+            )]);
+        }
+        let mut poll = std::mem::replace(&mut self.poll, CounterPoll::new(self.mode));
+        let ticked = poll.tick(|| self.reading());
+        self.poll = poll;
+        let Some(interval) = ticked? else {
+            return Ok(Vec::new());
+        };
+        if !interval.went_back.is_empty() {
+            self.losses.undecoded += 1;
+            self.losses.note_times(
+                "the cgroup's throttling counters went backwards, so this interval cannot be \
+                 attributed"
+                    .to_owned(),
+                1,
+            );
+            return Ok(Vec::new());
+        }
+        // The controller was enabled since the last read: its counters start
+        // with it, and all of what they hold is the cgroup's since.
+        if !interval.appeared.is_empty() {
+            let now = interval.after.counters[&()];
+            return Ok(vec![self.event(
+                interval.ts_ns,
+                now,
+                "since the cgroup was created",
+                seq,
+            )]);
+        }
+        Ok(interval
+            .moved
+            .into_iter()
+            .map(|((), moved)| self.event(interval.ts_ns, moved, "since the previous read", seq))
+            .collect())
     }
 
     fn tick(&self) -> Option<StdDuration> {
@@ -311,11 +374,14 @@ mod tests {
         cgroup.write("usage_usec 10\nnr_periods 100\nnr_throttled 40\nthrottled_usec 4000\n");
         let mut collector = cgroup.collector(POLL);
         collector.start().expect("cpu.stat is readable");
+        // The runner's first tick opens the window (`collect::poll`); the
+        // baseline from `start` is younger than an interval, so it is kept.
+        assert!(collector.sample(0).expect("the opening tick").is_empty());
 
         // Ten periods later, three of them cut short, for 900 ms of stopped
         // time between them.
         cgroup.write("usage_usec 20\nnr_periods 110\nnr_throttled 43\nthrottled_usec 904000\n");
-        let events = collector.sample(0).expect("a second read");
+        let events = collector.sample(1).expect("a second read");
 
         let event = &events[0];
         // Microseconds in the file, nanoseconds in the event, because the
@@ -394,7 +460,10 @@ mod tests {
         std::fs::write(cgroup.0.join("cpu.max"), "max 100000\n").expect("cpu.max");
         let mut collector = cgroup.collector(POLL);
         collector.start().expect("cpu.stat is readable");
-        let events = collector.sample(0).expect("a read");
+        // The runner's first tick opens the window (`collect::poll`); the
+        // baseline from `start` is younger than an interval, so it is kept.
+        assert!(collector.sample(0).expect("the opening tick").is_empty());
+        let events = collector.sample(1).expect("a read");
         assert_eq!(
             events.len(),
             1,
@@ -501,9 +570,12 @@ mod tests {
             },
         );
         collector.start().expect("cpu.stat is readable");
+        // The runner's first tick opens the window (`collect::poll`); the
+        // baseline from `start` is younger than an interval, so it is kept.
+        assert!(collector.sample(0).expect("the opening tick").is_empty());
         // Three periods, so there is something to have been stopped during.
         std::thread::sleep(StdDuration::from_millis(400));
-        let events = collector.sample(0).expect("a second read");
+        let events = collector.sample(1).expect("a second read");
         let _ = child.kill();
         let _ = child.wait();
 
