@@ -41,7 +41,10 @@
   workload: [python3, tests/reference/workloads/bpftrace/act.py, vfsread, "20000"]
   # One run both count: held stopped until strace and omn are attached to its
   # pid. Alternate runs differed by the interpreter's own startup reads, a
-  # few, and Rocky 8's Python 3.6 by five against three allowed (2026-10-21).
+  # few. Rocky 8's five were the exec's: before 5.9 `kernel_read` calls
+  # `vfs_read`, and the held shell's exec of python reads the ELF header, the
+  # program headers and the interpreter's through it -- five `vfs_read` that
+  # are no read(2) (bpftrace's kernel stacks, 2026-10-26).
   run: attach
   settle_ms: 1500
   omn: [trace, io.vfs, --pid, "{pid}", -d, 30s, -m, count, -k, op, -e, summary, --format, json, -o, "{out}"]
@@ -56,12 +59,14 @@
   compare:
     key: total.calls
     omn: results[source=io.vfs].outputs[emit=summary].series[key=op:vfs_read].total
-    tolerance: {abs: 3}
+    tolerance: {abs: 5}
     why: "one run: 20000 pread64 of one byte and python3's own reads at
       startup, both attached before the program's first instruction. read(2)
       and pread64(2) each call vfs_read once, so strace's total of the two is
       omn's vfs_read count of the program: 20191 against 20191 in alternate
-      runs before. A read refused before it reaches the VFS (a bad
+      runs before. A kernel before 5.9 adds the exec's five: its kernel_read
+      is vfs_read, and the exec reads the ELF and its interpreter through it,
+      on omn's side alone. A read refused before it reaches the VFS (a bad
       descriptor) would be on strace's side alone; the workload makes none"
 
 - id: strace-c-latency

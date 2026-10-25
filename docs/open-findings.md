@@ -14559,3 +14559,22 @@ move inside the window), `scenario_net::two_mechanisms_measuring_one_wire_agree_
 (25 drops reported). And `collect::mem::footprint::the_rollup_agrees_with_the_per_mapping_walk`,
 once in a `--lib collect::` run: the test process's own mappings move while
 its sibling tests allocate.
+
+### Rocky 8's three open pairs, read (2026-10-26)
+
+Under `distroproof run`, on rocky-8 with its own perf 4.18, strace and
+bpftrace:
+
+- `perfsched/strace-c-vfs-read` is explained and the pair corrected
+  (`abs: 5`, with why): before 5.9 `kernel_read` calls `vfs_read`, and the
+  exec of the held shell into python reads through it five times --
+  `search_binary_handler`, `load_elf_binary` twice, `load_elf_phdrs` twice,
+  bpftrace's kernel stacks on the child's pid. They are `vfs_read` calls and
+  no read(2): on omn's side alone, and the count is right.
+- `perfrecord/hot-functions` and `stripped-library` do not reproduce by
+  hand: `perf record -q -F 997 -p PID` exits 0 as root and as an ordinary
+  user (paranoid 2), stopped by a duration and by the target's own exit
+  after a `kill -STOP $$; exec` like the runner's, and `perf report` reads
+  the file (hot_beta 49 %, hot_gamma 29-31 %, hot_alpha 19-22 %). What is left
+  is the chain's environment: the perf the witnesses install (xpac, DNF4),
+  or its build-id cache under the runner's user. Still open.
