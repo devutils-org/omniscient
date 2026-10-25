@@ -244,7 +244,29 @@ pub(crate) fn span(ns: u64) -> String {
 /// asked. A tool that reports what a program spends and never its own price
 /// is asking to be trusted about the one number it never shows.
 pub(crate) fn report_costs(costs: &[MeasuredCost], run: &encode::RunOutput) {
-    report_budgets(costs);
+    report_costs_display(costs, run, true);
+}
+
+/// A live view returns a compact summary unless details were requested.
+/// Budget stops and process-lifetime warnings remain visible in both modes.
+pub(crate) fn report_costs_display(costs: &[MeasuredCost], run: &encode::RunOutput, details: bool) {
+    if details {
+        report_budgets(costs);
+    } else {
+        eprint!("{}", cost_summary(costs));
+        let mut said = Vec::new();
+        for cost in costs {
+            if let Some(stop) = cost.stop() {
+                if !said.contains(&stop) {
+                    eprintln!("budget: {stop}");
+                    said.push(stop);
+                }
+            }
+            if let Some(verdict) = cost.verdict() {
+                eprintln!("budget: {verdict}");
+            }
+        }
+    }
     // Every collection carries the one program's lifetime; said once.
     let left = run
         .results
@@ -275,6 +297,44 @@ pub(crate) fn report_costs(costs: &[MeasuredCost], run: &encode::RunOutput) {
     if let Some(comparison) = compare_backends(costs, &run.results) {
         eprint!("{comparison}");
     }
+}
+
+/// Rank attributed tool CPU only: summing collector percentages would mix
+/// windows and denominators, and cannot measure whole-program slowdown.
+pub(crate) fn cost_summary(costs: &[MeasuredCost]) -> String {
+    use std::fmt::Write;
+    let mut out = format!("\nCOLLECTION COST / {} collectors\n", costs.len());
+    let mut ranked: Vec<_> = costs.iter().collect();
+    ranked.sort_by_key(|cost| std::cmp::Reverse(cost.overhead.attributed_cpu_ns));
+    let _ = writeln!(
+        out,
+        "  {:<26} {:>12} {:>12}",
+        "Largest tool CPU shares", "CPU time", "% target CPU"
+    );
+    for cost in ranked.into_iter().take(3) {
+        let share = cost
+            .own_percent
+            .map_or_else(|| "unknown".to_owned(), |v| format!("{v:.2}%"));
+        let _ = writeln!(
+            out,
+            "  {:<26} {:>12} {:>12}",
+            cost.source,
+            span(cost.overhead.attributed_cpu_ns),
+            share
+        );
+    }
+    let unknown = costs
+        .iter()
+        .filter(|cost| !cost.overhead.in_target_known())
+        .count();
+    if unknown > 0 {
+        let _ = writeln!(out, "  In-target cost unmeasured for {unknown} collectors; these shares are not total slowdown.");
+    }
+    let _ = writeln!(
+        out,
+        "  Full diagnostics: --cost-details; saved in cost.json with --out."
+    );
+    out
 }
 
 /// Each collection's cost and verdict, and the budget's stop on a line of its

@@ -626,14 +626,20 @@ pub(crate) fn top_live(catalog: &Catalog, args: &TopArgs) -> anyhow::Result<Exit
         }
     }
 
-    report_costs(&costs, &run);
+    report_costs_display(&costs, &run, args.cost_details);
     if let Some((drawing, handover)) = view_spent {
-        eprintln!(
-            "the view: {} of cpu drawing and {} handing the events over, taken out of every \
-             collector's figure above",
-            span(drawing),
-            span(handover)
-        );
+        if args.cost_details {
+            eprintln!(
+                "the view: {} of cpu drawing and {} handing the events over, taken out of every collector's figure above",
+                span(drawing), span(handover)
+            );
+        } else {
+            eprintln!(
+                "  View CPU: {} drawing / {} event handover (excluded above).",
+                span(drawing),
+                span(handover)
+            );
+        }
     }
     for refusal in &refused {
         eprintln!(
@@ -649,9 +655,7 @@ pub(crate) fn top_live(catalog: &Catalog, args: &TopArgs) -> anyhow::Result<Exit
             serde_json::to_string_pretty(&beside)?,
         )?;
         eprintln!(
-            "\nwrote results, the resolved requests, what they cost and the view's {} to {}: \
-             `omn top --replay {}` draws it again",
-            omn_view::model::BESIDE,
+            "\nSaved: {}\nReplay: omn top --replay {}",
             directory.display(),
             directory.display()
         );

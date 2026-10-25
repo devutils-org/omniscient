@@ -302,3 +302,53 @@ fn a_live_run_with_no_terminal_is_refused_at_once() {
     assert_eq!(output.status.code(), Some(EXIT_REJECTED), "{stderr}");
     assert!(stderr.contains("--headless"), "{stderr}");
 }
+
+/// Normal exit stays concise without discarding the recorded diagnostics.
+#[test]
+fn live_cost_summary_is_short_and_details_are_opt_in() {
+    let root = scratch("cost-summary");
+    std::fs::create_dir_all(&root).unwrap();
+    let session = root.join("session.json");
+    std::fs::write(
+        &session,
+        serde_json::json!({
+            "requests": [{"source": "mem.rss", "target": {"launch": ["sleep", "0.2"]},
+                          "mode": "poll@100ms", "emit": ["summary"]}]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    for details in [false, true] {
+        let out = root.join(if details { "details" } else { "summary" });
+        let mut args = vec![
+            "top",
+            "--headless",
+            "-d",
+            "2s",
+            "-f",
+            session.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ];
+        if details {
+            args.push("--cost-details");
+        }
+        let result = run(&args);
+        let stderr = text(&result.stderr);
+        assert!(result.status.success(), "{stderr}");
+        if details {
+            assert!(stderr.contains("cost: mem.rss"), "{stderr}");
+        } else {
+            assert!(
+                stderr.contains("COLLECTION COST / 1 collectors"),
+                "{stderr}"
+            );
+            assert!(!stderr.contains("cost: mem.rss"), "{stderr}");
+            assert!(!stderr.contains("What it spent inside"), "{stderr}");
+        }
+        let costs: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(out.join("cost.json")).unwrap()).unwrap();
+        assert!(costs.to_string().contains("attributed_cpu_ns"), "{costs}");
+    }
+    let _ = std::fs::remove_dir_all(root);
+}

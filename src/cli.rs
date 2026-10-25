@@ -1279,6 +1279,12 @@ mod tests {
 #[derive(Debug, Args)]
 #[command(group(clap::ArgGroup::new("top_target").multiple(false)))]
 pub struct TopArgs {
+    /// Print full per-collector cost diagnostics after the live view exits.
+    /// By default only a short cost summary is printed; --out always keeps
+    /// the full measurements in cost.json.
+    #[arg(long)]
+    pub cost_details: bool,
+
     /// Draw a recorded run instead of a live one: a `results.json`, a flight
     /// recorder's `trigger-<n>.json`, or a directory holding either.
     #[arg(long, value_name = "RUN", conflicts_with_all = ["gallery", "file", "top_target"])]

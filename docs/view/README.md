@@ -45,6 +45,13 @@ CI, `nohup`, `setsid` -- `omn top` is refused at once, saying to use
 `--headless -o DIR` and `--replay DIR`. A session file's own durations hold
 unless `--duration` is given.
 
+On exit, a live view prints a short collection-cost table (the three largest
+attributed tool CPU shares). `--cost-details` prints the full per-collector
+diagnostics instead. These shares do not measure total program slowdown: work
+inside the target may be unmeasured. Budget and process-lifetime warnings stay
+visible in either mode. With `--out`, full measurements are always kept in
+`cost.json` beside `results.json` and `view.json`.
+
 ## What the frame is
 
 | Part | Where | What |
