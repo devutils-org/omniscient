@@ -14,6 +14,7 @@
 use std::collections::BTreeMap;
 
 use crate::clock::monotonic_ns;
+use crate::collect::poll::{CounterPoll, Cumulative, Interval, Reading};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::request::{Mode, Target};
@@ -120,9 +121,8 @@ impl Prepared for Prepare {
             }
         };
         Ok(Box::new(InterruptsCollector {
-            counting: self.0 == Mode::Count,
+            poll: CounterPoll::new(self.0),
             cpus,
-            previous: None,
             losses: Losses::default(),
             wraps: 0,
         }))
@@ -130,10 +130,8 @@ impl Prepared for Prepare {
 }
 
 pub struct InterruptsCollector {
-    counting: bool,
+    poll: CounterPoll<(Line, u32), Count>,
     cpus: Option<Vec<u32>>,
-    /// The last read and when it was taken.
-    previous: Option<(u64, Counts)>,
     losses: Losses,
     /// Per-cpu counters that wrapped past 2^32 in a window, and were counted
     /// across the wrap.
@@ -168,24 +166,55 @@ enum Moved {
     Reset,
 }
 
+/// One per-cpu counter, or -- `since` an earlier reading -- how far it moved,
+/// and how.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Count {
+    value: u64,
+    how: Moved,
+}
+
+impl Cumulative for Count {
+    /// Never `None`: a wrap is counted across, and a reset counts from it.
+    fn since(&self, earlier: &Self) -> Option<Self> {
+        let (value, how) = moved(earlier.value, self.value);
+        Some(Count { value, how })
+    }
+}
+
+/// Both files, read now, as counters.
+fn reading() -> Result<Reading<(Line, u32), Count>, SampleError> {
+    let counts = read()?;
+    Ok(Reading {
+        ts_ns: monotonic_ns(),
+        counters: counts
+            .into_iter()
+            .map(|(key, value)| {
+                let how = Moved::Forward;
+                (key, Count { value, how })
+            })
+            .collect(),
+    })
+}
+
 impl InterruptsCollector {
-    /// The events for what moved between the previous read and `now`.
-    fn window(&mut self, now: Counts, ts_ns: u64, seq: u64) -> Vec<Event> {
-        let Some((opened_ns, before)) = self.previous.replace((ts_ns, now.clone())) else {
-            return Vec::new();
-        };
-        let window_ns = ts_ns.saturating_sub(opened_ns);
+    /// The events for what moved over one interval.
+    fn window(&mut self, interval: Interval<(Line, u32), Count>, seq: u64) -> Vec<Event> {
+        let opened_ns = interval.ts_ns.saturating_sub(interval.interval_ns);
+        let window_ns = interval.interval_ns;
+        // A line that appeared in the window (a device bound) counts from
+        // zero.
+        let mut rows: BTreeMap<(Line, u32), Count> = interval.moved.into_iter().collect();
+        for key in interval.appeared {
+            let count = interval.after.counters[&key];
+            rows.insert(key, count);
+        }
         let mut events = Vec::new();
-        for ((line, cpu), value) in &now {
+        for ((line, cpu), Count { value: moved, how }) in &rows {
             if self.cpus.as_ref().is_some_and(|cpus| !cpus.contains(cpu)) {
                 continue;
             }
-            // A line that appeared in the window (a device bound) counts
-            // from zero.
-            let (moved, how) = moved(
-                before.get(&(line.clone(), *cpu)).copied().unwrap_or(0),
-                *value,
-            );
+            let moved = *moved;
             match how {
                 Moved::Forward => {}
                 Moved::Wrapped => self.wraps += 1,
@@ -232,32 +261,28 @@ impl Collector for InterruptsCollector {
         "count"
     }
 
+    /// The baseline. A poll's first tick, which the runner takes as the
+    /// window opens, opens its window rather than reporting the few
+    /// milliseconds since this (`collect::poll`; the leading event
+    /// `docs/fixes/w22-sysstat.md`, defect 2, found on `cpu.util`).
     fn start(&mut self) -> Result<(), String> {
-        let counts = read().map_err(|error| format!("{error:?}"))?;
-        // A poll's first interval opens at its first read, which the runner
-        // takes as the window opens: a baseline from here would make the
-        // first event the few milliseconds between the two, the leading
-        // event `docs/fixes/w22-sysstat.md` (defect 2) found on `cpu.util`.
-        if self.counting {
-            self.previous = Some((monotonic_ns(), counts));
-        }
-        Ok(())
+        self.poll
+            .start(reading)
+            .map_err(|error| format!("{error:?}"))
     }
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
-        if self.counting {
-            return Ok(Vec::new());
-        }
-        let counts = read()?;
-        Ok(self.window(counts, monotonic_ns(), seq))
+        Ok(self
+            .poll
+            .tick(reading)?
+            .map(|interval| self.window(interval, seq))
+            .unwrap_or_default())
     }
 
     fn stop(&mut self) -> Vec<Event> {
-        if !self.counting {
-            return Vec::new();
-        }
-        match read() {
-            Ok(counts) => self.window(counts, monotonic_ns(), 0),
+        match self.poll.stop(reading) {
+            Ok(Some(total)) => self.window(total, 0),
+            Ok(None) => Vec::new(),
             Err(error) => {
                 self.losses.failed_reads += 1;
                 self.losses.note_times(
@@ -310,6 +335,49 @@ mod tests {
        TIMER:      30639      10518
 ";
 
+    /// The interval between two sets of counts, as a counted run measures it.
+    fn between(before: (u64, Counts), after: (u64, Counts)) -> Interval<(Line, u32), Count> {
+        let reading = |(ts_ns, counts): (u64, Counts)| Reading {
+            ts_ns,
+            counters: counts
+                .into_iter()
+                .map(|(key, value)| {
+                    let how = Moved::Forward;
+                    (key, Count { value, how })
+                })
+                .collect(),
+        };
+        let mut poll = CounterPoll::new(Mode::Count);
+        poll.start(|| Ok(reading(before))).unwrap();
+        poll.stop(|| Ok(reading(after)))
+            .unwrap()
+            .expect("an interval")
+    }
+
+    #[test]
+    fn a_line_that_appeared_counts_from_zero() {
+        let line = |label: &str| Line {
+            soft: false,
+            label: label.to_owned(),
+            name: label.to_owned(),
+        };
+        let mut collector = InterruptsCollector {
+            poll: CounterPoll::new(Mode::Count),
+            cpus: None,
+            losses: Losses::default(),
+            wraps: 0,
+        };
+        let events = collector.window(
+            between(
+                (0, [((line("LOC"), 0), 10)].into()),
+                (1_000, [((line("LOC"), 0), 15), ((line("70"), 0), 3)].into()),
+            ),
+            0,
+        );
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert!(collector.losses().is_clean());
+    }
+
     #[test]
     fn both_files_parse_into_rows_per_cpu() {
         let mut counts = Counts::new();
@@ -332,16 +400,15 @@ mod tests {
         let mut before = Counts::new();
         parse(HARD_TEXT, false, &mut before);
         let mut collector = InterruptsCollector {
-            counting: false,
+            poll: CounterPoll::new(Mode::Count),
             cpus: Some(vec![1]),
-            previous: Some((1_000, before)),
             losses: Losses::default(),
             wraps: 0,
         };
         let later = HARD_TEXT.replace("482318     452034", "482318     452134");
         let mut after = Counts::new();
         parse(&later, false, &mut after);
-        let events = collector.window(after, 3_000, 0);
+        let events = collector.window(between((1_000, before), (3_000, after)), 0);
         assert_eq!(events.len(), 1, "{events:?}");
         assert_eq!(
             events[0].attr("count").and_then(|v| v.as_f64()),
@@ -377,13 +444,18 @@ mod tests {
             counts
         };
         let mut collector = InterruptsCollector {
-            counting: false,
+            poll: CounterPoll::new(Mode::Count),
             cpus: None,
-            previous: Some((0, counts(u64::from(u32::MAX) - 99, 5_000))),
             losses: Losses::default(),
             wraps: 0,
         };
-        let events = collector.window(counts(100, 40), 1_000, 0);
+        let events = collector.window(
+            between(
+                (0, counts(u64::from(u32::MAX) - 99, 5_000)),
+                (1_000, counts(100, 40)),
+            ),
+            0,
+        );
         let count_of = |label: &str| {
             events
                 .iter()
