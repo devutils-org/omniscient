@@ -23,6 +23,7 @@ use std::path::PathBuf;
 use std::time::Duration as StdDuration;
 
 use crate::clock::monotonic_ns;
+use crate::collect::poll::{CounterPoll, Cumulative, Interval, Reading};
 use crate::collect::task::Comm;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
@@ -46,6 +47,15 @@ pub(super) fn ticks_per_second() -> u64 {
 struct Times {
     user: u64,
     system: u64,
+}
+
+impl Cumulative for Times {
+    fn since(&self, earlier: &Self) -> Option<Self> {
+        Some(Times {
+            user: self.user.checked_sub(earlier.user)?,
+            system: self.system.checked_sub(earlier.system)?,
+        })
+    }
 }
 
 impl Times {
@@ -136,7 +146,9 @@ pub struct OnCpuTime {
     /// The poll interval, carried only to state the error the tick granularity
     /// costs at this resolution.
     interval: crate::scalar::Duration,
-    previous: Option<Times>,
+    poll: CounterPoll<(), Times>,
+    /// From the baseline until the task's end took a reading away.
+    open: bool,
     comm: Comm,
     losses: Losses,
     notes: Vec<String>,
@@ -148,11 +160,20 @@ impl OnCpuTime {
             pid,
             path,
             interval,
-            previous: None,
+            poll: CounterPoll::new(Mode::Poll { interval }),
+            open: false,
             comm: Comm::of(pid),
             losses: Losses::default(),
             notes: Vec::new(),
         }
+    }
+
+    fn reading(&self) -> Result<Reading<(), Times>, SampleError> {
+        let now = self.read()?;
+        Ok(Reading {
+            ts_ns: monotonic_ns(),
+            counters: [((), now)].into(),
+        })
     }
 
     fn read(&self) -> Result<Times, SampleError> {
@@ -182,7 +203,7 @@ impl OnCpuTime {
     /// losses are, not only a sentence in the catalog. Counted once: the
     /// baseline is dropped with it, so a later read finds nothing to close.
     fn gone(&mut self) {
-        if self.previous.take().is_none() {
+        if !std::mem::take(&mut self.open) {
             return;
         }
         self.losses.failed_reads += 1;
@@ -198,24 +219,17 @@ impl OnCpuTime {
             .or_default() += 1;
     }
 
-    /// Turns a reading into an event, against whatever was read before it.
+    /// Turns an interval into an event.
     ///
     /// Separate from `sample` so the arithmetic can be checked against readings
-    /// chosen for the cases that matter -- a first read with no predecessor, a
-    /// window in which the task never ran -- rather than against whatever this
-    /// machine happened to be doing.
-    fn event_from(&mut self, now: Times, ts_ns: u64, seq: u64) -> Vec<Event> {
+    /// chosen for the cases that matter -- a window in which the task never
+    /// ran -- rather than against whatever this machine happened to be doing.
+    /// A task's times never go backwards; an interval where they did is none.
+    fn event_from(&mut self, interval: Interval<(), Times>, seq: u64) -> Vec<Event> {
         let per_tick_ns = 1_000_000_000 / ticks_per_second();
-        let Some(previous) = self.previous.replace(now) else {
-            // The first read is the baseline. Reporting it would report the
-            // task's whole life so far as though it happened in this window,
-            // which is the first point of every series being wrong by however
-            // long the program had already been running.
+        let ts_ns = interval.ts_ns;
+        let Some(&((), delta)) = interval.moved.first() else {
             return Vec::new();
-        };
-        let delta = Times {
-            user: now.user.saturating_sub(previous.user),
-            system: now.system.saturating_sub(previous.system),
         };
 
         let mut attrs = vec![
@@ -249,11 +263,18 @@ impl Collector for OnCpuTime {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        // The baseline is taken as the window opens, so the first poll already
-        // describes an interval rather than everything since the task began.
-        self.previous = Some(self.read().map_err(|error| match error {
+        // The baseline, before the task is released: the first poll opens
+        // the window (`collect::poll`), and the interval after it is measured
+        // from here, not from everything since the task began -- which
+        // reported as a point would be the first point of every series wrong
+        // by however long the program had already been running.
+        let mut poll = std::mem::replace(&mut self.poll, CounterPoll::new(Mode::Snapshot));
+        let started = poll.start(|| self.reading());
+        self.poll = poll;
+        started.map_err(|error| match error {
             SampleError::TargetGone(reason) | SampleError::Transient(reason) => reason,
-        })?);
+        })?;
+        self.open = true;
 
         let per_tick_ns = 1_000_000_000 / ticks_per_second();
         let interval_ns = self.interval.as_nanos();
@@ -271,15 +292,19 @@ impl Collector for OnCpuTime {
     }
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
-        let now = match self.read() {
-            Ok(now) => now,
+        let mut poll = std::mem::replace(&mut self.poll, CounterPoll::new(Mode::Snapshot));
+        let ticked = poll.tick(|| self.reading());
+        self.poll = poll;
+        match ticked {
+            Ok(interval) => Ok(interval
+                .map(|interval| self.event_from(interval, seq))
+                .unwrap_or_default()),
             Err(SampleError::TargetGone(reason)) => {
                 self.gone();
-                return Err(SampleError::TargetGone(reason));
+                Err(SampleError::TargetGone(reason))
             }
-            Err(error) => return Err(error),
-        };
-        Ok(self.event_from(now, monotonic_ns(), seq))
+            Err(error) => Err(error),
+        }
     }
 
     fn tick(&self) -> Option<StdDuration> {
@@ -339,6 +364,8 @@ mod tests {
             poll(interval_ms),
         );
         collector.start().expect("the task exists");
+        // The runner's first tick, as the window opens.
+        collector.sample(0).expect("the opening tick");
         let before = schedstat_ns(pid).unwrap_or(0);
         let started = std::time::Instant::now();
 
@@ -346,7 +373,7 @@ mod tests {
         // Read while the task is still there, and keep the last one: after it
         // exits there is no `/proc/<pid>` left to compare against.
         let mut kernel = schedstat_ns(pid);
-        let mut seq = 0;
+        let mut seq = 1;
         while child.try_wait().ok().flatten().is_none() {
             std::thread::sleep(StdDuration::from_millis(interval_ms));
             if let Some(now) = schedstat_ns(pid) {
@@ -422,24 +449,21 @@ mod tests {
     #[test]
     fn the_first_read_produces_no_point() {
         let mut collector = OnCpuTime::new(0, PathBuf::from("/proc/self/stat"), poll(100));
-        assert!(collector
-            .event_from(
-                Times {
-                    user: 500,
-                    system: 100
-                },
-                1_000,
-                0
-            )
-            .is_empty());
-        let events = collector.event_from(
-            Times {
-                user: 530,
-                system: 110,
-            },
-            2_000,
-            1,
-        );
+        let reading = |ts_ns, user, system| {
+            Ok(Reading {
+                ts_ns,
+                counters: [((), Times { user, system })].into(),
+            })
+        };
+        let mut poll = CounterPoll::new(Mode::Poll {
+            interval: poll(100),
+        });
+        assert!(poll.tick(|| reading(1_000, 500, 100)).unwrap().is_none());
+        let interval = poll
+            .tick(|| reading(2_000, 530, 110))
+            .unwrap()
+            .expect("an interval");
+        let events = collector.event_from(interval, 1);
         assert_eq!(events.len(), 1);
         let ns = events[0].attr("ns").unwrap().as_f64().unwrap();
         // Forty ticks of ten milliseconds.
