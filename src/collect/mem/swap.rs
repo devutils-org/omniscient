@@ -34,6 +34,7 @@ use std::path::PathBuf;
 
 use super::cgroup::{stat_field, stat_fields, Cgroup};
 use crate::clock::monotonic_ns;
+use crate::collect::poll::{CounterPoll, Cumulative, Interval, Reading};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::request::{Mode, Target};
@@ -58,10 +59,10 @@ impl Scope {
     }
 }
 
-/// The two counters, in pages, as they stood at one instant.
+/// The two counters, in pages, as they stood at one instant -- or, `since`
+/// an earlier reading, what they grew by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Counters {
-    ts_ns: u64,
     in_pages: u64,
     out_pages: u64,
     /// Pages the kernel accounted as swapped without writing them anywhere,
@@ -69,6 +70,24 @@ struct Counters {
     /// separate them, where they are simply not counted at all.
     in_zero_pages: Option<u64>,
     out_zero_pages: Option<u64>,
+}
+
+impl Cumulative for Counters {
+    /// Grown, or the interval cannot be attributed. A zero-page counter that
+    /// went backwards alone is left out rather than voiding the flow.
+    fn since(&self, earlier: &Self) -> Option<Self> {
+        let zero = |after: Option<u64>, before: Option<u64>| {
+            after
+                .zip(before)
+                .and_then(|(after, before)| after.checked_sub(before))
+        };
+        Some(Counters {
+            in_pages: self.in_pages.checked_sub(earlier.in_pages)?,
+            out_pages: self.out_pages.checked_sub(earlier.out_pages)?,
+            in_zero_pages: zero(self.in_zero_pages, earlier.in_zero_pages),
+            out_zero_pages: zero(self.out_zero_pages, earlier.out_zero_pages),
+        })
+    }
 }
 
 /// Holds the mode and the scope until the target is known.
@@ -167,10 +186,9 @@ pub struct Swap {
     /// The level file that sits beside the counters, where there is one.
     stock: Option<PathBuf>,
     page_size: u64,
-    previous: Option<Counters>,
-    /// `count` only: the first read of the run, which the one event it
-    /// reports is measured from.
-    opened: Option<Counters>,
+    /// A cgroup can be removed with the program it held: a counted run
+    /// closes on its last reading.
+    poll: CounterPoll<(), Counters>,
     losses: Losses,
 }
 
@@ -193,13 +211,12 @@ impl Swap {
             keys,
             stock,
             page_size: page_size(),
-            previous: None,
-            opened: None,
+            poll: CounterPoll::new(mode).closing_on_the_last_read(),
             losses,
         }
     }
 
-    fn read(&self) -> Result<Counters, SampleError> {
+    fn read(&self) -> Result<Reading<(), Counters>, SampleError> {
         let text = std::fs::read_to_string(&self.path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 SampleError::TargetGone(format!("{} is gone", self.path.display()))
@@ -217,8 +234,7 @@ impl Swap {
                 self.path.display()
             )));
         };
-        Ok(Counters {
-            ts_ns: monotonic_ns(),
+        let counters = Counters {
             in_pages,
             out_pages,
             // Published and always zero where the kernel charges a cgroup
@@ -229,6 +245,10 @@ impl Swap {
             out_zero_pages: zero_pages_counted(self.scope)
                 .then(|| stat_field(&fields, "swpout_zero"))
                 .flatten(),
+        };
+        Ok(Reading {
+            ts_ns: monotonic_ns(),
+            counters: [((), counters)].into(),
         })
     }
 
@@ -238,12 +258,9 @@ impl Swap {
         text.trim().parse().ok()
     }
 
-    fn flow_event(&mut self, before: &Counters, after: &Counters, seq: u64) -> Option<Event> {
-        let interval_ns = after.ts_ns.saturating_sub(before.ts_ns);
-        let (Some(in_pages), Some(out_pages)) = (
-            after.in_pages.checked_sub(before.in_pages),
-            after.out_pages.checked_sub(before.out_pages),
-        ) else {
+    fn flow_event(&mut self, interval: Interval<(), Counters>, seq: u64) -> Option<Event> {
+        let interval_ns = interval.interval_ns;
+        let Some(&((), moved)) = interval.moved.first() else {
             self.losses.undecoded += 1;
             self.losses.note_times(
                 format!(
@@ -255,8 +272,8 @@ impl Swap {
             return None;
         };
 
-        let in_bytes = in_pages * self.page_size;
-        let out_bytes = out_pages * self.page_size;
+        let in_bytes = moved.in_pages * self.page_size;
+        let out_bytes = moved.out_pages * self.page_size;
         let mut attrs = vec![
             Attr::uint("bytes", in_bytes + out_bytes),
             Attr::uint("in_bytes", in_bytes),
@@ -265,30 +282,24 @@ impl Swap {
             Attr::text("read_from", self.scope.read_from()),
             Attr::text("basis", "the swap counters' increase over this tick"),
         ];
-        for (name, after, before) in [
-            ("in_zero_bytes", after.in_zero_pages, before.in_zero_pages),
-            (
-                "out_zero_bytes",
-                after.out_zero_pages,
-                before.out_zero_pages,
-            ),
+        for (name, pages) in [
+            ("in_zero_bytes", moved.in_zero_pages),
+            ("out_zero_bytes", moved.out_zero_pages),
         ] {
-            if let Some(pages) = after
-                .zip(before)
-                .and_then(|(after, before)| after.checked_sub(before))
-            {
+            if let Some(pages) = pages {
                 attrs.push(Attr::uint(name, pages * self.page_size));
             }
         }
         if let Some(stock) = self.stock_bytes() {
             attrs.push(Attr::uint("swapped_bytes", stock));
         }
-        Some(self.event(after.ts_ns, attrs, seq))
+        Some(self.event(interval.ts_ns, attrs, seq))
     }
 
     /// A single read observes no window, so it reports the counters themselves
     /// rather than a flow it did not measure.
-    fn snapshot_event(&self, now: &Counters, seq: u64) -> Event {
+    fn snapshot_event(&self, reading: &Reading<(), Counters>, seq: u64) -> Event {
+        let now = &reading.counters[&()];
         let mut attrs = vec![
             Attr::uint("in_bytes_since_boot", now.in_pages * self.page_size),
             Attr::uint("out_bytes_since_boot", now.out_pages * self.page_size),
@@ -301,7 +312,7 @@ impl Swap {
         if let Some(stock) = self.stock_bytes() {
             attrs.push(Attr::uint("swapped_bytes", stock));
         }
-        self.event(now.ts_ns, attrs, seq)
+        self.event(reading.ts_ns, attrs, seq)
     }
 
     fn event(&self, ts_ns: u64, attrs: Vec<Attr>, seq: u64) -> Event {
@@ -327,47 +338,51 @@ impl Collector for Swap {
         }
     }
 
-    fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
-        let now = self.read()?;
+    /// The baseline, before the observed program is released.
+    fn start(&mut self) -> Result<(), String> {
         if self.mode == Mode::Snapshot {
-            return Ok(vec![self.snapshot_event(&now, seq)]);
+            return Ok(());
         }
-        if self.mode == Mode::Count {
-            // The window's two ends and nothing between: the first read opens
-            // it, every later one moves its close, and `stop` reports the one
-            // flow over all of it.
-            self.opened.get_or_insert(now);
-            self.previous = Some(now);
-            return Ok(Vec::new());
-        }
-        let before = self.previous.replace(now);
-        let event = before.and_then(|before| self.flow_event(&before, &now, seq));
-        Ok(event.into_iter().collect())
+        let mut poll = std::mem::replace(&mut self.poll, CounterPoll::new(self.mode));
+        let started = poll.start(|| self.read());
+        self.poll = poll;
+        started.map_err(|error| format!("{error:?}"))
     }
 
-    /// Reads nothing: the runner's last round of `sample` calls lands when the
-    /// stop condition is met, so the window is already closed by the read it
-    /// took. A counted run reports its one event here, from the first read to
-    /// that last one, carrying the window it covers.
+    fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
+        if self.mode == Mode::Snapshot {
+            let now = self.read()?;
+            return Ok(vec![self.snapshot_event(&now, seq)]);
+        }
+        let mut poll = std::mem::replace(&mut self.poll, CounterPoll::new(self.mode));
+        let ticked = poll.tick(|| self.read());
+        self.poll = poll;
+        Ok(ticked?
+            .and_then(|interval| self.flow_event(interval, seq))
+            .into_iter()
+            .collect())
+    }
+
+    /// A counted run reports its one event here, from the baseline to the
+    /// stop's read -- or to the last tick's, when the cgroup went with the
+    /// program -- carrying the window it covers.
     fn stop(&mut self) -> Vec<Event> {
-        if self.mode != Mode::Count {
-            return Vec::new();
-        }
-        let (Some(opened), Some(closed)) = (self.opened, self.previous) else {
-            return Vec::new();
+        let mut poll = std::mem::replace(&mut self.poll, CounterPoll::new(self.mode));
+        let stopped = poll.stop(|| self.read());
+        self.poll = poll;
+        let total = match stopped {
+            Ok(Some(total)) => total,
+            Ok(None) => return Vec::new(),
+            Err(error) => {
+                self.losses.failed_reads += 1;
+                self.losses.note_times(
+                    format!("the closing read failed ({error:?}), so this run has no total"),
+                    1,
+                );
+                return Vec::new();
+            }
         };
-        if closed.ts_ns == opened.ts_ns {
-            self.losses.undecoded += 1;
-            self.losses.note_times(
-                format!(
-                    "{} was read once, so a counted run has no window to report a flow over",
-                    self.path.display()
-                ),
-                1,
-            );
-            return Vec::new();
-        }
-        self.flow_event(&opened, &closed, u64::MAX / 2)
+        self.flow_event(total, u64::MAX / 2)
             .map(|mut event| {
                 for attr in &mut event.attrs {
                     if attr.name == "basis" {
@@ -500,7 +515,8 @@ mod tests {
     fn a_counted_run_reports_one_flow_over_its_whole_window() {
         let path = scratch_file("count", 10, 20);
         let mut collector = Swap::new(Mode::Count, Scope::Machine, path.clone(), Vec::new());
-        assert!(collector.sample(0).expect("the opening read").is_empty());
+        collector.start().expect("the opening read");
+        assert!(collector.sample(0).expect("a read inside").is_empty());
         write_counters(&path, 11, 25);
         assert!(collector.sample(1).expect("a read inside").is_empty());
         write_counters(&path, 14, 70);
@@ -619,7 +635,7 @@ mod tests {
             return;
         }
         assert!(scratch.write(PUSHED_BY, &LIMIT.to_string()));
-        counted.sample(0).expect("the counted run's opening read");
+        counted.start().expect("the counted run's opening read");
         collector.sample(0).expect("the baseline read");
         let mut child = scratch.spawn_throttled_toucher(TOUCHED, THROTTLED_FOR);
         let finished = child.finished_touching();
@@ -749,7 +765,7 @@ mod tests {
             eprintln!("skipped: this kernel counts no swap traffic per cgroup");
             return;
         };
-        if baseline.out_zero_pages.is_none() {
+        if baseline.counters[&()].out_zero_pages.is_none() {
             eprintln!("skipped: this kernel does not count zero-filled pages apart");
             return;
         }
