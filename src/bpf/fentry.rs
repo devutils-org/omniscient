@@ -634,6 +634,47 @@ fn on_the_path(function: &Function) -> Support {
     }
 }
 
+/// The `kprobe:<function>` requirement: the function is a kernel symbol, and
+/// -- where a call of this process's can be made to pass it, the triggers
+/// [`on_the_path`] uses -- that call reaches it. Alpine's 6.18 inlines
+/// `vfs_write` into `ksys_pwrite64` and keeps the copy `write(2)` calls: a
+/// kprobe on it counted a thousand writes and none of a thousand pwrites, and
+/// `io.fs` reported a program that wrote with `pwrite` as one that never wrote.
+pub fn kprobe_support(function: &str) -> Support {
+    let listed = std::fs::read_to_string("/proc/kallsyms").map(|symbols| {
+        symbols.lines().any(|line| {
+            let mut fields = line.split_whitespace();
+            let (Some(_), Some(kind), Some(name)) = (fields.next(), fields.next(), fields.next())
+            else {
+                return false;
+            };
+            name == function && kind.eq_ignore_ascii_case("t")
+        })
+    });
+    match listed {
+        Ok(true) => {}
+        Ok(false) => {
+            return Support::No(format!(
+                "this kernel has no function `{function}` among its symbols: it is not in this \
+                 kernel, or inlined everywhere it is called, and a kprobe needs an address"
+            ))
+        }
+        Err(error) => return Support::Unchecked(format!("/proc/kallsyms cannot be read: {error}")),
+    }
+    let Some(trigger) = trigger(function) else {
+        return Support::Yes;
+    };
+    match count_own_calls(function, trigger) {
+        Ok(0) => Support::No(format!(
+            "`{function}` is a symbol of this kernel and a kprobe attaches to it, but a call \
+             this process made that passes `{function}` never reached it: the kernel inlined \
+             the function into that call's path and kept the copy a probe lands on for other \
+             callers, so a source timed here would leave those calls out"
+        )),
+        Ok(_) | Err(_) => Support::Yes,
+    }
+}
+
 fn count_own_calls(function: &str, trigger: fn(RawFd)) -> io::Result<u64> {
     use perf_event_open_sys as sys;
     let kind = crate::bpf::attach::kprobe_type().map_err(io::Error::other)?;

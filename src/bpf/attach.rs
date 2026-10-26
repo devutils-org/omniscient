@@ -579,7 +579,13 @@ pub fn parse_layout(text: &str) -> Layout {
         };
         // The name is the last identifier of the declaration, with any array
         // bounds stripped: `char name[16]` names `name`, not `name[16]`.
-        let Some(name) = declaration
+        // Only bounds that end the declaration are the name's: in
+        // `__data_loc char[] name` they belong to the type.
+        let unbounded = match declaration.trim_end().strip_suffix(']') {
+            Some(open) => open.rsplit_once('[').map_or(declaration, |(name, _)| name),
+            None => declaration,
+        };
+        let Some(name) = unbounded
             .rsplit(|c: char| !(c.is_alphanumeric() || c == '_'))
             .find(|token| !token.is_empty())
         else {
@@ -627,6 +633,24 @@ fn online_cpus() -> Result<Vec<i32>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An array field is named without its bounds: `raw_syscalls:sys_enter`'s
+    /// `unsigned long args[6]` is `args`, which the classic syscall programs
+    /// read -- named `6`, every one of them refused to start.
+    #[test]
+    fn an_array_field_is_named_without_its_bounds() {
+        let layout = parse_layout(
+            "name: sys_enter\nformat:\n\
+             \tfield:unsigned short common_type;\toffset:0;\tsize:2;\tsigned:0;\n\
+             \tfield:long id;\toffset:8;\tsize:8;\tsigned:1;\n\
+             \tfield:unsigned long args[6];\toffset:16;\tsize:48;\tsigned:0;\n\
+             \tfield:char comm[16];\toffset:64;\tsize:16;\tsigned:0;\n",
+        );
+        assert_eq!(layout["args"].offset, 16);
+        assert_eq!(layout["args"].size, 48);
+        assert_eq!(layout["comm"].offset, 64);
+        assert_eq!(layout["id"].offset, 8);
+    }
 
     /// Every cpu the machine reports online has to be opened on, because one
     /// perf event covers one cpu. A machine-wide attach that opened cpu zero

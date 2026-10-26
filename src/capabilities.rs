@@ -1013,6 +1013,7 @@ impl Capabilities {
             // the check the program makes at attach.
             Need::RawTracepoint(event) => Probe::from(crate::bpf::raw_tracepoint_support(event)),
             Need::Fentry(function) => Probe::from(crate::bpf::fentry::support(function)),
+            Need::KprobeOn(function) => Probe::from(crate::bpf::fentry::kprobe_support(function)),
             // A member of a kernel struct a program reads, as `struct.member`,
             // looked up in BTF the way the program looks it up when it is built.
             Need::BtfMember(field) => Probe::from(crate::bpf::btf_member_support(field)),

@@ -34,6 +34,9 @@ pub enum Need {
     RawTracepoint(String),
     /// `fentry:<function>` (or `fentry:a or b`).
     Fentry(String),
+    /// `kprobe:<function>`: a kernel symbol a kprobe lands on, and one a call
+    /// reaches (`bpf::fentry::kprobe_support`).
+    KprobeOn(String),
     /// `btf_member:<struct>.<member>`.
     BtfMember(String),
     /// `pmu:<event>`.
@@ -166,7 +169,7 @@ impl FromStr for Need {
                 .map(Need::KernelAtLeast)
                 .ok_or_else(|| format!("`{text}` names no kernel release"));
         }
-        let prefixed: [(&str, Make); 13] = [
+        let prefixed: [(&str, Make); 14] = [
             ("symbols:", Need::Symbols),
             ("usdt:", Need::Usdt),
             ("rdt:", Need::Rdt),
@@ -175,6 +178,7 @@ impl FromStr for Need {
             ("tracepoint:", Need::Tracepoint),
             ("raw_tracepoint:", Need::RawTracepoint),
             ("fentry:", Need::Fentry),
+            ("kprobe:", Need::KprobeOn),
             ("btf_member:", Need::BtfMember),
             ("pmu:", Need::Pmu),
             ("msr:", Need::Msr),
@@ -231,6 +235,7 @@ impl fmt::Display for Need {
             Need::Tracepoint(event) => write!(f, "tracepoint:{event}"),
             Need::RawTracepoint(event) => write!(f, "raw_tracepoint:{event}"),
             Need::Fentry(function) => write!(f, "fentry:{function}"),
+            Need::KprobeOn(function) => write!(f, "kprobe:{function}"),
             Need::BtfMember(member) => write!(f, "btf_member:{member}"),
             Need::Pmu(event) => write!(f, "pmu:{event}"),
             Need::Msr(register) => write!(f, "msr:{register}"),

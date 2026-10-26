@@ -361,7 +361,7 @@
     # A kernel built without the function tracer (Alpine's) has no
     # trampoline to attach; a kprobe pair on the same two functions, the
     # file's fields read with probe reads at offsets out of the kernel's BTF.
-    - {id: "bpf:kprobe", requires: ["btf", "kprobe", "bpf"], cost: high,
+    - {id: "bpf:kprobe", requires: ["btf", "kprobe", "bpf", "kprobe:vfs_read", "kprobe:vfs_write"], cost: high,
        degraded: "a kprobe pair rather than a trampoline: each call costs a breakpoint on entry and a return probe, and a call whose return probe the kernel had no instance left for is counted as orphaned, not timed"}
   modes: [trace, count]
   emits: [hist, topk, raw, summary]
