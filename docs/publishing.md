@@ -1,8 +1,8 @@
 # Publishing the repository
 
-The repository is private until its owner decides otherwise. This is what
-was checked on 2026-10-21 (1453 commits, every branch) and what is left to do
-on the day.
+The repository is public since 2026-10-26, at `devutils-org/omniscient`.
+This is what was checked on 2026-10-21 (1453 commits, every branch), and what
+was done on the day.
 
 ## What the history holds
 
@@ -33,16 +33,14 @@ paths are choices, listed below.
      GitHub `noreply` one); the history keeps both;
    - add `CHANGELOG.md` and `SECURITY.md` (`docs/contributing.md` can move to
      the root as `CONTRIBUTING.md`, where GitHub looks for it).
-2. Decide where it lives. The site builds every repository link as
-   `github.com/devutils-org/<repo>`, so either transfer the repository to the
-   `devutils-org` organisation (GitHub redirects the old URL and the links in
-   `docs/distroproof.md`), or point the site at `moha-bekh/omniscient`.
-3. Make it public (repository settings), then on the site
-   (`devutils-org.github.io`): in `src/tools.js`, remove `repoPrivate: true`
-   from Omniscient and drop "repository not public yet" from its
-   `statusNote`; in `src/practice/cases.js` and the Together page, the
-   sources cited by path can become links. The Omniscient page and the home
-   card switch their links on from that one flag.
+2. Done on 2026-10-26: the repository was transferred to `devutils-org`
+   (GitHub redirects `moha-bekh/omniscient`), the links in `docs/distroproof.md`
+   and its French copy were rewritten to the new owner, and it was made
+   public. On the site (`devutils-org.com`), Omniscient's `repoPrivate` flag
+   is gone and the Together page links the repository; distroproof's README,
+   the organisation's profile and the owner's profile link it too.
+3. No release yet, on purpose: the code is public, the tool is not declared
+   finished.
 4. CI: once public, GitHub-hosted runs cost nothing, so `ci.yml` can go back
    to running on `push` and `pull_request` (it is `workflow_dispatch` only
    to save the private account's minutes).

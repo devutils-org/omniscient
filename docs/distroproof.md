@@ -173,7 +173,7 @@ and Ubuntu 20.04 2.31 -- and the archive imported `GLIBC_2.39` symbols,
 because a binary needs the newest glibc it was linked against and the build
 machine ran 2.44. The documented floor said 2.34; it was already false.
 
-**Fix** ([805ec52](https://github.com/moha-bekh/omniscient/commit/805ec52)).
+**Fix** ([805ec52](https://github.com/devutils-org/omniscient/commit/805ec52)).
 The archive is linked against glibc **2.17** through zig (`cargo zigbuild
 --target x86_64-unknown-linux-gnu.2.17`), whatever the build machine runs.
 One call changed: `memfd_create`, whose glibc wrapper is 2.27's, is made as
@@ -190,7 +190,7 @@ program interpreter, on a file that is plainly there.
 **What distroproof showed.** envprobe's `libc` section: `musl`, interpreter
 `/lib/ld-musl-x86_64.so.1`.
 
-**Fix** ([d43c6de](https://github.com/moha-bekh/omniscient/commit/d43c6de)).
+**Fix** ([d43c6de](https://github.com/devutils-org/omniscient/commit/d43c6de)).
 Both answers were measured and both kept: the glibc archive runs once
 `gcompat` is installed, shim included; and a second archive, `-linux-musl`,
 links `omn` statically and the shim against musl (built with the host's
@@ -213,7 +213,7 @@ Upstream Linux knows no level 3; Debian's and Ubuntu's kernels carry a patch,
 older than CAP_PERFMON, that refuses every perf event to a process without
 CAP_SYS_ADMIN. Ubuntu 22.04 and 24.04 ship 4.
 
-**Fix** ([b38b6c2](https://github.com/moha-bekh/omniscient/commit/b38b6c2)).
+**Fix** ([b38b6c2](https://github.com/devutils-org/omniscient/commit/b38b6c2)).
 The `kprobe` requirement opens an event -- a disabled software counter, which
 costs nothing -- rather than trusting the capability held, and every refusal
 that names a level above 2 says what this kernel means by it and that
@@ -230,7 +230,7 @@ charged to it, and the kernel's EPERM reads exactly like a missing
 capability. envprobe now reports the limit (`privileges.memlock_soft`), which
 it did not before this finding.
 
-**Fix** ([42b9d4d](https://github.com/moha-bekh/omniscient/commit/42b9d4d)).
+**Fix** ([42b9d4d](https://github.com/devutils-org/omniscient/commit/42b9d4d)).
 The `bpf` requirement creates a 1 MiB map; refused where a small one is
 created, the maps are charged to the limit, and the requirement is missing
 with the limit and its remedies (`ulimit -l`, `LimitMEMLOCK=`, CAP_SYS_RESOURCE).
@@ -245,7 +245,7 @@ refused by the verifier.
 In that mode the kernel withholds `bpf_probe_read_kernel`, and nearly every
 program of Omniscient's reads a kernel struct.
 
-**Fix** ([42b9d4d](https://github.com/moha-bekh/omniscient/commit/42b9d4d)).
+**Fix** ([42b9d4d](https://github.com/devutils-org/omniscient/commit/42b9d4d)).
 The `bpf` requirement loads the smallest program that calls the helper, and
 names lockdown when the verifier refuses it.
 
@@ -268,7 +268,7 @@ Alpine reads `CONFIG_FUNCTION_TRACER=n`.
 ([below](#the-cross-check)) failed on `debian-11`: Omniscient said "built
 without ftrace" where envprobe read `CONFIG_FUNCTION_TRACER=y`. A 5.10 BTF,
 made by an older pahole, leaves most functions out, ftrace's with them. The
-second fix ([693fadb](https://github.com/moha-bekh/omniscient/commit/693fadb))
+second fix ([693fadb](https://github.com/devutils-org/omniscient/commit/693fadb))
 reads `/proc/kallsyms` for `__fentry__`, which names its symbols even where
 their addresses are hidden.
 
@@ -285,7 +285,7 @@ could not have.
 `_folio_nr_pages`, 6.17 and later `_nr_pages`. Every kernel Omniscient had
 met was on one side.
 
-**Fix** ([42b9d4d](https://github.com/moha-bekh/omniscient/commit/42b9d4d)).
+**Fix** ([42b9d4d](https://github.com/devutils-org/omniscient/commit/42b9d4d)).
 The programs read whichever name the kernel has.
 
 ### 8. "kernel>=6.8": a version the catalog believed
@@ -296,7 +296,7 @@ statistics.
 **What distroproof showed.** Ubuntu's 6.8 does not publish
 `hugepages-2048kB/stats`, which the catalog promised from `kernel>=6.8`.
 
-**Fix** ([42b9d4d](https://github.com/moha-bekh/omniscient/commit/42b9d4d)).
+**Fix** ([42b9d4d](https://github.com/devutils-org/omniscient/commit/42b9d4d)).
 The backend asks for the directory, not the version, and the resolver falls
 back to `/proc/vmstat` where it is absent -- what the refusal had told users
 to do by hand.
@@ -310,7 +310,7 @@ uprobe-multi links on 5.14 "without saying they fell back".
 uprobe-multi, a 6.6 feature, in its 5.14. Omniscient asks the kernel and was
 right; the judge assumed the version and was wrong.
 
-**Fix** ([db67711](https://github.com/moha-bekh/omniscient/commit/db67711)).
+**Fix** ([db67711](https://github.com/devutils-org/omniscient/commit/db67711)).
 The judge no longer asks the version.
 
 ### 10. The reference pairs had only ever held on Arch
@@ -331,8 +331,8 @@ several encoded the development machine:
   the installed kernel headers (Debian 12), and a cgroup the guest's user may
   not create, are the machine refusing, and now skip quoting it.
 
-Fixed in [87191de](https://github.com/moha-bekh/omniscient/commit/87191de)
-and [0de94c4](https://github.com/moha-bekh/omniscient/commit/0de94c4).
+Fixed in [87191de](https://github.com/devutils-org/omniscient/commit/87191de)
+and [0de94c4](https://github.com/devutils-org/omniscient/commit/0de94c4).
 The results, per distribution, are [below](#the-reference-pairs).
 
 ### 11. "kernel>=6.1": the version the kernel floor was chosen at
