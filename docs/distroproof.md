@@ -72,6 +72,15 @@ each:
 | `ubuntu-20.04-root` | 60 | 64 | the same |
 | `debian-10`, `ubuntu-20.04`, `debian-12`, `fedora-latest-lockdown`, `rocky-8-root` | 40, 43, 77, 60, 87 | the same | controls: lockdown still refuses both read helpers, with its reason |
 
+Then the kprobe flavours and the one-event attach (swept 2026-10-26):
+
+| Cell | After | What moved it |
+|---|---|---|
+| `alpine` | 89 | `io.fs`, `io.fsync` and `net.socket` through `bpf:kprobe`: no ftrace |
+| `rocky-8`, `rocky-8-root` | 86, 88 | `sched.lock` through the sleeping locks' slow paths: no contention tracepoints |
+| `ubuntu-22.04` | 88 | the same |
+| `debian-12-root` | 96 | `bpf:tp` collectors start on more than one cpu, and `io.fsync` through the syscalls |
+
 What still stands between the two old root cells and the rest is
 structural: no kernel BTF, no BPF ring buffer (5.8), and tracepoints these
 kernels do not define. A perf-event-array transport would be the next step,
