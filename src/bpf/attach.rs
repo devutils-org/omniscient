@@ -327,7 +327,7 @@ pub fn tracepoint(
     // event with no period is an event that never fires.
     attr.__bindgen_anon_1.sample_period = 1;
     attr.sample_type = u64::from(sys::bindings::PERF_SAMPLE_RAW);
-    open_and_set(&mut attr, program, scope, &format!("{category}:{name}"))
+    open_and_set(&mut attr, program, one_event(scope), &format!("{category}:{name}"))
 }
 
 /// Attaches a `BPF_PROG_TYPE_PERF_EVENT` program to a cpu-clock event on
@@ -381,7 +381,7 @@ pub fn kprobe(
     let attachment = open_and_set(
         &mut attr,
         program,
-        scope,
+        one_event(scope),
         &format!("the kernel symbol `{}`", symbol.to_string_lossy()),
     );
     drop(symbol);
@@ -419,7 +419,7 @@ pub fn uprobe(
     let attachment = open_and_set(
         &mut attr,
         program,
-        scope,
+        one_event(scope),
         &format!("{}+{offset:#x}", path.display()),
     );
     drop(name);
@@ -431,6 +431,20 @@ pub fn uprobe(
 /// The order is not a style: a program set on an already-enabled event misses
 /// whatever fires in between, and an event enabled with no program attached is
 /// a sampling event nobody is reading, which the kernel will happily throttle.
+/// A machine-wide attach of a tracepoint's, a kprobe's or a uprobe's
+/// program is one event. Their programs hang off the probe, not the event,
+/// and run at every hit before any event's cpu is compared: a tracepoint
+/// refuses the same program on its second per-cpu event (`EEXIST`, measured
+/// on Debian 12 and Alpine: every `bpf:tp` collector refused to start on a
+/// machine of more than one cpu), and each kprobe event, a probe of its own,
+/// ran it once more per cpu.
+fn one_event(scope: Scope) -> Scope {
+    match scope {
+        Scope::System => Scope::Everywhere,
+        other => other,
+    }
+}
+
 fn open_and_set(
     attr: &mut sys::bindings::perf_event_attr,
     program: OwnedFd,
@@ -988,8 +1002,9 @@ mod classic_tracepoint {
                 assert!(readable, "the attach succeeded where the id cannot be read");
                 assert_eq!(
                     attachment.events(),
-                    online_cpus().expect("the online cpus").len(),
-                    "a machine-wide attach is one perf event per cpu"
+                    1,
+                    "a machine-wide attach of a tracepoint's program is one perf event: the \
+                     program runs at every hit, on every cpu"
                 );
                 // Any machine running this test is switching tasks: this test
                 // is one of them.

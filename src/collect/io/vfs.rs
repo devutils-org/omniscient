@@ -146,7 +146,8 @@ fn coverage(layer: Layer) -> String {
             .to_owned(),
         Layer::Fs => "timed at vfs_read and vfs_write, regular files only: a pipe, a socket or \
                       a terminal is not a filesystem, and readv/writev, io_uring and mmap \
-                      faults do not pass through these two functions"
+                      faults do not pass through these two functions -- nor does pwrite(2) \
+                      from musl 1.2.5 on (Alpine's), which it makes as pwritev2"
             .to_owned(),
     }
 }

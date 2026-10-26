@@ -671,7 +671,12 @@ pub fn kprobe_support(function: &str) -> Support {
              the function into that call's path and kept the copy a probe lands on for other \
              callers, so a source timed here would leave those calls out"
         )),
-        Ok(_) | Err(_) => Support::Yes,
+        Ok(_) => Support::Yes,
+        // A kprobe this process cannot count with is one it cannot attach
+        // either: unknown, never available.
+        Err(error) => Support::Unchecked(format!(
+            "whether a call reaches `{function}` could not be counted ({error})"
+        )),
     }
 }
 
