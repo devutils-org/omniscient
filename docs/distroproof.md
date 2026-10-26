@@ -59,6 +59,32 @@ reference pairs -- Omniscient against `perf`, `bpftrace`, `strace`, the bcc
 tools, on the same workload, within a declared tolerance -- on six
 distributions with the witnesses their own packages carry.
 
+## After the twenty-seventh wave (2026-10-26)
+
+The two cells the follow-up left structural, served through the classic
+tracepoints and a perf event array where there is no ring buffer
+(`docs/dev/briefs/wave-27-no-btf.md`). Counted under `distroproof run` as
+root with the wave's static musl binary (`omn list`), each collector also run
+on the cell against a workload it can be checked against:
+
+| Cell | Before | After | What moved it |
+|---|---|---|---|
+| `debian-10-root` (4.19, no BTF) | 58 | **74** | `bpf:tp` collectors for `proc`, `sched`, `io`, `mem`, `net`, `power.cstate` and `cpu.oncpu_time`, on a perf event array, with the classic follower |
+| `ubuntu-20.04-root` (5.4, BTF without `btf_trace_*`) | 64 | **86** | the same, and `sched.runqlen` and `sched.lock`'s kprobe pair, whose requirements no longer ask what their programs do not use |
+
+What each showed there, on both kernels: `net.softirq`'s handler runs are
+`/proc/softirqs`' (72 of 72, 79 of 79); a launched spin's `cpu.oncpu_time` is
+its reap within 20 us; `dd`'s 300 records are 606 `io.syscall` calls;
+`net.tcp.connect` 3 established and 2 refused, as sent; `net.tcp.retransmit`
+the resends netem forced (no state on 4.19, whose record has none);
+`io.latency` 148 and 157 requests from 37 to 364 us, with the three
+completions issued before the attach counted, not dropped. Found on the way
+and fixed: 4.19's `sched_stick_numa` names its task `pid` where later kernels
+write `src_pid`; its `tcp_retransmit_skb` has neither `state` nor `family`
+(an IPv4 end is told by its mapped address); a classic completion has no
+`bytes`, only sectors. The rest of the matrix is to be swept with this
+binary.
+
 ## After the twenty-sixth wave's follow-up (2026-10-26)
 
 Swept target by target as each change landed, release archives of

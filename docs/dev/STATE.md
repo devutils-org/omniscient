@@ -115,6 +115,18 @@ wave.
 ## What the numbers say
 
 ```
+123 sources: 115 usable here, 0 unverified, 8 out of reach on this machine.
+120 of them have a collector, covering 186 of their 244 backends.
+```
+
+(`target/debug/omn list` on `claude/w27` after the twenty-seventh wave, with
+the capabilities on the binary. The thirty-four rows it added are classic
+tracepoint collectors, which this machine does not choose -- it has BTF -- and
+two old root cells do: Debian 10 root from 58 usable to 74, Ubuntu 20.04 root
+from 64 to 86, `docs/distroproof.md`, "After the twenty-seventh wave". The
+paragraph below is the twenty-sixth wave's record.)
+
+```
 123 sources: 115 usable here, 8 out of reach on this machine.
 152 of their 242 backends have a collector.
 ```
@@ -299,6 +311,35 @@ join what-released-the-block  sched.wakeup -> sched.offcpu  evidence WAKEUP
 **This section is the one place the plan after the current wave is written.**
 `docs/dev/BRIEF.md` is the wave being run; there is no second brief for the one after it,
 because a plan kept in two documents drifted in both.
+
+### After the twenty-seventh wave
+
+The wave is `docs/dev/briefs/wave-27-no-btf.md`, its decisions
+`docs/DECISIONS.md`, "Settled in the twenty-seventh wave". It made the
+twenty-sixth wave's item 2 -- root on a kernel without BTF -- a perf event
+array, classic records and a classic follower, and wrote `bpf:tp` collectors
+for twenty-nine sources (and `net.tcp.connect`'s, in place of the kprobe row
+item 3 left). What is left, by what it waits on:
+
+1. **The matrix, swept with this wave's binary.** Only the two root cells it
+   was for were counted (`docs/distroproof.md`). Every other cell's chain is
+   unchanged where it has BTF, but `cpu.oncpu_time` no longer declares `trace`,
+   `sched.runqlen` no longer asks for a ring buffer, `sched.lock`'s kprobe row
+   asks `follower`, and thirteen drained rows dropped a requirement they did
+   not have: `release.sh`, `distroproof up`, then `cargo test --test
+   portability`.
+2. **A machine**: unchanged from the twenty-sixth wave's item 1 below.
+3. **What the classic road cannot serve on these kernels**: `net.qdisc`
+   (`qdisc_enqueue` is 5.15), `sched.lock`'s tracepoints (5.19), `io.pagecache`
+   and `io.readahead` (`mm_filemap_get_pages`, 6.x) -- each a kernel these cells
+   do not run -- and `sched.slices`, which reads the kernel's own `sched_info`
+   stamps: without BTF its run and queue times would be rebuilt from event
+   stamps, a different measurement and a stream of its own, not a fallback.
+4. **The pollers' move onto `collect::poll`**: unchanged, item 4 below.
+
+The flaky tally lost one entry: `scenario_net`'s closed-port scenario failed
+every full run of the file at `14b02f1` and launches its sender from the run
+now (`docs/open-findings.md`).
 
 ### After the twenty-sixth wave
 

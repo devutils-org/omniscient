@@ -472,7 +472,7 @@ never unless asked. Each frame says which of them named it (`elf`,
 | `io.size` | request size distribution | `bpf:tp` block_rq_issue | trace | system, cgroup | high | medium |
 | `io.merges` | request merges | `bpf:tp` block_rq_merge · diskstats | count | system | low / free | medium |
 | `io.inflight` | queue depth | `fs:proc` diskstats | poll | system | low | low |
-| `io.syscall` | latency as the application sees it | `bpf:tp` raw_syscalls · `bpf:fentry` vfs_read/write | trace | pid, cgroup | med | low |
+| `io.syscall` | latency as the application sees it | `bpf:fentry` the syscall wrappers · `bpf:tp` raw_syscalls, by number | trace | pid, cgroup | med | low |
 | `io.fs` | VFS/FS latency | `bpf:fentry` vfs_* · ext4/xfs/btrfs tracepoints | trace | pid, cgroup | high | low |
 | `io.pagecache` | page cache hit/miss | `bpf:tp` filemap:mm_filemap_add_to_page_cache + faults | trace | pid, system | med | low |
 | `io.readahead` | readahead effectiveness | `bpf:tp` readahead tracepoints | trace | system | low | low |
@@ -515,7 +515,7 @@ never unless asked. Each frame says which of them named it (`elf`,
 
 | Metric | What it measures | Backends | Modes | Targets | Cost | Det. |
 |---|---|---|---|---|---|---|
-| `net.tcp.connect` | connection setup latency | `bpf:fentry` tcp_v4/v6_connect · `bpf:raw_tp` sock:inet_sock_set_state (no trampolines, no `failed`) | trace | pid, cgroup, system | low | low |
+| `net.tcp.connect` | connection setup latency | `bpf:fentry` tcp_v4/v6_connect · `bpf:raw_tp` sock:inet_sock_set_state (no trampolines, no `failed`) · `bpf:tp` the same, classic (no cookie, no errno) | trace | pid, cgroup, system | low | low |
 | `net.tcp.lifetime` | duration + volume per connection, by its owner | `bpf:raw_tp` · `bpf:tp` sock:inet_sock_set_state | trace | pid, tid, launch, system | low | low |
 | `net.tcp.accept` | connections a server accepted, with the listener's queue | `bpf:fentry` inet_csk_accept | trace, count | pid, launch, system | low | low |
 | `net.tcp.rtt` | RTT, cwnd, congestion state | `netlink` sock_diag · `bpf:fentry` on tcp_sock | poll, trace | pid, system | med | low |

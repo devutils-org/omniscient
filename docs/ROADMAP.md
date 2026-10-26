@@ -1225,6 +1225,11 @@ cells, `scripts/containers.sh`), each judged like the rest; two defects found
 image, on the musl archive (finding 15). Not this phase's, and why: the hardware sources (IBS, RAPL, a GPU) stay checked on the host, as in the
 kernel matrix.
 
+Added 2026-10-26, beyond the criteria: the two root cells on kernels without
+BTF or a ring buffer (Debian 10's 4.19, Ubuntu 20.04's 5.4), served through the
+classic tracepoints and a perf event array -- 58 to 74 and 64 to 86 usable
+sources (`docs/distroproof.md`, "After the twenty-seventh wave").
+
 ---
 
 ## Cross-cutting test strategy

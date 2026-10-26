@@ -1520,6 +1520,24 @@ in it, with what each took. The handoffs are `docs/fixes/w26-*.md`.
 | A probe's machine-wide attach (tracepoint, kprobe, uprobe) | **One perf event** (2026-10-26, `attach::one_event`). | The program hangs off the probe and runs at every hit before any event's cpu is compared: per-cpu events made a tracepoint refuse the program (`EEXIST`, every `bpf:tp` collector refused to start on more than one cpu) and a kprobe run it once per cpu. |
 | Kernels without the function tracer, or without contention tracepoints | **Kprobe flavours of the timed pairs** (`io.fs`, `io.fsync`, `net.socket`) **and of `sched.lock`** (the sleeping locks' slow paths), each requiring the call to reach its function (`kprobe:<function>`). | Alpine has no ftrace; Rocky 8 and Ubuntu 22.04 have no `contention_begin`. Each declares what it loses: `net.socket` has no cookie in a kprobe program, `sched.lock` counts the optimistic spin. |
 
+## Settled in the twenty-seventh wave: the kernels without BTF
+
+Run autonomously on 2026-10-26 (`docs/dev/briefs/wave-27-no-btf.md`), for the
+two root cells the twenty-sixth wave left structural: Debian 10's 4.19 and
+Ubuntu 20.04's 5.4, which have no kernel BTF (4.19) or no `btf_trace_*` types
+(5.4), and no BPF ring buffer.
+
+| Question | Decision | Why, and where it stands |
+|---|---|---|
+| How a program publishes where there is no ring buffer | **`bpf::transport`: the ring buffer where the kernel creates one, a perf event array otherwise**, one ring per cpu merged by the record's stamp at the drain. | The programs' records are unchanged; `Output::push` emits either helper call. A `PERF_RECORD_LOST` is skipped: the programs count their own drops, as on the ring. |
+| How a classic record is read | **At the offsets and widths `<tracefs>/events/<cat>/<name>/format` gives** (`context::Record`), in place where the field is aligned to its width, through a probe read otherwise. | The verifier allows a tracepoint context read only at the field's own alignment; 4.19's `inet_sock_set_state` has `daddr[4]` at offset 35. Field names that changed between releases are read by both names (`sched_stick_numa`'s `pid`, `src_pid`). |
+| Who a classic record's task is | **Its id, with its thread group from the classic follower's threads map (`task_newtask`, `sched_process_free`) for a process target, and from `/proc` at the drain otherwise.** A cgroup is not kept, and each such `bpf:tp` backend declares the targets it serves. | The records carry `pid` and no `task_struct`; where the drain finds a thread gone, its group is 0. |
+| `equivalent` or `degraded` on a classic row | **Equivalent only where the record carries what the raw program reads.** `net.softirq`, `power.cstate`, `sched.migrations`, `sched.switches`, `cpu.oncpu_time` are; `net.drops` (no length, no socket, no reason before 5.17), `net.tcp.retransmit` and `net.tcp.lifetime` (no socket: no cookie, no inode, no counts), `net.tcp.connect` (no cookie, no errno), `io.latency` (no request pointer, the issuing task), `sched.irq` (a shared line's every handler), `sched.numa_balance` (comm at the drain) and `io.syscall` (every syscall pays a test) say what they lose. | Invariant 2. A field the record lacks is reported `unknown` (`reason`, `protocol`, `state_name`), never zero or a wrong name: `protocol: no-socket` would claim a socket was looked for. |
+| `cpu.oncpu_time` through `bpf:tp` | **On `sched_stat_runtime`**, the raw road's own increments, and the source declares `poll` and `count` only. | The row read `sched_switch` and had no collector; the only backend that declared `trace` and `hist` was it. A launched spin's rows are its reap to 20 us on 4.19. |
+| A process target followed by either pair of tracepoints | **`follower`, a requirement** (`src/need.rs`): the raw `sched_process_fork`/`_free` or the classic `task_newtask`/`sched_process_free`. | `sched.lock`'s kprobe pair required the raw pair, which 5.4's BTF does not declare, though `Descendants::follow` falls back to the classic one. |
+| A requirement no program has | **Removed**: `bpf_map:ringbuf` on thirteen drained `bpf:raw_tp` rows and on `sched.runqlen`, which count into maps. | A kernel with BTF and no ring buffer was sent to a fallback for nothing; `sched.runqlen` runs on Ubuntu 20.04 now. |
+| What stays without a classic road | **`net.qdisc`** (`qdisc_enqueue` is 5.15), **`sched.lock`'s and `io.pagecache`'s and `io.readahead`'s tracepoints** (5.19 and 6.x), **`sched.slices`** (it reads the kernel's `sched_info` stamps, which only BTF reaches), **`power.freq`, `power.throttle`** (no ground truth in a guest). | Each is a kernel these cells do not run, or a measurement the record cannot make. |
+
 ## Open
 
 Nothing is open since 2026-10-19 (above).
