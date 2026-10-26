@@ -37,6 +37,8 @@ const RING_BYTES: usize = 64 * 1024;
 pub struct Prepare {
     pub mode: Mode,
     pub filter: Option<FilterExpr>,
+    /// The classic tracepoints (`bpf:tp`), for a kernel without BTF.
+    pub classic: bool,
 }
 
 impl Prepared for Prepare {
@@ -69,11 +71,15 @@ impl Prepared for Prepare {
                 ))
             }
         }
-        Ok(Box::new(WritebackCollector::new(self.mode, self.filter)))
+        let mut collector = WritebackCollector::new(self.mode, self.filter);
+        collector.classic = self.classic;
+        Ok(Box::new(collector))
     }
 }
 
 pub struct WritebackCollector {
+    /// Through the classic tracepoints (`bpf:tp`).
+    classic: bool,
     mode: Mode,
     program: Option<WritebackProgram>,
     /// The program's loss counters, as last read (`collect::kernel`).
@@ -97,6 +103,7 @@ pub struct WritebackCollector {
 impl WritebackCollector {
     pub fn new(mode: Mode, predicate: Option<FilterExpr>) -> Self {
         Self {
+            classic: false,
             mode,
             program: None,
             losses: Losses::default(),
@@ -158,9 +165,13 @@ impl WritebackCollector {
                 // The request for a BTF enum reader is in
                 // `docs/open-findings.md`.
                 Attr::uint("reason", u64::from(record.reason)),
-                Attr::uint("bdi_id", record.bdi_id),
                 Attr::uint("cpu", u64::from(record.cpu)),
-            ],
+            ]
+            .into_iter()
+            // The backing device's id, which the classic record does not
+            // carry: zero there, and no id the kernel hands out.
+            .chain((record.bdi_id != 0).then(|| Attr::uint("bdi_id", record.bdi_id)))
+            .collect(),
             collector_id: CollectorId::unstamped(),
             seq,
         }
@@ -228,7 +239,11 @@ impl Collector for WritebackCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        self.program = Some(WritebackProgram::load(RING_BYTES)?);
+        self.program = Some(if self.classic {
+            WritebackProgram::load_classic(RING_BYTES)?
+        } else {
+            WritebackProgram::load(RING_BYTES)?
+        });
         self.names = super::device_names();
         self.opened_ns = monotonic_ns();
         Ok(())
@@ -393,6 +408,7 @@ mod tests {
         let prepared = Box::new(Prepare {
             mode: Mode::Trace,
             filter: None,
+            classic: false,
         });
         let Err(error) = prepared.attach(&Target::Pid(vec![1])) else {
             panic!("a pid target must be refused");
@@ -419,9 +435,13 @@ mod tests {
                 crate::request::ModeKind::Poll,
             ),
         ] {
-            let served = Box::new(Prepare { mode, filter: None })
-                .attach(&Target::System)
-                .is_ok();
+            let served = Box::new(Prepare {
+                mode,
+                filter: None,
+                classic: false,
+            })
+            .attach(&Target::System)
+            .is_ok();
             assert_eq!(
                 served,
                 declared.contains(&kind),

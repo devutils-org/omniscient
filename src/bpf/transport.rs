@@ -126,6 +126,14 @@ impl Transport {
         })
     }
 
+    /// A ring buffer a program set already writes into, through instructions
+    /// of its own.
+    pub fn from_ring(ring: RingBuffer) -> Self {
+        Self {
+            kind: Kind::Ring(ring),
+        }
+    }
+
     /// The perf event array, whichever transport this kernel has: what the
     /// tests choose to reach it on a kernel that has both.
     pub fn perf_array(

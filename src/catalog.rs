@@ -1845,23 +1845,21 @@ mod tests {
         assert!(yaml.contains("cost_by_regime"), "{yaml}");
     }
 
-    /// The rule's ground truth is the chain: `io.size`'s `bpf:tp` stands in
-    /// for `bpf:raw_tp` as an equivalent. Made cheaper than its head on a
+    /// The rule's ground truth is the chain: `io.size`'s `bpf:tp`, declared
+    /// here an equivalent of `bpf:raw_tp`. Made cheaper than its head on a
     /// target both serve, it is refused; as dear, dearer, degraded rather than
     /// equivalent, or on a disjoint target, it is not.
     #[test]
     fn an_equivalent_backend_cheaper_than_what_it_stands_in_for_is_refused() {
         let io_size = catalog().get(&"io.size".parse().unwrap()).unwrap().clone();
         assert_eq!(io_size.backends[0].id, "bpf:raw_tp");
-        assert!(io_size.backends[1].equivalent);
+        assert_eq!(io_size.backends[1].id, "bpf:tp");
         let load = |fallback: Cost, equivalent: bool, disjoint: bool| {
             let mut entry = io_size.clone();
             entry.backends[0].cost = Cost::High;
             entry.backends[1].cost = fallback;
             entry.backends[1].equivalent = equivalent;
-            if !equivalent {
-                entry.backends[1].degraded = Some("test".into());
-            }
+            entry.backends[1].degraded = (!equivalent).then(|| "test".into());
             if disjoint {
                 // The head serves the system alone, the equivalent every
                 // other target -- none of which falls back onto the system --

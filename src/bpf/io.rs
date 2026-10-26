@@ -71,12 +71,14 @@
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
+use super::context::Record;
 use super::insn::{self, helper, read_field, Insn, Program, BPF_DW, BPF_W, R10};
 use super::map::{map_failure, Counters, Hash};
 use super::request::read_request_id;
 use super::ring::{ring_bytes, RingBuffer};
 use super::sched_common::Descendants;
 use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
+use super::transport::{Output, Transport};
 use crate::bpf::program::load_raw_tracepoint as load;
 
 /// Which two moments a program set measures between.
@@ -852,6 +854,210 @@ fn close_instructions(
     Ok(instructions)
 }
 
+/// Where the classic programs keep their key on the stack: a request has no
+/// pointer in a classic record, so it is named by its device and its first
+/// sector, as `biosnoop` names it on a kernel without BTF.
+/// Below every other slot either program uses: the record is the top 104
+/// bytes of the closing program's frame.
+const CLASSIC_KEY: i16 = -176;
+const CLASSIC_KEY_BYTES: usize = 16;
+
+/// Writes `{dev, 0, sector}` at `CLASSIC_KEY` from the record in `r6`.
+fn classic_key(program: &mut Program, record: &Record) -> Result<(), String> {
+    program.push(Insn::st_imm(BPF_DW, R10, CLASSIC_KEY, 0));
+    record.load(program, 1, 6, "dev", CLASSIC_KEY + 8)?;
+    program.push(Insn::stx(BPF_W, R10, CLASSIC_KEY, 1));
+    record.load(program, 1, 6, "sector", CLASSIC_KEY + 8)?;
+    program.push(Insn::stx(BPF_DW, R10, CLASSIC_KEY + 8, 1));
+    Ok(())
+}
+
+/// The classic program on `block:block_rq_insert`, in the submitting task:
+/// when, and whose, under the request's device and sector.
+fn classic_open_instructions(
+    record: &Record,
+    kept: Kept,
+    inflight_fd: i32,
+    counters_fd: i32,
+) -> Result<Vec<Insn>, String> {
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::stx(BPF_DW, R10, ENTRY_VALUE + VAL_OPEN_TS, 0));
+    program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
+    program.push(Insn::stx(BPF_W, R10, ENTRY_VALUE + VAL_TID, 0));
+    program.push(Insn::rsh64_imm(0, 32));
+    program.push(Insn::stx(BPF_W, R10, ENTRY_VALUE + VAL_TGID, 0));
+    program.push(Insn::mov64_reg(1, R10));
+    program.push(Insn::add64_imm(1, (ENTRY_VALUE + VAL_COMM) as i32));
+    program.push(Insn::mov64_imm(2, 16));
+    program.push(Insn::call(helper::GET_CURRENT_COMM));
+    kept.push(&mut program, ENTRY_VALUE, "done", "open_kept");
+    program.push(Insn::st_imm(BPF_DW, R10, ENTRY_VALUE + VAL_REQ, 0));
+    classic_key(&mut program, record)?;
+    program.extend(Insn::load_map_fd(1, inflight_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, CLASSIC_KEY as i32));
+    program.push(Insn::mov64_reg(3, R10));
+    program.push(Insn::add64_imm(3, ENTRY_VALUE as i32));
+    program.push(Insn::mov64_imm(4, 0));
+    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
+    program.jump_to("done", Insn::jsge_imm(0, 0, 0));
+    count(
+        &mut program,
+        counters_fd,
+        OPEN_DROP_KEY,
+        DROP_INFLIGHT,
+        "done",
+    );
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
+/// The classic program on `block:block_rq_issue`, for `io.queue` (paired with
+/// the insert by device and sector) and `io.size` (alone): the record's
+/// device, sector, length and letters, the scope this run's own sighting.
+fn classic_close_instructions(
+    record: &Record,
+    stage: Stage,
+    kept: Kept,
+    inflight_fd: i32,
+    output: Output,
+    counters_fd: i32,
+) -> Result<Vec<Insn>, String> {
+    let paired = stage == Stage::Queue;
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::mov64_reg(8, 0));
+    for slot in 0..(RECORD_BYTES / 8) as i16 {
+        program.push(Insn::st_imm(BPF_DW, R10, EVENT + slot * 8, 0));
+    }
+    program.push(Insn::stx(BPF_DW, R10, EV_TS, 8));
+    program.push(Insn::call(helper::GET_SMP_PROCESSOR_ID));
+    program.push(Insn::stx(BPF_W, R10, EV_CPU, 0));
+    record.load(&mut program, 1, 6, "dev", PART)?;
+    program.push(Insn::stx(BPF_W, R10, EV_DEV, 1));
+    record.load(&mut program, 1, 6, "sector", PART)?;
+    program.push(Insn::stx(BPF_DW, R10, EV_SECTOR, 1));
+    record.load(&mut program, 1, 6, "bytes", PART)?;
+    program.push(Insn::stx(BPF_W, R10, EV_BYTES, 1));
+    // The operation's letters, where the request identity would be; the
+    // drain turns them back into flags.
+    record.copy(&mut program, 6, "rwbs", EV_REQ, 8)?;
+    if paired {
+        classic_key(&mut program, record)?;
+        program.extend(Insn::load_map_fd(1, inflight_fd));
+        program.push(Insn::mov64_reg(2, R10));
+        program.push(Insn::add64_imm(2, CLASSIC_KEY as i32));
+        program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+        program.jump_to("unpaired", Insn::jeq_imm(0, 0, 0));
+        program.push(Insn::ldx(BPF_DW, 9, 0, VAL_OPEN_TS));
+        program.push(Insn::ldx(BPF_W, 1, 0, VAL_TID));
+        program.push(Insn::stx(BPF_W, R10, EV_TID, 1));
+        program.push(Insn::ldx(BPF_W, 1, 0, VAL_TGID));
+        program.push(Insn::stx(BPF_W, R10, EV_TGID, 1));
+        program.push(Insn::ldx(BPF_DW, 1, 0, VAL_COMM));
+        program.push(Insn::stx(BPF_DW, R10, EV_COMM, 1));
+        program.push(Insn::ldx(BPF_DW, 1, 0, VAL_COMM + 8));
+        program.push(Insn::stx(BPF_DW, R10, EV_COMM + 8, 1));
+        program.push(Insn::mov64_reg(1, 8));
+        program.push(Insn::sub64_reg(1, 9));
+        program.push(Insn::stx(BPF_DW, R10, EV_DELTA, 1));
+        program.push(Insn::stx(BPF_DW, R10, EV_OPEN_TS, 9));
+        program.extend(Insn::load_map_fd(1, inflight_fd));
+        program.push(Insn::mov64_reg(2, R10));
+        program.push(Insn::add64_imm(2, CLASSIC_KEY as i32));
+        program.push(Insn::call(helper::MAP_DELETE_ELEM));
+        program.push(Insn::st_imm(BPF_W, R10, EV_FLAGS, SCOPE_IS_OURS as i32));
+        program.jump_to("publish", Insn::ja());
+        program.label("unpaired");
+    }
+    // Nothing opened this one, so the submitter is the current task, as the
+    // raw program reads it.
+    program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
+    program.push(Insn::stx(BPF_W, R10, EV_TID, 0));
+    program.push(Insn::rsh64_imm(0, 32));
+    program.push(Insn::stx(BPF_W, R10, EV_TGID, 0));
+    program.push(Insn::mov64_reg(1, R10));
+    program.push(Insn::add64_imm(1, EV_COMM as i32));
+    program.push(Insn::mov64_imm(2, 16));
+    program.push(Insn::call(helper::GET_CURRENT_COMM));
+    kept.push(&mut program, EV_TID - VAL_TID, "done", "close_kept");
+    program.push(Insn::stx(BPF_DW, R10, EV_OPEN_TS, 8));
+    let flags = if paired {
+        SCOPE_IS_OURS | NO_OPEN
+    } else {
+        SCOPE_IS_OURS
+    };
+    program.push(Insn::st_imm(BPF_W, R10, EV_FLAGS, flags as i32));
+    program.label("publish");
+    output.push(&mut program, 6, EVENT, RECORD_BYTES as i32);
+    program.jump_to("done", Insn::jsge_imm(0, 0, 0));
+    count(&mut program, counters_fd, CLOSE_DROP_KEY, DROP_RING, "done");
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
+/// The operation's flags a classic record's `rwbs` letters stand for, as
+/// `blk_fill_rwbs` wrote them: an `F` ahead of the operation's own letter
+/// for a preflush, then `W`, `D` (`DE`), `F`, `R` or `N`, then `F` for FUA,
+/// `A`, `S` and `M`. The values are the ones `collect::io::block` reads, so
+/// the letters it prints back are these.
+pub(crate) fn cmd_flags_of(rwbs: &[u8]) -> u32 {
+    const REQ_OP_WRITE: u32 = 1;
+    const REQ_OP_FLUSH: u32 = 2;
+    const REQ_OP_DISCARD: u32 = 3;
+    const REQ_OP_SECURE_ERASE: u32 = 5;
+    /// `REQ_OP_DRV_IN`, an operation with no letter of its own.
+    const REQ_OP_DRV_IN: u32 = 34;
+    const REQ_SYNC: u32 = 1 << 11;
+    const REQ_META: u32 = 1 << 12;
+    const REQ_FUA: u32 = 1 << 17;
+    const REQ_PREFLUSH: u32 = 1 << 18;
+    const REQ_RAHEAD: u32 = 1 << 19;
+    let end = rwbs
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(rwbs.len());
+    let letters = &rwbs[..end];
+    let mut flags = 0;
+    let mut at = 0;
+    if letters.len() >= 2 && letters[0] == b'F' && b"WDFRN".contains(&letters[1]) {
+        flags |= REQ_PREFLUSH;
+        at = 1;
+    }
+    match letters.get(at) {
+        Some(b'W') => flags |= REQ_OP_WRITE,
+        Some(b'D') if letters.get(at + 1) == Some(&b'E') => {
+            flags |= REQ_OP_SECURE_ERASE;
+            at += 1;
+        }
+        Some(b'D') => flags |= REQ_OP_DISCARD,
+        Some(b'F') => flags |= REQ_OP_FLUSH,
+        Some(b'R') => {}
+        _ => flags |= REQ_OP_DRV_IN,
+    }
+    for letter in letters.iter().skip(at + 1) {
+        flags |= match letter {
+            b'F' => REQ_FUA,
+            b'A' => REQ_RAHEAD,
+            b'S' => REQ_SYNC,
+            b'M' => REQ_META,
+            _ => 0,
+        };
+    }
+    flags
+}
+
 /// The opening program of a kernel-side histogram: when, and nothing else.
 ///
 /// A histogram row is `(device, bucket)`, so the submitter's name, its thread
@@ -1222,7 +1428,10 @@ impl HistRow {
 /// Dropping it detaches both: the links, the programs and the maps are file
 /// descriptors, and the kernel unloads a program when the last one closes.
 pub struct BlockProgram {
-    ring: RingBuffer,
+    ring: Transport,
+    /// The classic road's attachments, held for as long as they run: what
+    /// [`BlockProgram::detach`] drops, the programs kept loaded beside.
+    classic: Vec<super::attach::PerfAttachment>,
     counters: Counters,
     inflight: Option<Hash>,
     open_program: Option<OwnedFd>,
@@ -1491,7 +1700,8 @@ impl BlockProgram {
             .map_err(|error| format!("cannot map the block ring buffer: {error}"))?;
 
         Ok(Self {
-            ring,
+            ring: Transport::from_ring(ring),
+            classic: Vec::new(),
             counters,
             inflight,
             open_program,
@@ -1510,6 +1720,113 @@ impl BlockProgram {
         })
     }
 
+    /// The classic tracepoints (`bpf:tp`), for a kernel without BTF:
+    /// `io.queue` from `block_rq_insert` to `block_rq_issue`, paired by device
+    /// and sector, and `io.size` at the issue. No record carries a request's
+    /// pointer, its kernel stamp or its identity, so the scope is this run's
+    /// own sighting on every event.
+    pub fn load_classic(
+        stage: Stage,
+        submitter: Submitter,
+        requested_ring_bytes: usize,
+    ) -> Result<Self, String> {
+        if stage == Stage::Latency {
+            return Err(
+                "`io.latency` has no classic program: diskstats serves it where BTF is missing"
+                    .to_owned(),
+            );
+        }
+        let descendants = match submitter {
+            Submitter::Process(root) => Some(Descendants::follow(root)?),
+            _ => None,
+        };
+        let kept = Kept {
+            submitter,
+            descendants: descendants.as_ref().map(Descendants::map_fd),
+        };
+        let ring = Transport::create(requested_ring_bytes, Some(0), "omn_blk_ring")?;
+        let counters = Counters::create(DROP_SLOTS, "omn_blk_count")
+            .map_err(|error| map_failure("block drop counter", error))?;
+        let inflight = match stage {
+            Stage::Queue => Some(
+                Hash::create(
+                    CLASSIC_KEY_BYTES,
+                    ENTRY_VALUE_BYTES,
+                    MAX_INFLIGHT,
+                    stage.map_name(),
+                )
+                .map_err(|error| map_failure("in-flight request map", error))?,
+            ),
+            _ => None,
+        };
+        let inflight_fd = inflight.as_ref().map_or(-1, Hash::as_raw_fd);
+        let issue = Record::of("block", "block_rq_issue")?;
+        let close = classic_close_instructions(
+            &issue,
+            stage,
+            kept,
+            inflight_fd,
+            ring.output(),
+            counters.as_raw_fd(),
+        )?;
+        // The open first, for the reason `load_into` gives.
+        let mut classic = Vec::new();
+        if stage == Stage::Queue {
+            let insert = Record::of("block", "block_rq_insert")?;
+            let open = classic_open_instructions(&insert, kept, inflight_fd, counters.as_raw_fd())?;
+            classic.push(super::attach::tracepoint(
+                "block",
+                "block_rq_insert",
+                &open,
+                "omn_blk_open",
+                super::attach::Scope::System,
+            )?);
+        }
+        classic.push(super::attach::tracepoint(
+            "block",
+            "block_rq_issue",
+            &close,
+            "omn_blk_close",
+            super::attach::Scope::System,
+        )?);
+        // Held apart from their attachments, which `detach` drops: what the
+        // kernel counted of their runs stays readable until the end.
+        let program = |attachment: &super::attach::PerfAttachment| {
+            attachment
+                .program()
+                .try_clone()
+                .map_err(|error| format!("cannot hold the block program: {error}"))
+        };
+        let close_program = program(classic.last().expect("the issue program"))?;
+        let open_program = match stage {
+            Stage::Queue => Some(program(&classic[0])?),
+            _ => None,
+        };
+        Ok(Self {
+            ring,
+            classic,
+            counters,
+            inflight,
+            open_program,
+            open_link: None,
+            close_program,
+            close_link: None,
+            histogram: None,
+            close_is_tp_btf: false,
+            close_reads_kernel_stamp: false,
+            no_request_identity: Some(
+                "the classic tracepoints carry no request, so no event has a `req`, and the \
+                 scope is this run's own sighting"
+                    .to_owned(),
+            ),
+            status_is_errno: false,
+            descendants,
+            _submitters: None,
+            insert_program: None,
+            insert_link: None,
+        })
+    }
+
     /// Processes the target started that no program here followed, because
     /// the map of them was full.
     pub fn unfollowed(&self) -> u64 {
@@ -1519,9 +1836,18 @@ impl BlockProgram {
     /// Hands every complete record to `handle`, and counts the records that
     /// were not the size this reader expects rather than reinterpreting them.
     pub fn drain(&mut self, mut handle: impl FnMut(BlockEvent), undecoded: &mut u64) {
+        let classic = !self.classic.is_empty();
         self.ring
             .drain(|bytes| match BlockEvent::from_bytes(bytes) {
-                Some(event) => handle(event),
+                Some(mut event) => {
+                    // The classic record names the operation by its letters,
+                    // carried where the request's identity would be.
+                    if classic {
+                        event.cmd_flags = cmd_flags_of(&event.req.to_ne_bytes());
+                        event.req = 0;
+                    }
+                    handle(event)
+                }
                 None => *undecoded += 1,
             });
     }
@@ -1569,6 +1895,7 @@ impl BlockProgram {
     /// requests. Detached, they run no more; loaded, their account stays
     /// readable until the collector is dropped.
     pub fn detach(&mut self) {
+        self.classic.clear();
         self.insert_link = None;
         self.open_link = None;
         self.close_link = None;
@@ -2561,5 +2888,57 @@ mod tests {
         .expect_err("the prototypes differ");
         assert!(error.contains("blk_status_t"), "{error}");
         assert!(error.contains("produces a number"), "{error}");
+    }
+
+    /// A classic record's letters come back as the flags the collector prints
+    /// the same letters from.
+    #[test]
+    fn the_rwbs_letters_round_trip_through_the_flags() {
+        for letters in [
+            "R", "W", "WS", "WFS", "FWS", "RA", "RM", "D", "DE", "F", "FF", "WSM", "N",
+        ] {
+            let mut bytes = [0u8; 8];
+            bytes[..letters.len()].copy_from_slice(letters.as_bytes());
+            let flags = cmd_flags_of(&bytes);
+            let mut printed = crate::collect::io::block::rwbs(flags);
+            // The collector prints a preflush last, as `P`; the kernel first,
+            // as `F`.
+            if let Some(rest) = printed.strip_suffix('P') {
+                printed = format!("F{rest}");
+            }
+            assert_eq!(printed, letters, "{letters} -> {flags:#x}");
+        }
+    }
+
+    /// The classic programs build against 4.19's block records and publish
+    /// through the transport they are handed.
+    #[test]
+    fn the_classic_block_programs_build_against_the_4_19_records() {
+        let issue = Record::from_layout(
+            "block:block_rq_issue",
+            super::super::attach::parse_layout(
+                "\tfield:dev_t dev;\toffset:8;\tsize:4;\tsigned:0;\n\
+                 \tfield:sector_t sector;\toffset:16;\tsize:8;\tsigned:0;\n\
+                 \tfield:unsigned int nr_sector;\toffset:24;\tsize:4;\tsigned:0;\n\
+                 \tfield:unsigned int bytes;\toffset:28;\tsize:4;\tsigned:0;\n\
+                 \tfield:char rwbs[8];\toffset:32;\tsize:8;\tsigned:1;\n\
+                 \tfield:char comm[16];\toffset:40;\tsize:16;\tsigned:1;\n",
+            ),
+        );
+        let kept = Kept::only(Submitter::Process(42));
+        for stage in [Stage::Queue, Stage::Size] {
+            let close = classic_close_instructions(&issue, stage, kept, 3, Output::PerfArray(4), 5)
+                .unwrap_or_else(|error| panic!("{stage:?}: {error}"));
+            assert!(close.contains(&Insn::ldx(BPF_W, 1, 6, 8)), "dev");
+            assert!(close.contains(&Insn::ldx(BPF_DW, 1, 6, 16)), "sector");
+            assert!(close
+                .iter()
+                .any(crate::bpf::transport::Output::is_output_call));
+        }
+        classic_open_instructions(&issue, kept, 3, 5).expect("the insert program");
+        // The key is below every slot of both frames: a key over the record
+        // clobbered `dev` on the first Debian 10 run.
+        assert!(CLASSIC_KEY + CLASSIC_KEY_BYTES as i16 <= HIST_VALUE);
+        assert!(CLASSIC_KEY + CLASSIC_KEY_BYTES as i16 <= ENTRY_VALUE);
     }
 }

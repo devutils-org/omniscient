@@ -48,6 +48,8 @@ pub struct Prepare {
     /// The request's predicate, applied over the drained rows; see
     /// [`StallCollector::predicate`].
     pub filter: Option<FilterExpr>,
+    /// The classic tracepoints (`bpf:tp`), for a kernel without BTF.
+    pub classic: bool,
 }
 
 impl Prepare {
@@ -114,18 +116,16 @@ impl Prepared for Prepare {
             }
         }
 
-        Ok(Box::new(StallCollector::new(
-            self.stall,
-            self.mode,
-            tgid,
-            cgroups,
-            self.filter,
-        )))
+        let mut collector = StallCollector::new(self.stall, self.mode, tgid, cgroups, self.filter);
+        collector.classic = self.classic;
+        Ok(Box::new(collector))
     }
 }
 
 pub struct StallCollector {
     stall: Stall,
+    /// Through the classic tracepoints (`bpf:tp`).
+    classic: bool,
     mode: Mode,
     /// The thread group whose episodes are kept, filtered in the program.
     tgid: Option<u32>,
@@ -171,6 +171,7 @@ impl StallCollector {
     ) -> Self {
         Self {
             stall,
+            classic: false,
             mode,
             tgid,
             cgroups,
@@ -410,7 +411,11 @@ impl Collector for StallCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        let program = StallProgram::load(self.stall, self.tgid)?;
+        let program = if self.classic {
+            StallProgram::load_classic(self.stall, self.tgid)?
+        } else {
+            StallProgram::load(self.stall, self.tgid)?
+        };
         self.absent = program.absent().to_vec();
         self.program = Some(program);
         self.run_opened_ns = monotonic_ns();
@@ -659,6 +664,7 @@ mod tests {
                 freq: "997hz".parse().expect("a frequency"),
             },
             filter: None,
+            classic: false,
         });
         let Err(error) = prepared.attach(&Target::System) else {
             panic!("a sampled mode must be refused");
@@ -676,6 +682,7 @@ mod tests {
             stall: Stall::Compaction,
             mode: Mode::Trace,
             filter: None,
+            classic: false,
         });
         let Err(error) = prepared.attach(&Target::Pid(vec![1])) else {
             panic!("compaction is not accounted per process");
@@ -692,6 +699,7 @@ mod tests {
             stall: Stall::Reclaim,
             mode: Mode::Trace,
             filter: None,
+            classic: false,
         });
         let _collector = prepared
             .attach(&Target::Pid(vec![std::process::id() as i32]))

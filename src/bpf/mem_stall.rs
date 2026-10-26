@@ -33,12 +33,14 @@
 
 use std::os::fd::{AsRawFd, OwnedFd};
 
+use super::context::Record;
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
 use super::map::{map_failure, row_map, select_rows, Counters, Hash, Rows};
 use super::mem_program::{
     bucket_low, comm, count_drop, load, long, push_log2_bucket, read_cgroup_id, read_comm,
     read_pid_tgid, word,
 };
+use super::proc_events::Attached;
 use super::syscall;
 use super::DrainLosses;
 
@@ -432,6 +434,7 @@ fn begin_instructions(
 
 /// The program on the `end` tracepoint: this thread is out, and the difference
 /// is the measurement.
+#[allow(clippy::too_many_arguments)]
 fn end_instructions(
     stall: Stall,
     scope: u32,
@@ -439,13 +442,22 @@ fn end_instructions(
     starts_fd: i32,
     rows_fd: i32,
     drops_fd: i32,
+    classic: Option<&Record>,
 ) -> Result<Vec<Insn>, String> {
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
     // Read before any helper call can clobber the low registers, and kept in a
-    // callee-saved one.
-    if let Some((at, _)) = stall.yields() {
-        program.push(Insn::ldx(BPF_DW, 9, 6, at));
+    // callee-saved one. On the classic road the yield is the record's own
+    // field, where tracefs says it is; the row's name overwrites the scratch
+    // it may pass through.
+    match (stall.yields(), classic) {
+        (Some((at, _)), None) => {
+            program.push(Insn::ldx(BPF_DW, 9, 6, at));
+        }
+        (Some(_), Some(record)) => {
+            record.load(&mut program, 9, 6, "nr_reclaimed", ROW_VALUE + VALUE_COMM)?;
+        }
+        (None, _) => {}
     }
     program.push(Insn::call(helper::KTIME_GET_NS));
     program.push(Insn::mov64_reg(8, 0));
@@ -568,6 +580,8 @@ pub struct StallProgram {
     absent: Vec<String>,
     programs: Vec<OwnedFd>,
     _links: Vec<OwnedFd>,
+    /// The classic road's attachments.
+    classic: Vec<Attached>,
 }
 
 /// What the two programs could not record, read off their own counters.
@@ -588,7 +602,11 @@ impl StallProgram {
     /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
     /// program's own counters can say an occurrence was never seen.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::program::skipped(self.programs.iter())
+        crate::bpf::program::skipped(
+            self.programs
+                .iter()
+                .chain(self.classic.iter().filter_map(Attached::program)),
+        )
     }
 
     pub fn load(stall: Stall, target_tgid: Option<u32>) -> Result<Self, String> {
@@ -658,6 +676,7 @@ impl StallProgram {
                 in_flight.as_raw_fd(),
                 rows.as_raw_fd(),
                 drops.as_raw_fd(),
+                None,
             )?;
             let program = load(&end, end_name)?;
             links.push(
@@ -676,6 +695,65 @@ impl StallProgram {
             absent,
             programs,
             _links: links,
+            classic: Vec::new(),
+        })
+    }
+
+    /// The classic tracepoints (`bpf:tp`), for a kernel without BTF: the same
+    /// programs, the pages reclaimed read where tracefs says they are. A
+    /// tracepoint this kernel does not define is absent as the raw road says
+    /// it is: refused when required, noted otherwise.
+    pub fn load_classic(stall: Stall, target_tgid: Option<u32>) -> Result<Self, String> {
+        let category = match stall {
+            Stall::Reclaim => "vmscan",
+            Stall::Compaction => "compaction",
+        };
+        let [live_name, rows_name, drops_name, begin_name, end_name] = stall.names();
+        let in_flight = Hash::create(START_KEY_BYTES, START_VALUE_BYTES, MAX_IN_FLIGHT, live_name)
+            .map_err(|error| map_failure("in-flight map", error))?;
+        let rows = Rows::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, rows_name)
+            .map_err(|error| map_failure("stall histogram map", error))?;
+        let drops = Counters::create(DROP_SLOTS, drops_name)
+            .map_err(|error| map_failure("stall drop counter", error))?;
+        let begin = begin_instructions(target_tgid, in_flight.as_raw_fd(), drops.as_raw_fd())?;
+        let mut classic = Vec::new();
+        let mut absent = Vec::new();
+        for site in stall.begins() {
+            match Record::of(category, site.name) {
+                Ok(_) => classic.push(Attached::classic(category, site.name, &begin, begin_name)?),
+                Err(reason) if site.required => return Err(reason),
+                Err(reason) => absent.push(reason),
+            }
+        }
+        for site in stall.ends() {
+            let record = match Record::of(category, site.name) {
+                Ok(record) => record,
+                Err(reason) if site.required => return Err(reason),
+                Err(reason) => {
+                    absent.push(reason);
+                    continue;
+                }
+            };
+            let end = end_instructions(
+                stall,
+                site.scope,
+                target_tgid,
+                in_flight.as_raw_fd(),
+                rows.as_raw_fd(),
+                drops.as_raw_fd(),
+                Some(&record),
+            )?;
+            classic.push(Attached::classic(category, site.name, &end, end_name)?);
+        }
+        Ok(Self {
+            stall,
+            in_flight,
+            rows,
+            drops,
+            absent,
+            programs: Vec::new(),
+            _links: Vec::new(),
+            classic,
         })
     }
 
@@ -849,7 +927,7 @@ mod tests {
                 ),
                 (
                     "the end program",
-                    end_instructions(stall, SCOPE_GLOBAL, None, 3, 4, 5).expect("a program"),
+                    end_instructions(stall, SCOPE_GLOBAL, None, 3, 4, 5, None).expect("a program"),
                 ),
             ] {
                 let called: Vec<i32> = instructions
@@ -880,7 +958,7 @@ mod tests {
     #[test]
     fn the_duration_is_a_difference_and_not_a_timestamp() {
         let program =
-            end_instructions(Stall::Reclaim, SCOPE_GLOBAL, None, 3, 4, 5).expect("a program");
+            end_instructions(Stall::Reclaim, SCOPE_GLOBAL, None, 3, 4, 5, None).expect("a program");
         assert!(
             program.iter().any(|insn| *insn == Insn::sub64_reg(1, 7)),
             "the program must subtract the moment the thread entered from the moment it left"
@@ -904,10 +982,11 @@ mod tests {
         );
         // The end program carries it once, on the path of an ending the map
         // could not pair: another process's is no loss of this run's.
-        let end = end_instructions(Stall::Reclaim, SCOPE_GLOBAL, None, 3, 4, 5).expect("a program");
-        assert!(!end.iter().any(|insn| insn.imm == 4242));
         let end =
-            end_instructions(Stall::Reclaim, SCOPE_GLOBAL, Some(4242), 3, 4, 5).expect("a program");
+            end_instructions(Stall::Reclaim, SCOPE_GLOBAL, None, 3, 4, 5, None).expect("a program");
+        assert!(!end.iter().any(|insn| insn.imm == 4242));
+        let end = end_instructions(Stall::Reclaim, SCOPE_GLOBAL, Some(4242), 3, 4, 5, None)
+            .expect("a program");
         assert_eq!(end.iter().filter(|insn| insn.imm == 4242).count(), 1);
     }
 
@@ -916,7 +995,7 @@ mod tests {
     #[test]
     fn the_yield_is_accumulated_only_where_the_tracepoint_carries_one() {
         let atomics = |stall: Stall| {
-            end_instructions(stall, SCOPE_GLOBAL, None, 3, 4, 5)
+            end_instructions(stall, SCOPE_GLOBAL, None, 3, 4, 5, None)
                 .expect("a program")
                 .iter()
                 .filter(|insn| insn.code == 0xdb)
@@ -939,7 +1018,7 @@ mod tests {
     #[test]
     fn an_unpaired_end_is_counted_and_not_measured() {
         let program =
-            end_instructions(Stall::Reclaim, SCOPE_GLOBAL, None, 3, 4, 5).expect("a program");
+            end_instructions(Stall::Reclaim, SCOPE_GLOBAL, None, 3, 4, 5, None).expect("a program");
         let slots: Vec<i32> = program
             .iter()
             .filter(|insn| insn.code == 0x62 && insn.off == DROP_KEY)
@@ -1059,7 +1138,7 @@ mod tests {
     #[test]
     fn the_last_end_is_written_on_a_new_row_and_on_an_existing_one() {
         let program =
-            end_instructions(Stall::Reclaim, SCOPE_GLOBAL, None, 3, 4, 5).expect("a program");
+            end_instructions(Stall::Reclaim, SCOPE_GLOBAL, None, 3, 4, 5, None).expect("a program");
         // BPF_STX | BPF_MEM | BPF_DW
         let stores: Vec<(u8, u8)> = program
             .iter()
@@ -1080,7 +1159,7 @@ mod tests {
     #[test]
     fn the_row_map_is_taken_from_the_slot_once_per_run() {
         let program =
-            end_instructions(Stall::Reclaim, SCOPE_GLOBAL, None, 3, 4, 5).expect("a program");
+            end_instructions(Stall::Reclaim, SCOPE_GLOBAL, None, 3, 4, 5, None).expect("a program");
         crate::bpf::map::assert_rows_taken_once(&program, 4);
     }
 }

@@ -63,6 +63,8 @@ pub struct Prepare {
     /// The request's predicate, which this collector applies itself; see
     /// [`AllocationCollector::predicate`].
     pub filter: Option<FilterExpr>,
+    /// The classic tracepoints (`bpf:tp`), for a kernel without BTF.
+    pub classic: bool,
 }
 
 impl Prepare {
@@ -127,12 +129,10 @@ impl Prepared for Prepare {
             }
         };
 
-        Ok(Box::new(AllocationCollector::new(
-            self.allocator,
-            self.mode,
-            cgroups,
-            self.filter,
-        )))
+        let mut collector =
+            AllocationCollector::new(self.allocator, self.mode, cgroups, self.filter);
+        collector.classic = self.classic;
+        Ok(Box::new(collector))
     }
 }
 
@@ -174,6 +174,8 @@ pub(super) fn descendants(root: &Cgroup) -> Result<BTreeSet<u64>, String> {
 
 pub struct AllocationCollector {
     allocator: Allocator,
+    /// Through the classic tracepoints (`bpf:tp`).
+    classic: bool,
     /// What the two declared modes differ by: `trace` publishes one event per
     /// row per drain, `count` adds the drains up and reports one total per row
     /// over the whole window.
@@ -221,6 +223,7 @@ impl AllocationCollector {
         predicate: Option<FilterExpr>,
     ) -> Self {
         Self {
+            classic: false,
             allocator,
             mode,
             cgroups,
@@ -468,7 +471,11 @@ impl Collector for AllocationCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        self.program = Some(AllocProgram::load(self.allocator)?);
+        self.program = Some(if self.classic {
+            AllocProgram::load_classic(self.allocator)?
+        } else {
+            AllocProgram::load(self.allocator)?
+        });
         self.run_opened_ns = monotonic_ns();
         self.window_opened_ns = self.run_opened_ns;
         Ok(())
@@ -682,6 +689,7 @@ mod tests {
             },
             keys: Vec::new(),
             filter: None,
+            classic: false,
         });
         let Err(error) = prepared.attach(&Target::System) else {
             panic!("a sampled mode must be refused");
@@ -699,6 +707,7 @@ mod tests {
             mode: Mode::Trace,
             keys: vec![KeyKind::Mem],
             filter: None,
+            classic: false,
         });
         let Err(error) = prepared.attach(&Target::System) else {
             panic!("a `mem` key must be refused");
@@ -720,6 +729,7 @@ mod tests {
                 mode: Mode::Trace,
                 keys: Vec::new(),
                 filter: None,
+                classic: false,
             });
             let Err(error) = prepared.attach(&target) else {
                 panic!("{target} must be refused for {allocator:?}");

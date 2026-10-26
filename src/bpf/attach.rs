@@ -105,6 +105,13 @@ impl PerfAttachment {
     pub fn events(&self) -> usize {
         self.events.len()
     }
+
+    /// Closes the perf events, which detaches the program, and hands the
+    /// program back: what the kernel counted of its runs stays readable for
+    /// as long as it is held.
+    pub fn detach(self) -> OwnedFd {
+        self.program
+    }
 }
 
 /// Reads the numeric id of a tracepoint, the way the attach will.

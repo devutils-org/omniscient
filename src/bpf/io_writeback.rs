@@ -24,12 +24,15 @@
 //! *remaining* budget, which for a `sync` is `LONG_MAX` and for background
 //! writeback is a number the kernel picked.
 
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::AsRawFd;
 
+use super::context::Record;
 use super::insn::{helper, read_field, Insn, Program, BPF_DW, BPF_W, R10};
 use super::map::{map_failure, Counters, Hash};
+use super::proc_events::Attached;
 use super::ring::{ring_bytes, RingBuffer};
 use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
+use super::transport::{Output, Transport};
 use crate::bpf::program::load_raw_tracepoint as load;
 
 /// The prototype both programs are written against.
@@ -287,15 +290,114 @@ fn written_instructions(
     Ok(instructions)
 }
 
+/// The classic programs' key: the flusher thread, which runs one round of
+/// `wb_writeback` at a time. A classic record carries no work item to pair
+/// by.
+fn classic_key(program: &mut Program) {
+    program.push(Insn::st_imm(BPF_DW, R10, ENTRY_KEY, 0));
+    program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
+    program.push(Insn::stx(BPF_W, R10, ENTRY_KEY, 0));
+}
+
+/// The classic program on `writeback:writeback_start`: when, and the budget,
+/// under the flusher thread.
+fn classic_start_instructions(
+    record: &Record,
+    open_fd: i32,
+    counters_fd: i32,
+) -> Result<Vec<Insn>, String> {
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::stx(BPF_DW, R10, ENTRY_VALUE + VAL_START_TS, 0));
+    record.load(&mut program, 1, 6, "nr_pages", SCRATCH)?;
+    program.push(Insn::stx(BPF_DW, R10, ENTRY_VALUE + VAL_PAGES, 1));
+    classic_key(&mut program);
+    program.extend(Insn::load_map_fd(1, open_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, ENTRY_KEY as i32));
+    program.push(Insn::mov64_reg(3, R10));
+    program.push(Insn::add64_imm(3, ENTRY_VALUE as i32));
+    program.push(Insn::mov64_imm(4, 0));
+    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
+    program.jump_to("done", Insn::jsge_imm(0, 0, 0));
+    count(&mut program, counters_fd, DROP_OPEN, "done");
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
+/// The classic program on `writeback:writeback_written`: the record's own
+/// `sb_dev`, `reason`, `sync_mode` and remaining budget. It names the backing
+/// device by its name alone, so `bdi_id` is zero.
+fn classic_written_instructions(
+    record: &Record,
+    open_fd: i32,
+    output: Output,
+    counters_fd: i32,
+) -> Result<Vec<Insn>, String> {
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::mov64_reg(8, 0));
+    for slot in 0..(RECORD_BYTES / 8) as i16 {
+        program.push(Insn::st_imm(BPF_DW, R10, EVENT + slot * 8, 0));
+    }
+    program.push(Insn::stx(BPF_DW, R10, EV_TS, 8));
+    program.push(Insn::call(helper::GET_SMP_PROCESSOR_ID));
+    program.push(Insn::stx(BPF_W, R10, EV_CPU, 0));
+    for (field, into) in [
+        ("reason", EV_REASON),
+        ("sync_mode", EV_SYNC_MODE),
+        ("sb_dev", EV_DEV),
+    ] {
+        record.load(&mut program, 1, 6, field, SCRATCH)?;
+        program.push(Insn::stx(BPF_W, R10, into, 1));
+    }
+    classic_key(&mut program);
+    program.extend(Insn::load_map_fd(1, open_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, ENTRY_KEY as i32));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    program.jump_to("unpaired", Insn::jeq_imm(0, 0, 0));
+    program.push(Insn::ldx(BPF_DW, 9, 0, VAL_START_TS));
+    program.push(Insn::ldx(BPF_DW, 7, 0, VAL_PAGES));
+    program.extend(Insn::load_map_fd(1, open_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, ENTRY_KEY as i32));
+    program.push(Insn::call(helper::MAP_DELETE_ELEM));
+    program.push(Insn::mov64_reg(1, 8));
+    program.push(Insn::sub64_reg(1, 9));
+    program.push(Insn::stx(BPF_DW, R10, EV_DURATION, 1));
+    // The budget at the start, less what is left now, as the raw program
+    // computes it.
+    record.load(&mut program, 2, 6, "nr_pages", SCRATCH)?;
+    program.push(Insn::sub64_reg(7, 2));
+    program.push(Insn::stx(BPF_DW, R10, EV_PAGES, 7));
+    output.push(&mut program, 6, EVENT, RECORD_BYTES as i32);
+    program.jump_to("done", Insn::jsge_imm(0, 0, 0));
+    count(&mut program, counters_fd, DROP_RING, "done");
+    program.jump_to("done", Insn::ja());
+    program.label("unpaired");
+    count(&mut program, counters_fd, UNPAIRED, "done");
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
 /// Two loaded, attached programs and the maps between them.
 pub struct WritebackProgram {
-    ring: RingBuffer,
+    ring: Transport,
     counters: Counters,
     open: Hash,
-    start_program: OwnedFd,
-    _start_link: OwnedFd,
-    written_program: OwnedFd,
-    _written_link: OwnedFd,
+    /// The start program, then the written one.
+    attached: Vec<Attached>,
 }
 
 impl WritebackProgram {
@@ -332,13 +434,49 @@ impl WritebackProgram {
             .map_err(|error| format!("cannot map the writeback ring buffer: {error}"))?;
 
         Ok(Self {
+            ring: Transport::from_ring(ring),
+            counters,
+            open,
+            attached: vec![
+                Attached::Raw {
+                    program: start_program,
+                    _link: start_link,
+                },
+                Attached::Raw {
+                    program: written_program,
+                    _link: written_link,
+                },
+            ],
+        })
+    }
+
+    /// The classic tracepoints (`bpf:tp`), for a kernel without BTF: a round
+    /// is paired by the flusher thread that runs it.
+    pub fn load_classic(requested_ring_bytes: usize) -> Result<Self, String> {
+        let ring = Transport::create(requested_ring_bytes, Some(0), "omn_wb_ring")?;
+        let counters = Counters::create(DROP_SLOTS, "omn_wb_count")
+            .map_err(|error| map_failure("writeback drop counter", error))?;
+        let open = Hash::create(ENTRY_KEY_BYTES, ENTRY_VALUE_BYTES, MAX_OPEN, "omn_wb_open")
+            .map_err(|error| map_failure("writeback round map", error))?;
+        let start = Record::of("writeback", "writeback_start")?;
+        let written = Record::of("writeback", "writeback_written")?;
+        let start = classic_start_instructions(&start, open.as_raw_fd(), counters.as_raw_fd())?;
+        let written = classic_written_instructions(
+            &written,
+            open.as_raw_fd(),
+            ring.output(),
+            counters.as_raw_fd(),
+        )?;
+        // The start first, for the reason `load` gives.
+        let attached = vec![
+            Attached::classic("writeback", "writeback_start", &start, "omn_wb_start")?,
+            Attached::classic("writeback", "writeback_written", &written, "omn_wb_end")?,
+        ];
+        Ok(Self {
             ring,
             counters,
             open,
-            start_program,
-            _start_link: start_link,
-            written_program,
-            _written_link: written_link,
+            attached,
         })
     }
 
@@ -352,7 +490,7 @@ impl WritebackProgram {
     /// Runs of these programs the kernel skipped because one was already
     /// running on that cpu; see `BlockProgram::skipped`, where it was measured.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::program::skipped([&self.start_program, &self.written_program])
+        crate::bpf::program::skipped(self.attached.iter().filter_map(Attached::program))
     }
 
     /// Rounds the map could not hold, and records the ring could not hold.

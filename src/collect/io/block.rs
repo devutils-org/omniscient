@@ -127,6 +127,8 @@ pub struct Prepare {
     /// Count the latencies into a log2 histogram in the kernel rather than
     /// publishing a record per request: see [`histogram_is_enough`].
     pub in_kernel_histogram: bool,
+    /// The classic tracepoints (`bpf:tp`), for a kernel without BTF.
+    pub classic: bool,
 }
 
 /// Whether a request of `io.latency` is answered whole by a histogram the
@@ -197,6 +199,7 @@ impl Prepared for Prepare {
 
         let mut collector = BlockCollector::new(measure, self.mode, submitter, self.filter);
         collector.in_kernel_histogram = self.in_kernel_histogram && measure == Measure::Latency;
+        collector.classic = self.classic;
         Ok(Box::new(collector))
     }
 }
@@ -208,6 +211,8 @@ fn first(pids: &[i32], kind: &str) -> Result<i32, String> {
 }
 
 pub struct BlockCollector {
+    /// Through the classic tracepoints (`bpf:tp`).
+    classic: bool,
     measure: Measure,
     mode: Mode,
     submitter: Submitter,
@@ -296,6 +301,7 @@ impl BlockCollector {
             no_request_identity: None,
             status_is_errno: false,
             in_kernel_histogram: false,
+            classic: false,
             close_is_tp_btf: false,
             close_reads_kernel_stamp: false,
             histogram_requests: 0,
@@ -495,18 +501,20 @@ impl BlockCollector {
                 // a spinning disk describes neither, and recovering one from
                 // the other is not something any later layer can do.
                 KeyValue::dev(major, minor),
-                // The request, scoped by the life of its pointer. This is the
-                // key the `scoped_eq` join reads, and the reason it is scoped
-                // is that the pointer is reissued within milliseconds.
-                KeyValue::Blk {
-                    ptr: record.rq,
-                    open_ts: record.open_ts,
-                },
                 // The submitting thread, captured where it was still the
                 // current one.
                 KeyValue::task(record.tid as i32),
             ]
             .into_iter()
+            // The request, scoped by the life of its pointer. This is the
+            // key the `scoped_eq` join reads, and the reason it is scoped is
+            // that the pointer is reissued within milliseconds. A classic
+            // record carries no pointer, and a zero would join every request
+            // with every other.
+            .chain((record.rq != 0).then_some(KeyValue::Blk {
+                ptr: record.rq,
+                open_ts: record.open_ts,
+            }))
             // The request that thread was serving, read from its own storage
             // at the same moment. Absent, not zero, when it was serving none.
             .chain((record.req != 0).then(|| KeyValue::Req {
@@ -596,7 +604,7 @@ fn direction(cmd_flags: u32) -> Option<Direction> {
 /// on what `blktrace` and every block tracepoint in tracefs already call these.
 /// The flags are carried raw beside it so a letter this function got wrong can
 /// be seen to be wrong.
-fn rwbs(cmd_flags: u32) -> String {
+pub(crate) fn rwbs(cmd_flags: u32) -> String {
     /// `REQ_OP_BITS` is 8, so the operation is the low byte and the flags are
     /// everything above it.
     const OP_MASK: u32 = 0xff;
@@ -647,7 +655,9 @@ impl Collector for BlockCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        let program = if self.in_kernel_histogram {
+        let program = if self.classic {
+            BlockProgram::load_classic(self.measure.stage(), self.submitter, RING_BYTES)?
+        } else if self.in_kernel_histogram {
             BlockProgram::load_histogram(self.measure.stage(), self.submitter)?
         } else {
             BlockProgram::load(self.measure.stage(), self.submitter, RING_BYTES)?
@@ -797,7 +807,9 @@ impl Collector for BlockCollector {
             );
         }
 
-        if self.own_scope > 0 {
+        // On the classic road no request has the kernel's stamp, and the
+        // backend's degradation says the scope is this run's.
+        if self.own_scope > 0 && !self.classic {
             notes.push(format!(
                 "{} of the requests carried no `start_time_ns` -- the kernel keeps no statistics \
                  for their queue -- so their `blk:rq@open_ts` is scoped by this run's own first \
@@ -840,7 +852,15 @@ impl Collector for BlockCollector {
                 self.direct
             ));
         }
-        if self.predating > 0 {
+        if self.predating > 0 && self.classic {
+            notes.push(format!(
+                "{} requests were issued with no insert this run saw: sent straight to the \
+                 device (blk-mq without a scheduler queues nothing), or inserted before these \
+                 programs attached. The classic record carries no creation stamp to tell the \
+                 two apart, so they are in no event",
+                self.predating
+            ));
+        } else if self.predating > 0 {
             notes.push(format!(
                 "{} requests were issued that the kernel had created before these programs \
                  attached; whether they queued is not knowable and they are in no event",
@@ -1101,6 +1121,7 @@ mod tests {
             },
             filter: None,
             in_kernel_histogram: false,
+            classic: false,
         });
         let Err(error) = prepared.attach(&Target::System) else {
             panic!("a sampled mode must be refused");
@@ -1124,6 +1145,7 @@ mod tests {
                 mode: Mode::Count,
                 filter: None,
                 in_kernel_histogram: false,
+                classic: false,
             })
             .attach(&Target::System);
             assert_eq!(
@@ -1145,6 +1167,7 @@ mod tests {
             mode: Mode::Trace,
             filter: None,
             in_kernel_histogram: false,
+            classic: false,
         });
         let Err(error) = prepared.attach(&Target::Cgroup("/sys/fs/cgroup".into())) else {
             panic!("a cgroup target must be refused");

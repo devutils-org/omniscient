@@ -19,7 +19,7 @@
 //! they are ordered by which answers its question better and the entry says
 //! what the cheaper one gives up.
 
-mod block;
+pub(crate) mod block;
 use block::histogram_is_enough;
 mod diskstats;
 mod fsync;
@@ -126,6 +126,7 @@ pub fn factories() -> Vec<Factory> {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
                 in_kernel_histogram: block::histogram_is_enough(&resolved.request),
+                classic: false,
             }))
         }),
         Factory::new("io.queue", "bpf:raw_tp", |resolved| {
@@ -134,6 +135,16 @@ pub fn factories() -> Vec<Factory> {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
                 in_kernel_histogram: false,
+                classic: false,
+            }))
+        }),
+        Factory::new("io.queue", "bpf:tp", |resolved| {
+            Ok(Box::new(block::Prepare {
+                measure: Measure::Queue,
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+                in_kernel_histogram: false,
+                classic: true,
             }))
         }),
         Factory::new("io.size", "bpf:raw_tp", |resolved| {
@@ -142,6 +153,16 @@ pub fn factories() -> Vec<Factory> {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
                 in_kernel_histogram: false,
+                classic: false,
+            }))
+        }),
+        Factory::new("io.size", "bpf:tp", |resolved| {
+            Ok(Box::new(block::Prepare {
+                measure: Measure::Size,
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+                in_kernel_histogram: false,
+                classic: true,
             }))
         }),
         // The two layers above the block one, over fentry and bucketed in the
@@ -232,6 +253,14 @@ pub fn factories() -> Vec<Factory> {
             Ok(Box::new(writeback::Prepare {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
+                classic: false,
+            }))
+        }),
+        Factory::new("io.writeback", "bpf:tp", |resolved| {
+            Ok(Box::new(writeback::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+                classic: true,
             }))
         }),
     ]

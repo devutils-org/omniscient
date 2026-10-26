@@ -142,7 +142,7 @@
   unit: count
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_page_alloc(page *, unsigned int, gfp_t, int)", "raw_tracepoint:mm_page_free(page *, unsigned int)", "bpf_map:ringbuf"], cost: med, drained: true}
-    - {id: "bpf:tp", requires: ["tracepoint:kmem:mm_page_alloc", "tracepoint:kmem:mm_page_free", "bpf"], cost: med, equivalent: true}
+    - {id: "bpf:tp", requires: ["tracepoint:kmem:mm_page_alloc", "tracepoint:kmem:mm_page_free", "bpf"], cost: med, equivalent: true, drained: true}
     # The allocator's own count, by zone, read around the window: what a
     # container or a locked-down kernel still has.
     - {id: "fs:proc", requires: ["/proc/vmstat"], cost: free, modes: [count], emits: [summary, rate, raw],
@@ -167,7 +167,7 @@
   unit: bytes
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:kmalloc(long unsigned int, void *, size_t, size_t, gfp_t, int)|(long unsigned int, void *, size_t, size_t, gfp_t)", "raw_tracepoint:kfree(long unsigned int, void *)", "bpf_map:ringbuf"], cost: med, drained: true}
-    - {id: "bpf:tp", requires: ["tracepoint:kmem:kmalloc", "tracepoint:kmem:kfree", "bpf"], cost: med, equivalent: true}
+    - {id: "bpf:tp", requires: ["tracepoint:kmem:kmalloc", "tracepoint:kmem:kfree", "bpf"], cost: med, equivalent: true, drained: true}
   modes: [trace, count]
   emits: [hist, topk, rate, raw, summary]
   targets: {system: native}

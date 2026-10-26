@@ -261,6 +261,16 @@ pub fn factories() -> Vec<Factory> {
                 mode: resolved.request.mode,
                 keys: resolved.request.keys.clone(),
                 filter: resolved.request.filter.clone(),
+                classic: false,
+            }))
+        }),
+        Factory::new("mem.page_alloc", "bpf:tp", |resolved| {
+            Ok(Box::new(allocations::Prepare {
+                allocator: Allocator::Pages,
+                mode: resolved.request.mode,
+                keys: resolved.request.keys.clone(),
+                filter: resolved.request.filter.clone(),
+                classic: true,
             }))
         }),
         Factory::new("mem.kmalloc", "bpf:raw_tp", |resolved| {
@@ -269,6 +279,16 @@ pub fn factories() -> Vec<Factory> {
                 mode: resolved.request.mode,
                 keys: resolved.request.keys.clone(),
                 filter: resolved.request.filter.clone(),
+                classic: false,
+            }))
+        }),
+        Factory::new("mem.kmalloc", "bpf:tp", |resolved| {
+            Ok(Box::new(allocations::Prepare {
+                allocator: Allocator::Slab,
+                mode: resolved.request.mode,
+                keys: resolved.request.keys.clone(),
+                filter: resolved.request.filter.clone(),
+                classic: true,
             }))
         }),
         Factory::new("mem.reclaim", "bpf:raw_tp", |resolved| {
@@ -276,6 +296,15 @@ pub fn factories() -> Vec<Factory> {
                 stall: Stall::Reclaim,
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
+                classic: false,
+            }))
+        }),
+        Factory::new("mem.reclaim", "bpf:tp", |resolved| {
+            Ok(Box::new(stall::Prepare {
+                stall: Stall::Reclaim,
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+                classic: true,
             }))
         }),
         Factory::new("mem.compaction", "bpf:raw_tp", |resolved| {
@@ -283,6 +312,15 @@ pub fn factories() -> Vec<Factory> {
                 stall: Stall::Compaction,
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
+                classic: false,
+            }))
+        }),
+        Factory::new("mem.compaction", "bpf:tp", |resolved| {
+            Ok(Box::new(stall::Prepare {
+                stall: Stall::Compaction,
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+                classic: true,
             }))
         }),
     ]

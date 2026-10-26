@@ -32,15 +32,17 @@
 //! are, in the run's own notes, and `docs/families/mem.md` records the catalog
 //! change that would make them events.
 
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::AsRawFd;
 
 use super::btf::Btf;
+use super::context::Record;
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
 use super::map::{map_failure, row_map, select_rows, Counters, Rows};
 use super::mem_program::{
     bucket_low, comm, count_drop, load, long, push_log2_bucket, read_cgroup_id, read_comm,
     read_pid_tgid, word,
 };
+use super::proc_events::Attached;
 use super::syscall;
 use super::DrainLosses;
 
@@ -350,28 +352,43 @@ impl AllocRow {
 }
 
 /// Builds the program for one tracepoint.
+/// Where a site's program finds the sizes: the raw tracepoint's argument
+/// slots, which BTF vouches for, or the classic record's fields, which
+/// tracefs lays out (`bytes_alloc`, `bytes_req`, `order`).
+#[derive(Clone, Copy)]
+enum Context<'a> {
+    Raw(&'a Btf),
+    Classic(&'a Record),
+}
+
 fn instructions(
-    btf: &Btf,
+    context: Context,
     site: &Site,
     with_cgroup: bool,
     rows_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
-    crate::bpf::program::prototype(btf, site.tracepoint, site.signatures, site.reads)?;
-
+    if let Context::Raw(btf) = context {
+        crate::bpf::program::prototype(btf, site.tracepoint, site.signatures, site.reads)?;
+    }
+    // Eight bytes the classic loads may copy an unaligned field through,
+    // written over later by the row's name.
+    const SCRATCH: i16 = ROW_VALUE + VALUE_COMM;
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
-
     // The two sizes go in callee-saved registers, because everything after this
     // is helper calls and they clobber r1 through r5.
-    match site.size {
-        Size::Bytes { given, asked } => {
+    match (site.size, context) {
+        (Size::Bytes { given, asked }, Context::Raw(_)) => {
             program.push(Insn::ldx(BPF_DW, 7, 6, given));
             program.push(Insn::ldx(BPF_DW, 8, 6, asked));
         }
-        Size::Order(_) | Size::Silent => {}
+        (Size::Bytes { .. }, Context::Classic(record)) => {
+            record.load(&mut program, 7, 6, "bytes_alloc", SCRATCH)?;
+            record.load(&mut program, 8, 6, "bytes_req", SCRATCH)?;
+        }
+        (Size::Order(_) | Size::Silent, _) => {}
     }
-
     // The bucket, in r3, before anything can call a helper: `push_log2_bucket`
     // computes it through r1 and r2.
     match site.size {
@@ -379,7 +396,13 @@ fn instructions(
         // int` in a 64-bit slot, and what the kernel left in the upper half is
         // not part of the order.
         Size::Order(at) => {
-            program.push(Insn::ldx(BPF_W, 3, 6, at));
+            match context {
+                Context::Raw(_) => program.push(Insn::ldx(BPF_W, 3, 6, at)),
+                Context::Classic(record) => {
+                    record.load(&mut program, 3, 6, "order", SCRATCH)?;
+                    &mut program
+                }
+            };
             program.push(Insn::add64_imm(3, 1));
         }
         Size::Bytes { .. } => push_log2_bucket(&mut program, 7),
@@ -473,8 +496,7 @@ pub struct AllocProgram {
     allocator: Allocator,
     rows: Rows,
     drops: Counters,
-    programs: Vec<OwnedFd>,
-    _links: Vec<OwnedFd>,
+    attached: Vec<Attached>,
 }
 
 impl AllocProgram {
@@ -484,75 +506,89 @@ impl AllocProgram {
     /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
     /// program's own counters can say an occurrence was never seen.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::program::skipped(self.programs.iter())
+        crate::bpf::program::skipped(self.attached.iter().filter_map(Attached::program))
     }
 
     pub fn load(allocator: Allocator) -> Result<Self, String> {
-        let btf = super::kernel_btf()?;
-        let (rows_name, drops_name, program_names) = allocator.map_prefix();
+        Self::load_on(allocator, false)
+    }
 
+    /// The classic tracepoints (`bpf:tp`), for a kernel without BTF: the
+    /// same rows, the sizes read where tracefs says they are.
+    pub fn load_classic(allocator: Allocator) -> Result<Self, String> {
+        Self::load_on(allocator, true)
+    }
+
+    fn load_on(allocator: Allocator, classic: bool) -> Result<Self, String> {
+        let btf = if classic {
+            None
+        } else {
+            Some(super::kernel_btf()?)
+        };
+        let (rows_name, drops_name, program_names) = allocator.map_prefix();
         let rows = Rows::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, rows_name)
             .map_err(|error| map_failure("allocation histogram map", error))?;
         let drops = Counters::create(1, drops_name)
             .map_err(|error| map_failure("allocation drop counter", error))?;
-
-        let mut programs = Vec::new();
-        let mut links = Vec::new();
+        let attach = |site: &Site, name: &str| -> Result<Attached, String> {
+            match btf {
+                Some(btf) => {
+                    let built = instructions(
+                        Context::Raw(btf),
+                        site,
+                        allocator.with_cgroup(),
+                        rows.as_raw_fd(),
+                        drops.as_raw_fd(),
+                    )?;
+                    let program = load(&built, name)?;
+                    let link = syscall::raw_tracepoint_open(site.tracepoint, program.as_raw_fd())
+                        .map_err(|error| {
+                        format!(
+                            "cannot attach to the `{}` tracepoint: {error}",
+                            site.tracepoint
+                        )
+                    })?;
+                    Ok(Attached::Raw {
+                        program,
+                        _link: link,
+                    })
+                }
+                None => {
+                    let record = Record::of("kmem", site.tracepoint)?;
+                    let built = instructions(
+                        Context::Classic(&record),
+                        site,
+                        allocator.with_cgroup(),
+                        rows.as_raw_fd(),
+                        drops.as_raw_fd(),
+                    )?;
+                    Attached::classic("kmem", site.tracepoint, &built, name)
+                }
+            }
+        };
+        let mut attached = Vec::new();
         for (site, name) in allocator.sites().iter().zip(program_names) {
-            let built = instructions(
-                btf,
-                site,
-                allocator.with_cgroup(),
-                rows.as_raw_fd(),
-                drops.as_raw_fd(),
-            )?;
-            let program = load(&built, name)?;
-            let link = syscall::raw_tracepoint_open(site.tracepoint, program.as_raw_fd()).map_err(
-                |error| {
-                    format!(
-                        "cannot attach to the `{}` tracepoint: {error}",
-                        site.tracepoint
-                    )
-                },
-            )?;
-            programs.push(program);
-            links.push(link);
+            attached.push(attach(site, name)?);
         }
-
         for site in allocator.companions() {
             // Absent is the kernel that folded it into the first site; present
             // in another shape is one this program cannot read, and serving
             // the source without it would be a total short by everything it
             // carries.
-            if btf.tracepoint_signature(site.tracepoint).is_err() {
+            let present = match btf {
+                Some(btf) => btf.tracepoint_signature(site.tracepoint).is_ok(),
+                None => Record::of("kmem", site.tracepoint).is_ok(),
+            };
+            if !present {
                 continue;
             }
-            let built = instructions(
-                btf,
-                site,
-                allocator.with_cgroup(),
-                rows.as_raw_fd(),
-                drops.as_raw_fd(),
-            )?;
-            let program = load(&built, "omn_slab_node")?;
-            let link = syscall::raw_tracepoint_open(site.tracepoint, program.as_raw_fd()).map_err(
-                |error| {
-                    format!(
-                        "cannot attach to the `{}` tracepoint: {error}",
-                        site.tracepoint
-                    )
-                },
-            )?;
-            programs.push(program);
-            links.push(link);
+            attached.push(attach(site, "omn_slab_node")?);
         }
-
         Ok(Self {
             allocator,
             rows,
             drops,
-            programs,
-            _links: links,
+            attached,
         })
     }
 
@@ -617,7 +653,7 @@ mod tests {
         let btf = kernel_btf()?;
         Some(
             instructions(
-                &btf,
+                Context::Raw(&btf),
                 &allocator.sites()[which],
                 allocator.with_cgroup(),
                 3,
@@ -721,7 +757,7 @@ mod tests {
             size: Size::Order(8),
             direction: 0,
         };
-        let error = instructions(&btf, &wrong, true, 3, 4).expect_err("a refusal");
+        let error = instructions(Context::Raw(&btf), &wrong, true, 3, 4).expect_err("a refusal");
         assert!(error.contains("this kernel declares"), "{error}");
         assert!(error.contains("gfp_t"), "the kernel's own shape: {error}");
         assert!(
@@ -899,8 +935,55 @@ mod tests {
     #[test]
     fn the_row_map_is_taken_from_the_slot_once_per_run() {
         let Some(btf) = kernel_btf() else { return };
-        let program =
-            instructions(&btf, &Allocator::Pages.sites()[0], true, 3, 4).expect("a program");
+        let program = instructions(Context::Raw(&btf), &Allocator::Pages.sites()[0], true, 3, 4)
+            .expect("a program");
         crate::bpf::map::assert_rows_taken_once(&program, 3);
+    }
+
+    /// The classic programs read the sizes where 4.19's and 6.1's records
+    /// put them -- `gfp_flags` four bytes wide on one, eight on the other,
+    /// which moves nothing they read -- and the order of a page.
+    #[test]
+    fn the_classic_programs_read_the_sizes_where_the_record_says() {
+        let layout = |text: &str| super::super::attach::parse_layout(text);
+        let kmalloc = Record::from_layout(
+            "kmem:kmalloc",
+            layout(
+                "\tfield:unsigned long call_site;\toffset:8;\tsize:8;\tsigned:0;\n\
+                 \tfield:const void * ptr;\toffset:16;\tsize:8;\tsigned:0;\n\
+                 \tfield:size_t bytes_req;\toffset:24;\tsize:8;\tsigned:0;\n\
+                 \tfield:size_t bytes_alloc;\toffset:32;\tsize:8;\tsigned:0;\n\
+                 \tfield:gfp_t gfp_flags;\toffset:40;\tsize:4;\tsigned:0;\n",
+            ),
+        );
+        let program = instructions(
+            Context::Classic(&kmalloc),
+            &Allocator::Slab.sites()[0],
+            false,
+            3,
+            4,
+        )
+        .expect("the kmalloc program");
+        assert!(
+            program.contains(&Insn::ldx(BPF_DW, 7, 6, 32)),
+            "bytes_alloc"
+        );
+        assert!(program.contains(&Insn::ldx(BPF_DW, 8, 6, 24)), "bytes_req");
+        let page = Record::from_layout(
+            "kmem:mm_page_alloc",
+            layout(
+                "\tfield:unsigned long pfn;\toffset:8;\tsize:8;\tsigned:0;\n\
+                 \tfield:unsigned int order;\toffset:16;\tsize:4;\tsigned:0;\n",
+            ),
+        );
+        let program = instructions(
+            Context::Classic(&page),
+            &Allocator::Pages.sites()[0],
+            true,
+            3,
+            4,
+        )
+        .expect("the page program");
+        assert!(program.contains(&Insn::ldx(BPF_W, 3, 6, 16)), "order");
     }
 }

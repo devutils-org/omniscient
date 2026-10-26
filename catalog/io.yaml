@@ -77,10 +77,12 @@
       join: {key: "blk:rq@open_ts", match: scoped_eq, ttl: 30s}
       cost: med
     - id: "bpf:tp"
-      requires: ["tracepoint:block:block_rq_insert", "tracepoint:block:block_rq_issue", "bpf"]
-      join: {key: "blk:rq@open_ts", match: scoped_eq, ttl: 30s}
+      requires: ["tracepoint:block:block_rq_insert", "tracepoint:block:block_rq_issue", "tracepoint:task:task_newtask",
+        "tracepoint:sched:sched_process_free", "bpf"]
       cost: med
-      equivalent: true
+      degraded: "the record carries no request pointer: an insert is paired with its issue by device and
+        first sector, as `biosnoop` pairs them without BTF, and no event has the `blk:rq` key, so it joins
+        nothing"
   modes: [trace]
   emits: [hist, raw, topk, summary]
   targets: {system: native, cgroup: bpf_only}
@@ -180,7 +182,10 @@
   unit: bytes
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:block_rq_issue(request *)", "bpf_map:ringbuf"], cost: high}
-    - {id: "bpf:tp", requires: ["tracepoint:block:block_rq_issue", "bpf"], cost: high, equivalent: true}
+    - {id: "bpf:tp", requires: ["tracepoint:block:block_rq_issue", "tracepoint:task:task_newtask",
+         "tracepoint:sched:sched_process_free", "bpf"], cost: high,
+       degraded: "the record carries no request pointer and no request identity: no event has the
+         `blk:rq` key or `req`"}
   modes: [trace]
   emits: [hist, topk, raw, summary]
   targets: {system: native, cgroup: bpf_only, pid: bpf_only}
@@ -467,7 +472,9 @@
   unit: ns
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:writeback_start(bdi_writeback *, wb_writeback_work *)", "raw_tracepoint:writeback_written(bdi_writeback *, wb_writeback_work *)", "bpf_map:ringbuf"], cost: low}
-    - {id: "bpf:tp", requires: ["tracepoint:writeback:writeback_start", "tracepoint:writeback:writeback_written", "bpf"], cost: low, equivalent: true}
+    - {id: "bpf:tp", requires: ["tracepoint:writeback:writeback_start", "tracepoint:writeback:writeback_written", "bpf"], cost: low,
+       degraded: "the record carries no work item: a round is paired by the flusher thread that runs it,
+         and the backing device has no `bdi_id`"}
   modes: [trace, count]
   emits: [hist, rate, raw, summary, timeline]
   targets: {system: native, cgroup: bpf_only}
