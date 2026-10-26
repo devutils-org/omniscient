@@ -2202,6 +2202,71 @@ fn read_u64(bytes: &[u8], at: usize) -> Option<u64> {
     Some(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
 }
 
+/// A function an ELF file defines, as a probe is placed on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionSymbol {
+    /// The name the file gives it, mangled if it is.
+    pub symbol: String,
+    /// The name a reader writes: demangled where it is mangled.
+    pub name: String,
+    /// Where it starts in the file: what a uprobe is placed at.
+    pub offset: u64,
+    pub size: u64,
+}
+
+impl FunctionSymbol {
+    /// Whether `wanted` names this function: as the file spells it, as it
+    /// demangles, or as it demangles without its parameter list -- the name a
+    /// C++ reader writes (`xla::cpu::CopyThunk::Execute`), which names every
+    /// overload of it.
+    pub fn answers_to(&self, wanted: &str) -> bool {
+        self.symbol == wanted
+            || self.name == wanted
+            || self
+                .name
+                .split_once('(')
+                .is_some_and(|(bare, _)| bare.trim_end() == wanted)
+    }
+}
+
+/// Every function the ELF file at `path` defines that `keep` accepts, from
+/// its `.symtab` and its `.dynsym`, each once by where it starts. Empty when
+/// the file cannot be read.
+pub fn functions_in(path: &Path, keep: &dyn Fn(&FunctionSymbol) -> bool) -> Vec<FunctionSymbol> {
+    let Some(mapped) = Mapped::of(path) else {
+        return Vec::new();
+    };
+    let Some(elf) = Elf::parse(mapped.bytes()) else {
+        return Vec::new();
+    };
+    let mut found: Vec<FunctionSymbol> = Vec::new();
+    let mut seen: BTreeSet<u64> = BTreeSet::new();
+    for (symbols, strings) in elf.symbol_tables() {
+        for entry in elf.symbol_entries(symbols, strings) {
+            if entry.value == 0 {
+                continue;
+            }
+            let Some(symbol) = read_str(mapped.bytes(), entry.name_at) else {
+                continue;
+            };
+            let Some(offset) = elf.file_offset_of(entry.value) else {
+                continue;
+            };
+            let name = demangle(&symbol).unwrap_or_else(|| symbol.clone());
+            let function = FunctionSymbol {
+                symbol,
+                name,
+                offset,
+                size: entry.size,
+            };
+            if keep(&function) && seen.insert(offset) {
+                found.push(function);
+            }
+        }
+    }
+    found
+}
+
 /// The GNU build id of the ELF file at `path`, in hex: what a debuginfod
 /// server indexes it by, and what says two runs mapped the same file.
 pub fn build_id_of(path: &Path) -> Option<String> {

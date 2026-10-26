@@ -312,6 +312,16 @@ join what-released-the-block  sched.wakeup -> sched.offcpu  evidence WAKEUP
 `docs/dev/BRIEF.md` is the wave being run; there is no second brief for the one after it,
 because a plan kept in two documents drifted in both.
 
+### After the twenty-ninth wave
+
+The wave is `docs/dev/briefs/wave-29-func.md`, its decisions
+`docs/DECISIONS.md`, "Settled in the twenty-ninth wave": `runtime.func` times
+each call of the functions a filter names, between an entry and a return
+uprobe, per thread and per depth. It closes the twenty-eighth wave's "a
+duration per call is another source". What it leaves: an in-kernel histogram
+for functions called millions of times a second, and the functions no file on
+the target's map list holds (inlined, `dlopen`ed later, JIT-compiled).
+
 ### After the twenty-eighth wave
 
 The wave is `docs/dev/briefs/wave-28-diff.md`, its decisions

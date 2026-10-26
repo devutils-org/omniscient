@@ -1,58 +1,59 @@
-# Brief — a profile's functions compared across runs, by what their names allow
+# Brief — how long each call of a named function took
 
-The twenty-eighth wave, from a request a campaign wrote (ZML's, 26 October
-2026, `NOTE-OMN-COUT-FONCTIONS.md` beside the checkouts): from a versioned
-session and two kept runs, answer *which functions cost most, which changed,
-and with what confidence*. `cpu.profile` and `omn diff` existed and had
-already found a real cost (`CopyThunk` in Qwen's decoding, a 16.5 % gain
-confirmed without the collector); what the campaign's real profiles showed
-was a restitution gap, not a profiler one:
+The twenty-ninth wave, the item the twenty-eighth left: `omn diff` says which
+functions cost cpu and whether that changed, and says too that a share of a
+profile is not a duration per call. A campaign that wants "how long does one
+`CopyThunk::Execute` take, and does it wait" had no source for it: USDT needs
+the program to publish a probe, and `runtime.custom` counts a symbol's hits
+without timing them. bcc's `funclatency` answers it with a uprobe on the
+function's entry and one on its return; this wave is that, as a source.
 
-- the verdict's first row was a kernel address `kptr_restrict` withheld;
-- one libc function with no symbol was four rows, one per instruction;
-- a JIT's code, unnamed, was a set of addresses that changed between
-  processes, and read as functions that vanished and appeared;
-- the confidence was a Poisson count of one run's samples, read as if it
-  said something about two independent runs.
-
-Run autonomously on 2026-10-26, in one worktree (`claude/w28`).
+Run autonomously on 2026-10-26, in one worktree (`claude/w29`).
 
 ## What it built
 
-1. **Identity** (`triage::diff::Identity`): symbol, offset, anonymous,
-   withheld kernel address, unmapped. A row is comparable when it is a symbol,
-   or an offset into a file both runs mapped in the same build -- which each
-   run now records, `stack::Provenance::build_ids`, filled by `cpu.profile`.
-   Only comparable rows are in the verdict; the others are summed by what they
-   lack (`Diff::unnamed`), with what would name them and the share they hold.
-2. **Runs, not one run** (`triage::diff::diff_runs`): a side is one run, a
-   repeated run (`-r N`'s directory or `repeat.json`), or several
-   (`--before`, `--after`). Two or more a side: Welch's standard error between
-   the runs, floored at the counts' own noise (`Confidence::BetweenRuns`).
-   `-r N` accepts a session whose requests emit stacks.
-3. **What the numbers are**: each row's share beside its absolute weight, the
-   on-cpu time its samples stand for (where the rate is known), the spread
-   across runs, `few_samples` under ten a run (listed, not ranked), and a
-   `denominator` sentence: on-cpu time summed over the target's threads, not
-   wall clock, not GPU; inclusive costs do not add up; sampling is not a
-   duration per call.
-4. **Each run's frame**: its `--window`, from `resolved.json` (two windows
-   said), and its collector's measured cost, from `cost.json`.
+1. **`runtime.func`** (`catalog/runtime.yaml`), `bpf:uprobe`, trace mode,
+   launch, `--pid` and `--tid`. The functions are named by the filter --
+   `function == '...'`, `function =~ '...'`, `function in (...)` -- and
+   `object == '...'` keeps the search to one file. A name answers as the file
+   spells it, as it demangles, or as it demangles without its parameters (the
+   C++ name a reader writes, every overload). The objects searched are the
+   target's (`collect::runtime::objects`), the functions read from `.symtab`
+   and `.dynsym` (`stack::functions_in`). A request naming none is refused; a
+   name matching nothing lists the files read and the functions whose names
+   contain it; more than 32 functions is refused.
+2. **The programs** (`src/bpf/func_latency.rs`): the entry counts one more
+   open call for `{thread, function}` and stamps it at that depth; the return
+   reads the clock first, closes the call at the thread's depth, and publishes
+   start, duration, the return register, thread, depth and comm. Paired per
+   thread and per depth, so a recursive function's calls are each timed and
+   a return the kernel never ran (a `longjmp`) shifts the depth rather than
+   mispairing the next calls. Return probes are attached before entries, so
+   no call is stamped that nothing will close. uprobe-multi links on 6.6 and
+   later, the uprobe PMU otherwise.
+3. **What a run says**: calls timed, the files searched, that the time is
+   wall clock (off-cpu included), the calls shorter than 2 us (about 1 us of
+   each is the traps), the nested calls (`depth` above 1, inside their
+   caller's time), the returns with no entry seen, the calls still open at the
+   end, those nested deeper than 64; ring and map losses counted as losses.
 
-## What it measured
+## Measured
 
-The fixture's `diff` mode, with a new `waits` that sleeps as long as each
-function runs: `waits` is charged no cpu; `beta` doubled is the only
-difference; stripped, `beta`'s offsets are the difference, compared by the
-program's build id; three runs a side are weighed between runs. On ZML's two
-Qwen profiles, the verdict moved from `0xffffffffba9162b7` to
-`ynn::dot_bf16_bf16_fp32_5x16x1...`, and 85.6 % / 80.9 % of the samples are
-said to be code with no stable name (37.7 % withheld kernel, 34.7 % JIT, 13.2 %
-libc offsets with no build id in those older runs).
+- The fixture (`tests/scenario_func.rs`, built with `cc`): five 20 ms sleeps
+  timed within 1 ms of what the program measured around each call; three
+  nested calls of a recursive function at depths 1, 2, 3, the outermost
+  within 1 ms of the program's measure; twelve calls from three threads, four
+  per thread, on the program's own thread ids; a call still open at the end
+  said, not timed; 2000 empty calls flagged as mostly measurement.
+- The cost: 200,000 calls of an empty function took 433 ms under the probes,
+  about 2 us a call, of which 1.07 us is inside the time measured. At that
+  rate the 1 MiB ring loses about 4 % of calls, counted, and the summary
+  becomes lower bounds.
 
-## Left, and why
+## What it leaves
 
-A duration per call is another source (USDT, uprobes, spans), with its own
-recursion, threads, lost calls and cost: not `cpu.profile`'s. Grouping an
-unsymbolized function's instructions into one row needs a symbol table the
-file does not have: `--symbols debuginfod` is the road, and the note says so.
+- An aggregated mode (a histogram in the kernel, for functions called
+  millions of times a second): the trace is what this wave built, and `-e
+  hist` sums it.
+- A function inlined everywhere has no entry to probe; a library loaded
+  later with `dlopen`, and code no file holds (a JIT's), are not searched.

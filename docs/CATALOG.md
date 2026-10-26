@@ -797,9 +797,19 @@ pause or a JIT deoptimization gets attributed to the wrong resource.
 | `runtime.jit` | `bpf:usdt` · perf-PID.map | same |
 | `runtime.alloc` | `preload` · allocator stats | good |
 | `runtime.custom` | arbitrary `bpf:uprobe` / `usdt` | user-declared |
+| `runtime.func` | `bpf:uprobe` on a function's entry and return | any function a file names (`.symtab` or `.dynsym`) |
 
 Not a closed family: it is the extension point where users declare their own
 probes.
+
+`runtime.func` is `funclatency`: each call of the functions a filter names
+(`function == 'compute'`, `function =~ 'CopyThunk'`), timed from its entry to
+its return on its thread, paired per thread and per depth so recursion is
+timed call by call (`depth`). It is wall-clock time, off-cpu waits included,
+which a `cpu.profile` share is not. Each call pays two traps, about 2 us in
+all, of which about 1 us lands inside the time measured; the run counts the
+calls shorter than 2 us, the returns with no entry seen, the calls still open
+at the end and those nested deeper than 64.
 
 ---
 

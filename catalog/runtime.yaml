@@ -145,3 +145,43 @@
       collector, a JIT, an allocator, a probe the program itself declares --
       and which one a program runs is not known before it runs: name the source
       for that runtime"
+
+- id: runtime.func
+  family: runtime
+  summary: "How long each call of a named function took (funclatency)"
+  unit: ns
+  backends:
+    # A uprobe on each function's entry and one on its return, paired per
+    # thread and per depth: uprobe-multi links where the kernel has them
+    # (6.6), the uprobe PMU otherwise.
+    - {id: "bpf:uprobe", requires: ["uprobe", "bpf", "btf"], cost: high}
+  modes: [trace]
+  emits: [hist, topk, raw, summary]
+  targets: {pid: native, tid: native, launch: native}
+  keys: [task]
+  filter_fields: [function, object, depth, comm, ret]
+  determinism: low
+  caveats:
+    - "The functions are named through the filter: --filter \"function ==
+       'compute'\", \"function =~ 'CopyThunk'\" for every function whose name
+       contains it, or \"function in ('a', 'b')\"; `object == 'libfoo.so'`
+       keeps the search to one file. A name answers to a function as the file
+       spells it, as it demangles, or as it demangles without its parameters
+       (`xla::cpu::CopyThunk::Execute`, every overload). A request that names
+       none is refused; one whose names match nothing lists the files read and
+       the functions whose names contain it."
+    - "A call's time is the wall clock from its entry to its return: time the
+       thread spent blocked inside it is in it, which `cpu.profile` does not
+       see, and a profile's share is not a call's duration. Each call pays two
+       traps into the kernel, a few microseconds, and the run says how many
+       calls were shorter than that."
+    - "Calls are paired per thread and per depth, so a recursive function's
+       calls are each timed; a call inside one of the same function has
+       `depth` above 1 and its time is also in its caller's. A return whose
+       entry the run did not see (already under way at the attach), a call
+       still open at the end or left by a longjmp or an exception, and a call
+       nested deeper than 64 are counted and said, not timed."
+    - "The objects searched are the target's: the libraries it maps, or for a
+       launched program the ones the dynamic linker will map. A library it
+       loads later with dlopen is not searched, and code no file holds (a
+       JIT's) has no function to name."

@@ -7,6 +7,7 @@
 //! in its ELF notes and reached with a uprobe -- `src/bpf/usdt.rs` for the
 //! mechanism, `usdt.rs` here for which probes each source means.
 
+mod func;
 mod jit_map;
 /// Also read by `sched.mutex`, whose USDT backend reads glibc's probes.
 pub(crate) mod objects;
@@ -20,6 +21,13 @@ pub fn factories() -> Vec<Factory> {
     vec![
         Factory::new("runtime.jit", "fs:jit-map", |_| {
             Ok(Box::new(jit_map::Prepare))
+        }),
+        Factory::new("runtime.func", "bpf:uprobe", |resolved| {
+            Ok(Box::new(func::Prepare {
+                mode: resolved.request.mode,
+                target: resolved.request.target.clone(),
+                filter: resolved.request.filter.clone(),
+            }))
         }),
         Factory::new("runtime.custom", "bpf:usdt", |resolved| {
             Ok(Box::new(prepare(Flavour::Custom, resolved)))

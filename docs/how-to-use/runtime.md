@@ -3,7 +3,7 @@
 There is **no lazy default**: each source answers for one language runtime,
 and which one a program runs is not known before it runs. Name the source.
 
-All four read probes the runtime (or your program) publishes, mostly USDT. **A
+The first four read probes the runtime (or your program) publishes, mostly USDT. **A
 runtime built without its probes reports no probe**, which is not the same as
 a runtime that did not pause: the `python3` of most distributions is built
 without them.
@@ -16,6 +16,7 @@ without them.
 | What does the JIT compile, and when? | `runtime.jit` | `trace -e raw` | USDT, or a `/tmp/perf-<pid>.map` (`node --perf-basic-prof`, a JVM agent) |
 | How much does the runtime allocate (objects)? | `runtime.alloc` | `trace -e hist` | hotspot `object__alloc` under `-XX:+ExtendedDTraceProbes` |
 | A probe of my own, or any USDT marker | `runtime.custom` | `trace` or `count` | the probe, named by provider and probe |
+| How long does each call of this function take? | `runtime.func` | `trace -e hist` | nothing: a function a file names, in `.symtab` or `.dynsym` |
 
 ## Examples
 
@@ -24,16 +25,27 @@ omn trace runtime.gc -m trace -e hist,summary -- python3 app.py
 omn trace runtime.jit -m trace -e raw -- node --perf-basic-prof app.js
 omn trace runtime.custom -m count -e summary --filter "provider == 'libc' && probe == 'setjmp'" -- ./prog
 omn trace runtime.custom -m trace -e hist --filter "provider == 'myapp' && probe == 'query__done'" --pid 1234 -d 30s
+omn trace runtime.func -e hist,summary --filter "function == 'xla::cpu::CopyThunk::Execute'" -- ./prog
+omn trace runtime.func -e raw --filter "function =~ 'parse' && object == 'libapp.so'" --pid 1234 -d 10s
 ```
 
 `runtime.custom` refuses a request that names no probe, and the refusal lists
 the probes the target has. Arguments come back as `arg0`, `arg1`, ... as the
 probe's descriptor declares them.
 
+`runtime.func` needs no probe the program publishes: it places a uprobe on
+the function's entry and one on its return. A name answers as the file spells
+it, as it demangles, or as it demangles without its parameters (every
+overload); `=~` takes every function whose name contains it, up to 32. Each
+call's `lat_ns` is wall clock, time blocked inside it included; a recursive
+call has `depth` above 1 and is also inside its caller's time, so sum
+`depth == 1` for a total. A request that names no function is refused, and a
+name that matches nothing lists the functions whose names contain it.
+
 ## Targets
 
-A launch or `--pid` (`runtime.custom` also `--tid`). For a launched program
-the probes are found before it execs, in the executable and the libraries its
+A launch or `--pid` (`runtime.custom` and `runtime.func` also `--tid`). For a
+launched program the probes are found before it execs, in the executable and the libraries its
 dynamic section names; a library loaded later with `dlopen` is not among
 them.
 
@@ -43,7 +55,10 @@ Each probe hit is a uprobe trap, about 740 ns, against about 70 ns for the
 preload shim. Fine for GC pauses and JIT events; a runtime allocating a
 million objects a second is a different program under `runtime.alloc`, which
 is why it is `med`. A `bpf:uprobe` on an arbitrary symbol is `high`: low-rate
-call sites only.
+call sites only. `runtime.func` traps twice a call, about 2 us in all
+(measured: 200,000 empty calls took 433 ms instead of under 1); a function
+called a million times a second is a different program under it, and its
+ring loses calls, counted, past a few hundred thousand a second.
 
 ## Related
 

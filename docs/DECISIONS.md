@@ -1604,3 +1604,15 @@ Restated from `docs/ROADMAP.md` because they are decisions, not omissions.
    after the fact, a consumer of one more format rather than a source. It
    landed so on 2026-10-20: `omn import` merges a CTF trace into a stored run,
    for `omn join`, and is not in the catalog.
+
+## Settled in the twenty-ninth wave: a duration per call
+
+From the item the twenty-eighth wave left (`docs/dev/briefs/wave-29-func.md`).
+
+| Question | Decision | Why, and where it stands |
+|---|---|---|
+| How a function is named | **Through the filter, by `function`** (`==`, `=~`, `in`), with `object` to keep the search to one file; matched as spelt, as demangled, or as demangled without parameters. | The filter is where `runtime.custom` names its probes already; a C++ reader writes `ns::Class::method`, not its mangled name nor its signature. |
+| How calls are paired | **Per thread and per depth**, the depth being the thread's count of open calls of that function. | Keyed by thread alone, a recursive call overwrites its caller's stamp; keyed by depth, a missed return shifts later calls a level and keeps them paired, and the stamp left behind is counted. |
+| What the time is | **Wall clock from entry to return**, said in every run, with the calls under 2 us said to be mostly the measurement. | A profile's share is cpu; a call that waited is the other half of what a campaign asks, and the traps are about 1 us of each timed call. |
+| How many functions | **At most 32**, refused above with the reason. | Every call of every selected function traps twice: a broad pattern is a breakpoint on most of a program. |
+| Which mode | **Trace only**, `-e hist` and `-e summary` summing it. | An in-kernel histogram is what a function called millions of times a second needs; nothing has asked for it yet. |

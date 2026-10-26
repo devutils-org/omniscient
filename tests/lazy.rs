@@ -232,6 +232,7 @@ fn a_family_with_no_safe_default_refuses_with_the_reason_and_its_sources() {
         "runtime.jit",
         "runtime.alloc",
         "runtime.custom",
+        "runtime.func",
     ] {
         assert!(text.contains(source), "{source}: {text}");
     }

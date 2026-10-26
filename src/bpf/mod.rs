@@ -31,6 +31,7 @@ pub mod attach;
 pub mod btf;
 mod context;
 pub mod fentry;
+pub mod func_latency;
 mod insn;
 mod io;
 pub mod io_fsync;
