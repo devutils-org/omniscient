@@ -35,6 +35,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 pub mod accept;
 
 use crate::bpf::btf::Btf;
+use crate::bpf::context::Record;
 use crate::bpf::fentry::{self, Function, Link, Side, BPF_H, GET_SOCKET_COOKIE, SKIP};
 use crate::bpf::insn::{
     self, count_drop, helper, push_current_filter, read_field, Insn, Program, Whose, BPF_DW, BPF_W,
@@ -43,6 +44,7 @@ use crate::bpf::insn::{
 use crate::bpf::map::{map_failure, Counters, Hash};
 use crate::bpf::ring::{ring_bytes, RingBuffer};
 use crate::bpf::syscall::{self, BPF_MAP_TYPE_RINGBUF};
+use crate::bpf::transport::{Output, Transport};
 
 /// The prototypes these programs read. `tcp_v4_connect` took a `sockaddr *`
 /// until the 7.x series and a `sockaddr_unsized *` since; the program reads
@@ -594,15 +596,147 @@ fn state_instructions(
     Ok(instructions)
 }
 
+/// `IPPROTO_TCP`: the classic tracepoint fires for every inet protocol that
+/// keeps a state, and its record says which.
+const IPPROTO_TCP: i32 = 6;
+
+/// The same road over the classic `sock:inet_sock_set_state` (`bpf:tp`), for
+/// a kernel without BTF: the record names both ends, the ports and the two
+/// states, and the socket only by its address, so there is no cookie and a
+/// refusal carries no errno (`sk_err` is behind a layout there is none of).
+fn classic_state_instructions(
+    record: &Record,
+    whose: Whose,
+    pending_fd: i32,
+    output: Output,
+    drops_fd: i32,
+) -> Result<Vec<Insn>, String> {
+    // Eight bytes below the drop counter's key, which no other slot uses.
+    const SCRATCH: i16 = DROP_KEY - 12;
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    if record.has("protocol") {
+        record.load(&mut program, 1, 6, "protocol", SCRATCH)?;
+        program.jump_to("done", Insn::jne_imm(1, IPPROTO_TCP, 0));
+    }
+    record.load(&mut program, 1, 6, "newstate", SCRATCH)?;
+    program.jump_to("open", Insn::jeq_imm(1, TCP_SYN_SENT, 0));
+    record.load(&mut program, 1, 6, "oldstate", SCRATCH)?;
+    program.jump_to("done", Insn::jne_imm(1, TCP_SYN_SENT, 0));
+
+    // Leaving SYN_SENT: close the stamp.
+    record.load(&mut program, 7, 6, "skaddr", SCRATCH)?;
+    program.push(Insn::stx(BPF_DW, R10, PEND_KEY, 7));
+    program.extend(Insn::load_map_fd(1, pending_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, PEND_KEY as i32));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    program.jump_to("done", Insn::jeq_imm(0, 0, 0));
+    for slot in 0..(RECORD_BYTES as i16 / 8) {
+        program.push(Insn::st_imm(BPF_DW, R10, EVENT + slot * 8, 0));
+    }
+    program.push(Insn::ldx(BPF_DW, 9, 0, PEND_TS));
+    program.push(Insn::ldx(BPF_DW, 1, 0, PEND_WHO));
+    program.push(Insn::stx(BPF_W, R10, EVENT + R_TID, 1));
+    program.push(Insn::rsh64_imm(1, 32));
+    program.push(Insn::stx(BPF_W, R10, EVENT + R_TGID, 1));
+    program.push(Insn::ldx(BPF_DW, 1, 0, PEND_COMM));
+    program.push(Insn::stx(BPF_DW, R10, EVENT + R_COMM, 1));
+    program.push(Insn::ldx(BPF_DW, 1, 0, PEND_COMM + 8));
+    program.push(Insn::stx(BPF_DW, R10, EVENT + R_COMM + 8, 1));
+    program.extend(Insn::load_map_fd(1, pending_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, PEND_KEY as i32));
+    program.push(Insn::call(helper::MAP_DELETE_ELEM));
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::stx(BPF_DW, R10, EVENT + R_TS, 0));
+    program.push(Insn::sub64_reg(0, 9));
+    program.push(Insn::stx(BPF_DW, R10, EVENT + R_DURATION, 0));
+
+    record.load(&mut program, 1, 6, "newstate", SCRATCH)?;
+    program.jump_to("refused", Insn::jne_imm(1, TCP_ESTABLISHED, 0));
+    program.push(Insn::st_imm(
+        BPF_W,
+        R10,
+        EVENT + R_OUTCOME,
+        Outcome::Established as i32,
+    ));
+    program.jump_to("outcome", Insn::ja());
+    program.label("refused");
+    program.push(Insn::st_imm(
+        BPF_W,
+        R10,
+        EVENT + R_OUTCOME,
+        Outcome::Refused as i32,
+    ));
+    program.label("outcome");
+
+    record.load(&mut program, 1, 6, "family", SCRATCH)?;
+    program.push(Insn::stx(BPF_W, R10, EVENT + R_FAMILY, 1));
+    // Both ports are in host order in the record; the record keeps the local
+    // one that way and the peer's in network order, as the raw road reads it.
+    record.load(&mut program, 1, 6, "sport", SCRATCH)?;
+    program.push(Insn::stx(BPF_W, R10, EVENT + R_SPORT, 1));
+    record.load(&mut program, 1, 6, "dport", SCRATCH)?;
+    super::net_program::store_port_be(&mut program, EVENT + R_DPORT);
+    program.push(Insn::ldx(BPF_W, 1, R10, EVENT + R_FAMILY));
+    program.jump_to("v6", Insn::jeq_imm(1, AF_INET6, 0));
+    record.copy(&mut program, 6, "saddr", EVENT + R_SADDR, 4)?;
+    record.copy(&mut program, 6, "daddr", EVENT + R_DADDR, 4)?;
+    program.jump_to("named", Insn::ja());
+    program.label("v6");
+    record.copy(&mut program, 6, "saddr_v6", EVENT + R_SADDR, 16)?;
+    record.copy(&mut program, 6, "daddr_v6", EVENT + R_DADDR, 16)?;
+    program.label("named");
+    output.push(&mut program, 6, EVENT, RECORD_BYTES as i32);
+    program.jump_to("done", Insn::jeq_imm(0, 0, 0));
+    count_drop(&mut program, drops_fd, DROP_KEY, DROP_RING, "done");
+    program.jump_to("done", Insn::ja());
+
+    // Entering SYN_SENT: the connecting task's context, compared here.
+    program.label("open");
+    push_current_filter(&mut program, whose, PEND_KEY, "done");
+    program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
+    program.push(Insn::stx(BPF_DW, R10, PEND_VALUE + PEND_WHO, 0));
+    record.load(&mut program, 1, 6, "skaddr", SCRATCH)?;
+    program.push(Insn::stx(BPF_DW, R10, PEND_KEY, 1));
+    program.push(Insn::st_imm(BPF_DW, R10, PEND_VALUE + PEND_COMM, 0));
+    program.push(Insn::st_imm(BPF_DW, R10, PEND_VALUE + PEND_COMM + 8, 0));
+    program.push(Insn::mov64_reg(1, R10));
+    program.push(Insn::add64_imm(1, (PEND_VALUE + PEND_COMM) as i32));
+    program.push(Insn::mov64_imm(2, 16));
+    program.push(Insn::call(helper::GET_CURRENT_COMM));
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::stx(BPF_DW, R10, PEND_VALUE + PEND_TS, 0));
+    program.extend(Insn::load_map_fd(1, pending_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, PEND_KEY as i32));
+    program.push(Insn::mov64_reg(3, R10));
+    program.push(Insn::add64_imm(3, PEND_VALUE as i32));
+    program.push(Insn::mov64_imm(4, 0));
+    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
+    program.jump_to("done", Insn::jsge_imm(0, 0, 0));
+    count_drop(&mut program, drops_fd, DROP_KEY, DROP_PENDING, "done");
+
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    let instructions = program.build();
+    insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
 /// The programs, attached, and the ring between them and userspace.
 pub struct ConnectProgram {
-    ring: RingBuffer,
+    ring: Transport,
     drops: Counters,
     pending: Hash,
     links: Vec<Link>,
     /// The `inet_sock_set_state` road's program and link, in place of
     /// `links`.
     state: Option<(OwnedFd, OwnedFd)>,
+    /// The classic road's attachment, in place of `state`.
+    classic: Option<crate::bpf::attach::PerfAttachment>,
     /// Whether `tcp_v6_connect` was found and timed.
     pub v6: bool,
 }
@@ -685,11 +819,12 @@ impl ConnectProgram {
         let ring = RingBuffer::map(ring_map, bytes)
             .map_err(|error| format!("cannot map the connect ring buffer: {error}"))?;
         Ok(Self {
-            ring,
+            ring: Transport::from_ring(ring),
             drops,
             pending,
             links,
             state: None,
+            classic: None,
             v6: v6.is_some(),
         })
     }
@@ -743,11 +878,45 @@ impl ConnectProgram {
         let ring = RingBuffer::map(ring_map, bytes)
             .map_err(|error| format!("cannot map the connect ring buffer: {error}"))?;
         Ok(Self {
-            ring,
+            ring: Transport::from_ring(ring),
             drops,
             pending,
             links: Vec::new(),
             state: Some((program, link)),
+            classic: None,
+            v6: true,
+        })
+    }
+
+    /// The classic road (`bpf:tp`): see [`classic_state_instructions`].
+    pub fn load_classic(whose: Whose) -> Result<Self, String> {
+        let record = Record::of("sock", "inet_sock_set_state")?;
+        let ring = Transport::create(RING_BYTES, Some(0), "omn_conn_ring")?;
+        let drops = Counters::create(2, "omn_conn_drop")
+            .map_err(|error| map_failure("connect drop counter", error))?;
+        let pending = Hash::create(8, PEND_VALUE_BYTES, MAX_CONNECTING, "omn_conn_pend")
+            .map_err(|error| map_failure("connect pending map", error))?;
+        let instructions = classic_state_instructions(
+            &record,
+            whose,
+            pending.as_raw_fd(),
+            ring.output(),
+            drops.as_raw_fd(),
+        )?;
+        let attachment = crate::bpf::attach::tracepoint(
+            "sock",
+            "inet_sock_set_state",
+            &instructions,
+            "omn_conn_state",
+            crate::bpf::attach::Scope::System,
+        )?;
+        Ok(Self {
+            ring,
+            drops,
+            pending,
+            links: Vec::new(),
+            state: None,
+            classic: Some(attachment),
             v6: true,
         })
     }
@@ -777,6 +946,9 @@ impl ConnectProgram {
         self.state
             .as_ref()
             .map_or(0, |(program, _)| crate::bpf::program::skipped([program]))
+            + self.classic.as_ref().map_or(0, |attachment| {
+                crate::bpf::program::skipped([attachment.program()])
+            })
     }
 
     /// Handshakes stamped and not closed: still in `SYN_SENT`, or abandoned by
@@ -789,6 +961,45 @@ impl ConnectProgram {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The classic program reads 4.19's `sock:inet_sock_set_state`: TCP
+    /// alone, the two states, and the socket by its address.
+    #[test]
+    fn the_classic_program_reads_the_record_and_keeps_tcp_alone() {
+        let record = Record::from_layout(
+            "sock:inet_sock_set_state",
+            crate::bpf::attach::parse_layout(
+                "\tfield:const void * skaddr;\toffset:8;\tsize:8;\tsigned:0;\n\
+                 \tfield:int oldstate;\toffset:16;\tsize:4;\tsigned:1;\n\
+                 \tfield:int newstate;\toffset:20;\tsize:4;\tsigned:1;\n\
+                 \tfield:__u16 sport;\toffset:24;\tsize:2;\tsigned:0;\n\
+                 \tfield:__u16 dport;\toffset:26;\tsize:2;\tsigned:0;\n\
+                 \tfield:__u16 family;\toffset:28;\tsize:2;\tsigned:0;\n\
+                 \tfield:__u8 protocol;\toffset:30;\tsize:1;\tsigned:0;\n\
+                 \tfield:__u8 saddr[4];\toffset:31;\tsize:4;\tsigned:0;\n\
+                 \tfield:__u8 daddr[4];\toffset:35;\tsize:4;\tsigned:0;\n\
+                 \tfield:__u8 saddr_v6[16];\toffset:39;\tsize:16;\tsigned:0;\n\
+                 \tfield:__u8 daddr_v6[16];\toffset:55;\tsize:16;\tsigned:0;\n",
+            ),
+        );
+        let program = classic_state_instructions(&record, Whose::Any, 3, Output::PerfArray(4), 5)
+            .expect("a classic program");
+        assert!(
+            program.contains(&Insn::ldx(BPF_W, 1, 6, 20)),
+            "the new state"
+        );
+        assert!(
+            program.contains(&Insn::ldx(BPF_W, 1, 6, 16)),
+            "the old state"
+        );
+        assert!(program.contains(&Insn::ldx(BPF_DW, 7, 6, 8)), "the socket");
+        assert!(
+            program
+                .iter()
+                .any(|insn| insn.code == 0x55 && insn.imm == IPPROTO_TCP),
+            "TCP alone"
+        );
+    }
 
     #[test]
     fn the_record_layout_covers_every_byte_and_the_stack_does_not_overlap() {

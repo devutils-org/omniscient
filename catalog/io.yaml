@@ -334,8 +334,12 @@
     - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:__{arch}_sys_read", "fentry:__{arch}_sys_write", "fentry:__{arch}_sys_pread64", "fentry:__{arch}_sys_pwrite64"], cost: med, drained: true}
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter", "raw_tracepoint:sys_exit", "bpf_map:ringbuf"], cost: med,
        degraded: "raw_syscalls fires on everything: filter by syscall number in-program"}
-    - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit", "bpf"], cost: med,
-       degraded: "raw_syscalls fires on everything: filter by syscall number in-program"}
+    # The same eight calls and the same rows, told apart by their number on
+    # the two tracepoints every syscall of the machine goes through.
+    - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit",
+         "tracepoint:task:task_newtask", "tracepoint:sched:sched_process_free", "bpf"], cost: med, drained: true,
+       degraded: "the two tracepoints fire on every syscall of the machine, not only the eight timed:
+                  each pays a number test"}
   modes: [trace, count]
   emits: [hist, topk, raw, rate, summary]
   targets: {pid: native, tid: native, cgroup: bpf_only, launch: native, container: bpf_only, system: native}

@@ -8576,6 +8576,11 @@ per-kernel and may not match `6.17.0-azure`), or install what it needs.
   load 17 to 20, while `omn trace net.drops` by hand saw every one of 50. The
   scenario starts its sender after `pause(200)`, a sleep standing in for the
   attach; pattern 2 of `docs/contributing.md`.
+  *Fixed in the twenty-seventh wave:* it failed every full `scenario_net` run
+  on 14b02f1 (*"`NO_SOCKET` accounts for None of the 2051 drops"*, with
+  `Udp:NoPorts` moved by the burst), and the sender is now the run's launched
+  program, which starts once every program is attached: green twice in a row
+  beside the rest of the file.
 - `scenario_power::a_core_held_busy_never_enters_an_idle_state` (P's): *"no
   other core reported any residency"* in the full suite at load 20 on 24
   cores; it asserted another core idled for half the window, which is the

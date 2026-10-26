@@ -35,6 +35,7 @@ mod insn;
 mod io;
 pub mod io_fsync;
 mod io_pagecache;
+pub mod io_syscall_tp;
 pub mod io_vfs;
 mod io_writeback;
 mod map;

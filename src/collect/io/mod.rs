@@ -183,6 +183,16 @@ pub fn factories() -> Vec<Factory> {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
                 kprobe: false,
+                classic: false,
+            }))
+        }),
+        Factory::new("io.syscall", "bpf:tp", |resolved| {
+            Ok(Box::new(vfs::Prepare {
+                layer: Layer::Syscall,
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+                kprobe: false,
+                classic: true,
             }))
         }),
         Factory::new("io.fs", "bpf:fentry", |resolved| {
@@ -191,6 +201,7 @@ pub fn factories() -> Vec<Factory> {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
                 kprobe: false,
+                classic: false,
             }))
         }),
         // The same two functions through kprobes, for a kernel built
@@ -201,6 +212,7 @@ pub fn factories() -> Vec<Factory> {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
                 kprobe: true,
+                classic: false,
             }))
         }),
         // Every VFS call, counted by function and timed never: `vfsstat`.

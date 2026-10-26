@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use super::histogram::{HistogramCollector, Rows, Source};
 use super::underneath;
 use crate::bpf::fentry::{self, Narrowing, Row};
+use crate::bpf::io_syscall_tp::SyscallTpProgram;
 use crate::bpf::io_vfs::{self, Layer, Op, VfsProgram};
 use crate::bpf::pidns;
 use crate::collect::{not_built, Collector, Prepared};
@@ -28,6 +29,9 @@ pub struct Prepare {
     pub filter: Option<FilterExpr>,
     /// `bpf:kprobe`: a kprobe pair rather than a trampoline.
     pub kprobe: bool,
+    /// `bpf:tp`: `io.syscall` through the classic `raw_syscalls`
+    /// tracepoints, for a kernel without BTF.
+    pub classic: bool,
 }
 
 impl Layer {
@@ -60,12 +64,16 @@ impl Prepared for Prepare {
         let narrowing = narrowing(source, target)?;
         let layer = self.layer;
         let kprobe = self.kprobe;
+        let classic = self.classic;
         let selected = if layer == Layer::Fs {
             selected_fs_op(self.filter.as_ref())
         } else {
             None
         };
         let rows = Box::new(move || -> Result<Box<dyn Rows>, String> {
+            if classic {
+                return Ok(Box::new(SyscallTpProgram::load(narrowing)?));
+            }
             Ok(Box::new(VfsProgram::load(
                 layer, narrowing, selected, kprobe,
             )?))
@@ -76,7 +84,7 @@ impl Prepared for Prepare {
                 call: "a read or a write",
                 load: rows,
                 describe: describe(layer),
-                notes: vec![coverage(layer)],
+                notes: vec![coverage(layer, classic)],
             },
             self.mode,
             self.filter,
@@ -138,8 +146,13 @@ fn first(source: &str, ids: &[i32], kind: &str) -> Result<i32, String> {
 }
 
 /// What the functions timed do not see, which is part of what the number is.
-fn coverage(layer: Layer) -> String {
+fn coverage(layer: Layer, classic: bool) -> String {
     match layer {
+        Layer::Syscall if classic => "timed at raw_syscalls' sys_enter and sys_exit, the calls \
+                                      read, write, pread64, pwrite64 and their vectored forms \
+                                      told apart by number: sendfile, splice, io_uring and page \
+                                      faults on a mapping are I/O this does not see"
+            .to_owned(),
         Layer::Syscall => "timed at the syscall table's entry points of read, write, pread64, \
                            pwrite64 and their vectored forms: sendfile, splice, io_uring and \
                            page faults on a mapping are I/O this does not see"
@@ -320,6 +333,28 @@ fn describe(layer: Layer) -> super::histogram::Describe {
             }
         }
     })
+}
+
+impl Rows for SyscallTpProgram {
+    fn drain(&self, last: bool) -> Result<fentry::Drained, String> {
+        SyscallTpProgram::drain(self, last)
+    }
+
+    fn still_pending(&self) -> (usize, usize) {
+        SyscallTpProgram::still_pending(self)
+    }
+
+    fn dropped(&self) -> (u64, u64, u64) {
+        SyscallTpProgram::dropped(self)
+    }
+
+    fn missed(&self) -> u64 {
+        SyscallTpProgram::missed(self)
+    }
+
+    fn unfollowed(&self) -> u64 {
+        SyscallTpProgram::unfollowed(self)
+    }
 }
 
 impl Rows for VfsProgram {

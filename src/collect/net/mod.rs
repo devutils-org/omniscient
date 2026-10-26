@@ -196,6 +196,7 @@ pub fn factories() -> Vec<Factory> {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
                 state: false,
+                classic: false,
             }))
         }),
         // The same handshake over one raw tracepoint, no trampolines.
@@ -204,6 +205,16 @@ pub fn factories() -> Vec<Factory> {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
                 state: true,
+                classic: false,
+            }))
+        }),
+        // And over the classic tracepoint, for a kernel without BTF.
+        Factory::new("net.tcp.connect", "bpf:tp", |resolved| {
+            Ok(Box::new(connect::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+                state: true,
+                classic: true,
             }))
         }),
         // The other end of a handshake: the server taking it off its queue.

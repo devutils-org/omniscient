@@ -2863,25 +2863,51 @@ fn every_datagram_sent_to_a_closed_port_is_a_drop_with_one_reason() {
     // twenty thousand of its drops in one tick fill the ring this reads. The
     // run says when that happened, so the answer is to take another window
     // rather than to assert a count that is known to be short.
+    if !Command::new("python3")
+        .arg("-c")
+        .arg("pass")
+        .status()
+        .is_ok_and(|status| status.success())
+    {
+        eprintln!("skipped: this machine has no `python3`, which the sending workload is in");
+        return;
+    }
+    // The sender is the run's launched program, so it starts once every
+    // program is attached: a sleep standing in for the attach lost the whole
+    // burst under the full suite's load, while `Udp:NoPorts` counted it.
+    // `examples/net-closed-port.yml` is the same two requests as a session,
+    // sending by hand.
+    let sender = format!(
+        "import socket\n\
+         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n\
+         for _ in range({SENT}): s.sendto(b'x' * 32, ('127.0.0.1', {NOWHERE}))"
+    );
     let mut attempts = Vec::new();
     for _ in 0..3 {
         let before = snmp("Udp", "NoPorts");
         let measuring = Command::new(BINARY)
-            .args(["-f", &session("net-closed-port.yml"), "--format", "json"])
+            .args([
+                "trace",
+                "net.drops",
+                "net.iface",
+                "--system",
+                "-m",
+                "count",
+                "-e",
+                "raw",
+                "-e",
+                "summary",
+                "--format",
+                "json",
+                "--",
+                "python3",
+                "-c",
+                &sender,
+            ])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .expect("omn should run");
-
-        pause(200);
-        let sender = UdpSocket::bind("127.0.0.1:0").expect("a socket to send from");
-        for _ in 0..SENT {
-            // A previous datagram's ICMP port-unreachable comes back as an
-            // error on the next send of a connected socket; this one is
-            // unconnected, so every send is delivered to the stack and dropped
-            // there.
-            let _ = sender.send_to(&[0x5au8; 32], ("127.0.0.1", NOWHERE));
-        }
 
         let outcome = measuring.wait_with_output().expect("omn should finish");
         if unprivileged(&stderr(&outcome)) {
@@ -2894,7 +2920,7 @@ fn every_datagram_sent_to_a_closed_port_is_a_drop_with_one_reason() {
         assert_eq!(code(&outcome), 0, "{}", stderr(&outcome));
         let after = snmp("Udp", "NoPorts");
         let run = results(&outcome);
-        let lost = labelled(&run, "drops")["losses"]["dropped"]
+        let lost = labelled(&run, "net.drops")["losses"]["dropped"]
             .as_u64()
             .expect("a loss count");
         if lost == 0 {
@@ -2904,7 +2930,7 @@ fn every_datagram_sent_to_a_closed_port_is_a_drop_with_one_reason() {
         attempts.push((before, after, run));
     }
     let (before, after, run) = attempts.pop().expect("at least one window");
-    let lost = labelled(&run, "drops")["losses"]["dropped"]
+    let lost = labelled(&run, "net.drops")["losses"]["dropped"]
         .as_u64()
         .expect("a loss count");
     if lost > 0 {
@@ -2929,7 +2955,7 @@ fn every_datagram_sent_to_a_closed_port_is_a_drop_with_one_reason() {
     // of the machine's drops are other reasons or more of this one.
     let mut by_reason: BTreeMap<String, u64> = BTreeMap::new();
     let mut counted = 0;
-    for event in raw_events(&run, "drops") {
+    for event in raw_events(&run, "net.drops") {
         let attributes = attrs(event);
         let drops = attributes["drops"].as_u64().expect("a count");
         *by_reason
@@ -2963,7 +2989,7 @@ fn every_datagram_sent_to_a_closed_port_is_a_drop_with_one_reason() {
 
     // And the contrast. The device counted no drops at all, because nothing
     // went wrong at the device.
-    let links = labelled(&run, "links");
+    let links = labelled(&run, "net.iface");
     assert!(
         links["events_seen"].as_u64().unwrap_or(0) > 0,
         "net.iface read the interface counters and produced nothing"

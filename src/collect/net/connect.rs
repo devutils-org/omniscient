@@ -25,6 +25,9 @@ pub struct Prepare {
     pub filter: Option<FilterExpr>,
     /// The `inet_sock_set_state` road (`bpf:raw_tp`) rather than fentry.
     pub state: bool,
+    /// That road over the classic tracepoint (`bpf:tp`), for a kernel
+    /// without BTF.
+    pub classic: bool,
 }
 
 impl Prepared for Prepare {
@@ -38,6 +41,7 @@ impl Prepared for Prepare {
         }
         Ok(Box::new(ConnectCollector {
             state: self.state,
+            classic: self.classic,
             whose: whose(target)?,
             program: None,
             losses: Losses::default(),
@@ -72,6 +76,8 @@ fn whose(target: &Target) -> Result<Whose, String> {
 pub struct ConnectCollector {
     /// Over `inet_sock_set_state`: no `failed`, and the cookie as it stands.
     state: bool,
+    /// Over the classic tracepoint: no cookie, and no errno on a refusal.
+    classic: bool,
     whose: Whose,
     program: Option<ConnectProgram>,
     losses: Losses,
@@ -197,7 +203,9 @@ impl Collector for ConnectCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        let program = if self.state {
+        let program = if self.classic {
+            ConnectProgram::load_classic(self.whose)?
+        } else if self.state {
             ConnectProgram::load_state(self.whose)?
         } else {
             ConnectProgram::load(self.whose)?
@@ -240,6 +248,14 @@ impl Collector for ConnectCollector {
              SYN left: the latency of each is to its own outcome, and a refusal is not a slow \
              connection"
         )];
+        if self.classic {
+            notes.push(
+                "through the classic `sock:inet_sock_set_state`, read without BTF: a handshake \
+                 carries its ends and its outcome, but no `cookie`, and a refusal no `errno`; a \
+                 connect that failed before its SYN left is not seen"
+                    .to_owned(),
+            );
+        }
         if !self.v6 {
             notes.push(
                 "this kernel has no tcp_v6_connect in its BTF, so IPv6 handshakes are not timed"

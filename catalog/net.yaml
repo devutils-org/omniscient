@@ -18,6 +18,10 @@
     - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:tcp_v4_connect(sock *, sockaddr_unsized *, int)|(sock *, sockaddr *, int)", "fentry:tcp_finish_connect", "fentry:tcp_done_with_error", "fentry:tcp_done"], cost: low}
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:inet_sock_set_state(sock *, int, int)", "bpf_map:ringbuf"], cost: low,
        degraded: "one tracepoint and no trampoline, so no 65 ms detach; but a connect that failed before its SYN left is not seen (no `failed` outcome), and the cookie is the socket's as it stands, zero where nothing asked for one"}
+    # The same road over the classic record, read without BTF: the socket is
+    # its address there, so no cookie, and `sk_err` is out of reach.
+    - {id: "bpf:tp", requires: ["tracepoint:sock:inet_sock_set_state", "bpf"], cost: low,
+       degraded: "a connect that failed before its SYN left is not seen (no `failed` outcome); no cookie, and a refusal carries no errno"}
     - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: low, degraded: "no BTF: struct offsets are not portable"}
   modes: [trace]
   emits: [hist, topk, raw, summary]
