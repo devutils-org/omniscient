@@ -330,6 +330,14 @@ pub fn factories() -> Vec<Factory> {
                 mode: resolved.request.mode,
                 // Applied per drained wakeup; see `wakeup::Prepare`.
                 filter: resolved.request.filter.clone(),
+                classic: false,
+            }))
+        }),
+        Factory::new("sched.wakeup", "bpf:tp", |resolved| {
+            Ok(Box::new(wakeup::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+                classic: true,
             }))
         }),
         Factory::new("sched.offcpu", "bpf:raw_tp", |resolved| {

@@ -674,14 +674,54 @@ pub struct EventStream {
     _maps: Vec<Hash>,
 }
 
-/// One program and what holds it attached.
-enum Attached {
+/// One program and what holds it attached: a raw tracepoint's link, or a
+/// classic tracepoint's perf event.
+pub(super) enum Attached {
     Raw { program: OwnedFd, _link: OwnedFd },
     Classic(super::attach::PerfAttachment),
 }
 
 impl Attached {
-    fn program(&self) -> &OwnedFd {
+    /// Loads `instructions` as a raw tracepoint program and attaches it.
+    pub(super) fn raw(tracepoint: &str, instructions: &[Insn], name: &str) -> Result<Self, String> {
+        let program = syscall::prog_load(
+            syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
+            instructions,
+            name,
+            LICENSE,
+        )
+        .map_err(|error| {
+            if error.is_permission() {
+                super::permission_advice("loading a raw tracepoint program")
+            } else {
+                format!("the kernel refused the `{tracepoint}` program: {error}")
+            }
+        })?;
+        let link = crate::bpf::program::attach_raw(tracepoint, &program)?;
+        Ok(Attached::Raw {
+            program,
+            _link: link,
+        })
+    }
+
+    /// Attaches `instructions` to the classic tracepoint, machine-wide.
+    pub(super) fn classic(
+        category: &str,
+        tracepoint: &str,
+        instructions: &[Insn],
+        name: &str,
+    ) -> Result<Self, String> {
+        super::attach::tracepoint(
+            category,
+            tracepoint,
+            instructions,
+            name,
+            super::attach::Scope::System,
+        )
+        .map(Attached::Classic)
+    }
+
+    pub(super) fn program(&self) -> &OwnedFd {
         match self {
             Attached::Raw { program, .. } => program,
             Attached::Classic(attachment) => attachment.program(),
@@ -1244,7 +1284,7 @@ fn classic_signal_instructions(
 
 /// The thread group a live thread belongs to, from `/proc`: what a classic
 /// record that names a task by its id leaves to the drain.
-fn group_of(tid: u32) -> Option<u32> {
+pub(super) fn group_of(tid: u32) -> Option<u32> {
     let status = std::fs::read_to_string(format!("/proc/{tid}/status")).ok()?;
     status
         .lines()

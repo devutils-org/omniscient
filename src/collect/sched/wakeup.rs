@@ -38,6 +38,8 @@ pub struct Prepare {
     /// events alone, so a predicate this collector ignored would run nowhere
     /// (stream S's finding, `docs/fixes/silent.md`).
     pub filter: Option<FilterExpr>,
+    /// The classic tracepoints (`bpf:tp`), for a kernel without BTF.
+    pub classic: bool,
 }
 
 impl Prepared for Prepare {
@@ -55,6 +57,7 @@ impl Prepared for Prepare {
         let filter = super::whose(target, "wakeups are kept by the task at either end")?;
         let mut collector = WakeupCollector::new(filter);
         collector.predicate = UserFilter::new(self.filter, "wakeups");
+        collector.classic = self.classic;
         Ok(Box::new(collector))
     }
 }
@@ -120,6 +123,8 @@ pub struct WakeupCollector {
     /// Why an interrupt's wakeup carries no `irq` or `softirq`, when the
     /// programs that read them could not be loaded.
     interrupts_unnamed: Option<String>,
+    /// Through the classic tracepoints (`bpf:tp`).
+    classic: bool,
 }
 
 impl WakeupCollector {
@@ -135,6 +140,7 @@ impl WakeupCollector {
             from_interrupts: 0,
             interrupts_blind: false,
             interrupts_unnamed: None,
+            classic: false,
         }
     }
 
@@ -227,7 +233,11 @@ impl Collector for WakeupCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        let program = WakeupProgram::load(self.filter, RING_BYTES)?;
+        let program = if self.classic {
+            WakeupProgram::load_classic(self.filter, RING_BYTES)?
+        } else {
+            WakeupProgram::load(self.filter, RING_BYTES)?
+        };
         self.interrupts_blind = !program.interrupts_told_apart();
         self.interrupts_unnamed = program.interrupts_unnamed().map(str::to_owned);
         self.program = Some(program);
@@ -289,6 +299,16 @@ impl Collector for WakeupCollector {
                  interrupt a cpu is in were not loaded ({reason})"
             ));
         }
+        if self.classic {
+            if let Whose::Cgroup(_) = self.filter {
+                notes.push(
+                    "a cgroup through the classic tracepoint: the wakeups its tasks issued are \
+                     kept, and the ones they received from outside it are not, since the record \
+                     names the wakee by its id alone"
+                        .to_owned(),
+                );
+            }
+        }
         notes.extend(self.predicate.note());
         notes
     }
@@ -314,6 +334,7 @@ mod tests {
                 freq: "997hz".parse().expect("a frequency"),
             },
             filter: None,
+            classic: false,
         });
         let Err(error) = prepared.attach(&Target::Pid(vec![1])) else {
             panic!("a sampled mode must be refused");
@@ -329,6 +350,7 @@ mod tests {
         let prepared = Box::new(Prepare {
             mode: Mode::Trace,
             filter: None,
+            classic: false,
         });
         let Err(error) = prepared.attach(&Target::Iface("eth0".to_owned())) else {
             panic!("an interface names no process to filter on");
@@ -345,6 +367,7 @@ mod tests {
         let _collector = Box::new(Prepare {
             mode: Mode::Trace,
             filter: None,
+            classic: false,
         })
         .attach(&Target::System)
         .expect("a machine-wide collector");
@@ -352,6 +375,7 @@ mod tests {
         let prepared = Box::new(Prepare {
             mode: Mode::Trace,
             filter: None,
+            classic: false,
         });
         let _collector = prepared
             // A process that exists: inside a container a pid is translated to the

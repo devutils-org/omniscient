@@ -24,17 +24,15 @@
 //! 0, the context in the record -- and kept for a target only when its wakee is
 //! the target's.
 
-use std::os::fd::{AsRawFd, OwnedFd};
-
 use super::btf::Btf;
+use super::context::Record;
 use super::insn::{
     helper, push_current_filter, Insn, Program, Subject, TaskFields, Whose, BPF_DW, BPF_W, R10,
 };
 use super::map::{map_failure, Counters};
-use super::ring::{ring_bytes, RingBuffer};
+use super::proc_events::{publish_to, Attached};
 use super::sched_common::{push_followed_filter, text_of, Descendants, Followed};
-use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
-use crate::bpf::program::LICENSE;
+use super::transport::{Output, Transport};
 
 /// One wakeup, as the program writes it and userspace reads it.
 ///
@@ -279,7 +277,7 @@ fn instructions(
     btf: &Btf,
     preempt: Option<PreemptCount>,
     followed: Followed,
-    ring_fd: i32,
+    output: Output,
     drops_fd: i32,
     interrupts_fd: Option<i32>,
 ) -> Result<Vec<Insn>, String> {
@@ -428,26 +426,18 @@ fn instructions(
     }
 
     program.label("emit");
-    program.extend(Insn::load_map_fd(1, ring_fd));
-    program.push(Insn::mov64_reg(2, R10));
-    program.push(Insn::add64_imm(2, EVENT as i32));
-    program.push(Insn::mov64_imm(3, RECORD_BYTES as i32));
-    program.push(Insn::mov64_imm(4, 0));
-    program.push(Insn::call(helper::RINGBUF_OUTPUT));
-
     // A full ring returns an error and the wakeup is gone. Nothing else would
     // ever record that, so the program counts it: a correlation missing a third
     // of its evidence must not look like a correlation that found nothing.
-    program.jump_to("done", Insn::jsge_imm(0, 0, 0));
-    program.push(Insn::st_imm(BPF_W, R10, DROP_KEY, 0));
-    program.extend(Insn::load_map_fd(1, drops_fd));
-    program.push(Insn::mov64_reg(2, R10));
-    program.push(Insn::add64_imm(2, DROP_KEY as i32));
-    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
-    program.jump_to("done", Insn::jeq_imm(0, 0, 0));
-    program.push(Insn::ldx(BPF_DW, 1, 0, 0));
-    program.push(Insn::add64_imm(1, 1));
-    program.push(Insn::stx(BPF_DW, 0, 0, 1));
+    publish_to(
+        &mut program,
+        output,
+        6,
+        drops_fd,
+        EVENT,
+        RECORD_BYTES,
+        DROP_KEY,
+    );
 
     program.label("done");
     program.push(Insn::mov64_imm(0, 0));
@@ -479,20 +469,38 @@ const SOFTIRQ_SIGNATURE: [&str; 1] = ["unsigned int"];
 /// `irq_handler_exit`: those wakeups carry no `irq`, and the caveat says so.
 struct InterruptNumbers {
     map: Counters,
-    programs: Vec<OwnedFd>,
-    _links: Vec<OwnedFd>,
+    attached: Vec<Attached>,
 }
 
 /// A program that sets one slot of the interrupt map from its first argument,
 /// plus one, or clears it.
-fn interrupt_instructions(slot: i32, map_fd: i32, set: bool) -> Result<Vec<Insn>, String> {
+/// Where an entry tracepoint carries its number: a raw tracepoint's first
+/// argument, or a classic record's field.
+enum Number<'a> {
+    Argument,
+    Field(&'a Record, &'static str),
+}
+
+fn interrupt_instructions(
+    slot: i32,
+    map_fd: i32,
+    number: Option<Number>,
+) -> Result<Vec<Insn>, String> {
+    let set = number.is_some();
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
-    if set {
+    match number {
+        None => {}
         // A raw tracepoint's arguments are eight bytes each; the number is in
         // the low half, and the store below takes only that half.
-        program.push(Insn::ldx(BPF_DW, 7, 6, 0));
-        program.push(Insn::add64_imm(7, 1));
+        Some(Number::Argument) => {
+            program.push(Insn::ldx(BPF_DW, 7, 6, 0));
+            program.push(Insn::add64_imm(7, 1));
+        }
+        Some(Number::Field(record, field)) => {
+            record.load(&mut program, 7, 6, field, -16)?;
+            program.push(Insn::add64_imm(7, 1));
+        }
     }
     program.push(Insn::st_imm(BPF_W, R10, -8, slot));
     program.extend(Insn::load_map_fd(1, map_fd));
@@ -514,6 +522,28 @@ fn interrupt_instructions(slot: i32, map_fd: i32, set: bool) -> Result<Vec<Insn>
 }
 
 impl InterruptNumbers {
+    /// The exits before the entries: an exit with no entry before it clears
+    /// a slot that was clear, where an entry with no exit attached would
+    /// leave a number behind that the next interrupt's wakeups would read.
+    const PROGRAMS: [(&'static str, i32, bool, &'static str, &'static str); 4] = [
+        (
+            "irq_handler_exit",
+            HARD_SLOT,
+            false,
+            "omn_wake_irqout",
+            "irq",
+        ),
+        ("softirq_exit", SOFT_SLOT, false, "omn_wake_sftout", "vec"),
+        (
+            "irq_handler_entry",
+            HARD_SLOT,
+            true,
+            "omn_wake_irqin",
+            "irq",
+        ),
+        ("softirq_entry", SOFT_SLOT, true, "omn_wake_sftin", "vec"),
+    ];
+
     fn load(btf: &Btf) -> Result<Self, String> {
         for (tracepoint, expected) in [
             ("irq_handler_entry", &IRQ_ENTRY_SIGNATURE[..]),
@@ -532,36 +562,155 @@ impl InterruptNumbers {
         }
         let map = Counters::create(2, "omn_wake_irq")
             .map_err(|error| map_failure("interrupt map", error))?;
-        let mut programs = Vec::new();
-        let mut links = Vec::new();
-        // The exits before the entries: an exit with no entry before it clears
-        // a slot that was clear, where an entry with no exit attached would
-        // leave a number behind that the next interrupt's wakeups would read.
-        for (tracepoint, slot, set, name) in [
-            ("irq_handler_exit", HARD_SLOT, false, "omn_wake_irqout"),
-            ("softirq_exit", SOFT_SLOT, false, "omn_wake_sftout"),
-            ("irq_handler_entry", HARD_SLOT, true, "omn_wake_irqin"),
-            ("softirq_entry", SOFT_SLOT, true, "omn_wake_sftin"),
-        ] {
-            let instructions = interrupt_instructions(slot, map.as_raw_fd(), set)?;
-            let program = syscall::prog_load(
-                syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
-                &instructions,
-                name,
-                LICENSE,
-            )
-            .map_err(|error| format!("the kernel refused the `{tracepoint}` program: {error}"))?;
-            let link = syscall::raw_tracepoint_open(tracepoint, program.as_raw_fd())
-                .map_err(|error| format!("cannot attach to `{tracepoint}`: {error}"))?;
-            programs.push(program);
-            links.push(link);
+        let mut attached = Vec::new();
+        for (tracepoint, slot, set, name, _) in Self::PROGRAMS {
+            let number = set.then_some(Number::Argument);
+            let instructions = interrupt_instructions(slot, map.as_raw_fd(), number)?;
+            attached.push(Attached::raw(tracepoint, &instructions, name)?);
         }
-        Ok(Self {
-            map,
-            programs,
-            _links: links,
-        })
+        Ok(Self { map, attached })
     }
+
+    /// The same four, on the classic `irq` tracepoints: what tells a
+    /// wakeup issued from an interrupt apart where no preempt count can be
+    /// read. An NMI is not one of them.
+    fn load_classic() -> Result<Self, String> {
+        let map = Counters::create(2, "omn_wake_irq")
+            .map_err(|error| map_failure("interrupt map", error))?;
+        let mut attached = Vec::new();
+        for (tracepoint, slot, set, name, field) in Self::PROGRAMS {
+            let record = Record::of("irq", tracepoint)?;
+            let number = set.then_some(Number::Field(&record, field));
+            let instructions = interrupt_instructions(slot, map.as_raw_fd(), number)?;
+            attached.push(Attached::classic("irq", tracepoint, &instructions, name)?);
+        }
+        Ok(Self { map, attached })
+    }
+}
+
+/// The classic program on `sched:sched_waking`, in the waker's context.
+///
+/// The wakee is the record's `pid` and `comm`; its thread group is the
+/// followed threads' map's where the target is a process, and found in
+/// `/proc` at the drain otherwise. Whether the wakeup came from an interrupt
+/// is the per-cpu state the classic `irq` programs keep: a hard interrupt's
+/// number, or a softirq's vector, while one is being handled.
+fn classic_instructions(
+    record: &Record,
+    whose: Whose,
+    threads: Option<i32>,
+    output: Output,
+    drops_fd: i32,
+    interrupts_fd: i32,
+) -> Result<Vec<Insn>, String> {
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::stx(BPF_DW, R10, EVENT, 0));
+    program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
+    program.push(Insn::stx(BPF_W, R10, WAKER_TID, 0));
+    program.push(Insn::rsh64_imm(0, 32));
+    program.push(Insn::stx(BPF_W, R10, WAKER_PID, 0));
+    program.push(Insn::call(helper::GET_SMP_PROCESSOR_ID));
+    program.push(Insn::stx(BPF_W, R10, CPU, 0));
+    program.push(Insn::mov64_reg(1, R10));
+    program.push(Insn::add64_imm(1, CURRENT_COMM as i32));
+    program.push(Insn::mov64_imm(2, 16));
+    program.push(Insn::call(helper::GET_CURRENT_COMM));
+    for slot in [SERVED_IN, IRQ, SOFTIRQ, PAD, CONTEXT, WAKEE_PID] {
+        program.push(Insn::st_imm(BPF_W, R10, slot, 0));
+    }
+
+    // A hard interrupt first: one can interrupt a softirq, never the other
+    // way round.
+    for (slot, into, bits, next) in [
+        (HARD_SLOT, IRQ, HARDIRQ_MASK, "not_hard"),
+        (SOFT_SLOT, SOFTIRQ, SOFTIRQ_OFFSET, "not_soft"),
+    ] {
+        program.push(Insn::st_imm(BPF_W, R10, DROP_KEY, slot));
+        program.extend(Insn::load_map_fd(1, interrupts_fd));
+        program.push(Insn::mov64_reg(2, R10));
+        program.push(Insn::add64_imm(2, DROP_KEY as i32));
+        program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+        program.jump_to(next, Insn::jeq_imm(0, 0, 0));
+        program.push(Insn::ldx(BPF_W, 1, 0, 0));
+        program.jump_to(next, Insn::jeq_imm(1, 0, 0));
+        program.push(Insn::stx(BPF_W, R10, into, 1));
+        program.push(Insn::st_imm(BPF_W, R10, CONTEXT, bits as i32));
+        program.jump_to("in_an_interrupt", Insn::ja());
+        program.label(next);
+    }
+    program.jump_to("wakee", Insn::ja());
+    program.label("in_an_interrupt");
+    program.push(Insn::ldx(BPF_W, 1, R10, WAKER_TID));
+    program.push(Insn::stx(BPF_W, R10, SERVED_IN, 1));
+    program.push(Insn::st_imm(BPF_W, R10, WAKER_TID, 0));
+    program.push(Insn::st_imm(BPF_W, R10, WAKER_PID, 0));
+
+    program.label("wakee");
+    record.load(&mut program, 1, 6, "pid", FILTER_SCRATCH)?;
+    program.push(Insn::stx(BPF_W, R10, WAKEE_TID, 1));
+    record.copy(&mut program, 6, "comm", COMM, 16)?;
+    if let Some(threads) = threads {
+        program.extend(Insn::load_map_fd(1, threads));
+        program.push(Insn::mov64_reg(2, R10));
+        program.push(Insn::add64_imm(2, WAKEE_TID as i32));
+        program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+        program.jump_to("wakee_read", Insn::jeq_imm(0, 0, 0));
+        program.push(Insn::ldx(BPF_W, 1, 0, 0));
+        program.push(Insn::stx(BPF_W, R10, WAKEE_PID, 1));
+        program.label("wakee_read");
+    }
+
+    // Kept when either end is the target's, as the raw program keeps it: the
+    // wakee by the threads map, the waker by its own ids, an interrupt's
+    // waker never.
+    match whose {
+        Whose::Any => {}
+        Whose::Process(_) => {
+            program.push(Insn::ldx(BPF_W, 1, R10, WAKEE_PID));
+            program.jump_to("emit", Insn::jne_imm(1, 0, 0));
+            program.push(Insn::ldx(BPF_W, 1, R10, WAKER_TID));
+            program.jump_to("done", Insn::jeq_imm(1, 0, 0));
+            if let Some(threads) = threads {
+                program.extend(Insn::load_map_fd(1, threads));
+                program.push(Insn::mov64_reg(2, R10));
+                program.push(Insn::add64_imm(2, WAKER_TID as i32));
+                program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+                program.jump_to("done", Insn::jeq_imm(0, 0, 0));
+            }
+        }
+        Whose::Thread(tid) => {
+            program.push(Insn::ldx(BPF_W, 1, R10, WAKEE_TID));
+            program.jump_to("emit", Insn::jeq_imm(1, tid as i32, 0));
+            program.push(Insn::ldx(BPF_W, 1, R10, WAKER_TID));
+            program.jump_to("done", Insn::jne_imm(1, tid as i32, 0));
+        }
+        // The wakee's cgroup is not in the record: the cgroup's wakers are
+        // kept, and the collector says so.
+        Whose::Cgroup(_) => {
+            program.push(Insn::ldx(BPF_W, 1, R10, WAKER_TID));
+            program.jump_to("done", Insn::jeq_imm(1, 0, 0));
+            push_current_filter(&mut program, whose, FILTER_SCRATCH, "done");
+        }
+    }
+
+    program.label("emit");
+    publish_to(
+        &mut program,
+        output,
+        6,
+        drops_fd,
+        EVENT,
+        RECORD_BYTES,
+        DROP_KEY,
+    );
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
 }
 
 /// A loaded, attached wakeup program and the two maps it writes.
@@ -569,45 +718,37 @@ impl InterruptNumbers {
 /// Dropping it detaches: the link, the program and the maps are file
 /// descriptors, and the kernel unloads the program when the last one closes.
 pub struct WakeupProgram {
-    /// The processes a process target started, followed in the kernel.
     descendants: Option<Descendants>,
-    /// Whether the program can tell an interrupt's wakeup from a task's.
     interrupts_told_apart: bool,
-    /// The programs that say which interrupt, or why there are none.
     interrupts: Result<InterruptNumbers, String>,
-    ring: RingBuffer,
+    ring: Transport,
     drops: Counters,
-    program: OwnedFd,
-    _link: OwnedFd,
+    attached: Attached,
+    /// Through the classic tracepoint: the wakee's process is found at the
+    /// drain where the program did not know it.
+    classic: bool,
 }
 
 impl WakeupProgram {
     /// Runs the kernel skipped because one of these programs was already
-    /// running on that cpu -- an interrupt re-entering it, since a raw
-    /// tracepoint runs with preemption off. The kernel counts them in
-    /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
-    /// program's own counters can say an occurrence was never seen.
+    /// running on that cpu, as every program here reports them.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::program::skipped([&self.program])
+        crate::bpf::program::skipped([self.attached.program()])
             + self.descendants.as_ref().map_or(0, Descendants::skipped)
             + self.interrupts.as_ref().map_or(0, |numbers| {
-                crate::bpf::program::skipped(numbers.programs.iter())
+                crate::bpf::program::skipped(numbers.attached.iter().map(Attached::program))
             })
     }
 
-    /// Processes the target started that no program here followed, because
-    /// the map of them was full.
+    /// Processes the target started that were not followed, because the map
+    /// of them was full.
     pub fn unfollowed(&self) -> u64 {
         self.descendants.as_ref().map_or(0, Descendants::missed)
     }
 
-    /// Loads and attaches the program, or says why the kernel refused.
     pub fn load(whose: Whose, requested_ring_bytes: usize) -> Result<Self, String> {
         let btf = super::kernel_btf()?;
-        let bytes = ring_bytes(requested_ring_bytes);
-
-        let ring_map = syscall::map_create(BPF_MAP_TYPE_RINGBUF, 0, 0, bytes as u32, "omn_wakeups")
-            .map_err(|error| map_failure("wakeup ring buffer", error))?;
+        let ring = Transport::create(requested_ring_bytes, Some(0), "omn_wakeups")?;
         let drops = Counters::create(1, "omn_wake_drop")
             .map_err(|error| map_failure("drop counter", error))?;
 
@@ -621,8 +762,6 @@ impl WakeupProgram {
             .map_or(Followed::only(whose), |descendants| {
                 descendants.followed(whose)
             });
-        // Only where an interrupt's wakeup is told apart at all: elsewhere
-        // there is no interrupt context to name.
         let interrupts = match preempt {
             Some(_) => InterruptNumbers::load(btf),
             None => Err("this kernel's preempt count was not found".to_owned()),
@@ -631,31 +770,14 @@ impl WakeupProgram {
             btf,
             preempt,
             followed,
-            ring_map.as_raw_fd(),
+            ring.output(),
             drops.as_raw_fd(),
             interrupts
                 .as_ref()
                 .ok()
                 .map(|numbers| numbers.map.as_raw_fd()),
         )?;
-        let program = syscall::prog_load(
-            syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
-            &instructions,
-            "omn_waking",
-            LICENSE,
-        )
-        .map_err(|error| {
-            if error.is_permission() {
-                super::permission_advice("loading a raw tracepoint program")
-            } else {
-                format!("the kernel refused the wakeup program: {error}")
-            }
-        })?;
-
-        let link = crate::bpf::program::attach_raw("sched_waking", &program)?;
-
-        let ring = RingBuffer::map(ring_map, bytes)
-            .map_err(|error| format!("cannot map the wakeup ring buffer: {error}"))?;
+        let attached = Attached::raw("sched_waking", &instructions, "omn_waking")?;
 
         Ok(Self {
             descendants,
@@ -663,14 +785,46 @@ impl WakeupProgram {
             interrupts,
             ring,
             drops,
-            program,
-            _link: link,
+            attached,
+            classic: false,
         })
     }
 
-    /// Whether a wakeup issued from an interrupt is recorded as the
-    /// interrupt's. `false` on a kernel whose preempt count this program cannot
-    /// find, where such a wakeup is credited to the interrupted task as before.
+    /// The classic tracepoints (`bpf:tp`), for a kernel without BTF: the
+    /// interrupt a wakeup came from is told by the classic `irq` programs,
+    /// and a process target's threads are followed so that the wakee's
+    /// process is known in the kernel.
+    pub fn load_classic(whose: Whose, requested_ring_bytes: usize) -> Result<Self, String> {
+        let ring = Transport::create(requested_ring_bytes, Some(0), "omn_wakeups")?;
+        let drops = Counters::create(1, "omn_wake_drop")
+            .map_err(|error| map_failure("drop counter", error))?;
+        let descendants = match whose {
+            Whose::Process(root) => Some(Descendants::follow_threads(root)?),
+            _ => None,
+        };
+        let threads = descendants.as_ref().and_then(Descendants::threads_fd);
+        let interrupts = InterruptNumbers::load_classic()?;
+        let waking = Record::of("sched", "sched_waking")?;
+        let instructions = classic_instructions(
+            &waking,
+            whose,
+            threads,
+            ring.output(),
+            drops.as_raw_fd(),
+            interrupts.map.as_raw_fd(),
+        )?;
+        let attached = Attached::classic("sched", "sched_waking", &instructions, "omn_waking")?;
+        Ok(Self {
+            descendants,
+            interrupts_told_apart: true,
+            interrupts: Ok(interrupts),
+            ring,
+            drops,
+            attached,
+            classic: true,
+        })
+    }
+
     pub fn interrupts_told_apart(&self) -> bool {
         self.interrupts_told_apart
     }
@@ -684,10 +838,22 @@ impl WakeupProgram {
     /// Hands every complete wakeup to `handle`, and counts the records that
     /// were not the size this reader expects rather than reinterpreting them.
     pub fn drain(&mut self, mut handle: impl FnMut(Wakeup), undecoded: &mut u64) {
+        let classic = self.classic;
         self.ring.drain(|bytes| match Wakeup::from_bytes(bytes) {
-            Some(wakeup) => handle(wakeup),
+            Some(mut wakeup) => {
+                if classic && wakeup.wakee_pid == 0 {
+                    wakeup.wakee_pid = super::proc_events::group_of(wakeup.wakee_tid).unwrap_or(0);
+                }
+                handle(wakeup)
+            }
             None => *undecoded += 1,
         });
+    }
+
+    /// Whether this is the classic road, whose record lacks what the notes
+    /// say.
+    pub fn classic(&self) -> bool {
+        self.classic
     }
 
     /// Wakeups the program could not publish because the ring was full.
@@ -796,8 +962,8 @@ mod tests {
     /// else, on a path that runs on every interrupt of the machine.
     #[test]
     fn the_interrupt_programs_set_and_clear_one_slot() {
-        let set = interrupt_instructions(SOFT_SLOT, 3, true).expect("a program");
-        let clear = interrupt_instructions(HARD_SLOT, 3, false).expect("a program");
+        let set = interrupt_instructions(SOFT_SLOT, 3, Some(Number::Argument)).expect("a program");
+        let clear = interrupt_instructions(HARD_SLOT, 3, None).expect("a program");
         for program in [&set, &clear] {
             assert_eq!(helpers_called(program), vec![helper::MAP_LOOKUP_ELEM]);
         }
@@ -835,7 +1001,7 @@ mod tests {
             &btf,
             PreemptCount::locate(&btf),
             Followed::only(Whose::Process(1)),
-            3,
+            Output::Ring(3),
             4,
             Some(5),
         )
@@ -863,7 +1029,7 @@ mod tests {
             &btf,
             PreemptCount::locate(&btf),
             Followed::only(Whose::Process(1)),
-            3,
+            Output::Ring(3),
             4,
             Some(5),
         )
@@ -907,7 +1073,7 @@ mod tests {
             &btf,
             PreemptCount::locate(&btf),
             Followed::only(Whose::Any),
-            3,
+            Output::Ring(3),
             4,
             Some(5),
         )
@@ -920,7 +1086,7 @@ mod tests {
             &btf,
             PreemptCount::locate(&btf),
             Followed::only(Whose::Process(4242)),
-            3,
+            Output::Ring(3),
             4,
             Some(5),
         )
@@ -942,7 +1108,7 @@ mod tests {
             &btf,
             PreemptCount::locate(&btf),
             Followed::only(Whose::Any),
-            3,
+            Output::Ring(3),
             4,
             Some(5),
         )
@@ -972,7 +1138,7 @@ mod tests {
             &btf,
             PreemptCount::locate(&btf),
             Followed::only(Whose::Process(4242)),
-            3,
+            Output::Ring(3),
             4,
             Some(5),
         )
@@ -981,7 +1147,7 @@ mod tests {
             &btf,
             PreemptCount::locate(&btf),
             Followed::only(Whose::Any),
-            3,
+            Output::Ring(3),
             4,
             Some(5),
         )
@@ -1118,7 +1284,7 @@ mod tests {
             &btf,
             Some(preempt),
             Followed::only(Whose::Process(4242)),
-            3,
+            Output::Ring(3),
             4,
             Some(5),
         )
@@ -1153,5 +1319,46 @@ mod tests {
             load < zeroed && zeroed < compared,
             "{load} {zeroed} {compared}"
         );
+    }
+
+    /// The classic program builds against 4.19's `sched_waking` for every
+    /// target, and compares the wakee through the threads map for a process.
+    #[test]
+    fn the_classic_program_builds_for_every_target() {
+        let waking = Record::from_layout(
+            "sched:sched_waking",
+            super::super::attach::parse_layout(
+                "\tfield:char comm[16];\toffset:8;\tsize:16;\tsigned:1;\n\
+                 \tfield:pid_t pid;\toffset:24;\tsize:4;\tsigned:1;\n\
+                 \tfield:int prio;\toffset:28;\tsize:4;\tsigned:1;\n\
+                 \tfield:int success;\toffset:32;\tsize:4;\tsigned:1;\n\
+                 \tfield:int target_cpu;\toffset:36;\tsize:4;\tsigned:1;\n",
+            ),
+        );
+        for (whose, threads) in [
+            (Whose::Any, None),
+            (Whose::Process(4242), Some(9)),
+            (Whose::Thread(4242), None),
+            (
+                Whose::Cgroup(super::super::insn::Cgroup { id: 7, level: 1 }),
+                None,
+            ),
+        ] {
+            let program = classic_instructions(&waking, whose, threads, Output::PerfArray(3), 4, 5)
+                .unwrap_or_else(|error| panic!("{whose:?}: {error}"));
+            assert!(
+                program.contains(&Insn::ldx(BPF_W, 1, 6, 24)),
+                "the wakee's id"
+            );
+            let looked_up = program
+                .windows(2)
+                .filter(|pair| pair[0] == Insn::load_map_fd(1, 9)[0])
+                .count();
+            assert_eq!(
+                looked_up,
+                if threads.is_some() { 2 } else { 0 },
+                "{whose:?}"
+            );
+        }
     }
 }

@@ -16,10 +16,15 @@
       join: {key: "task:tid", match: wakeup}
       cost: med
     - id: "bpf:tp"
-      requires: ["bpf", "tracefs", "tracepoint:sched:sched_waking"]
+      requires: ["bpf", "tracefs", "tracepoint:sched:sched_waking", "tracepoint:irq:irq_handler_entry",
+        "tracepoint:irq:irq_handler_exit", "tracepoint:irq:softirq_entry", "tracepoint:irq:softirq_exit",
+        "tracepoint:task:task_newtask", "tracepoint:sched:sched_process_free"]
       join: {key: "task:tid", match: wakeup}
       cost: med
-      equivalent: true
+      degraded: "the record names the wakee by its thread id: its process is read from `/proc` at the
+        drain unless the target is a process, and a cgroup keeps only the wakeups its tasks issued; an
+        interrupt is told apart by the `irq` tracepoints, so an NMI's wakeup is credited to what it
+        interrupted"
   modes: [trace]
   emits: [raw, topk, timeline, summary]
   targets: {system: native, pid: bpf_only, tid: bpf_only, cgroup: bpf_only, launch: bpf_only}
