@@ -34,6 +34,14 @@ pub fn factories() -> Vec<Factory> {
                 // Applied by the collector, for the reason `syscall` below
                 // gives: nothing else would.
                 filter: resolved.request.filter.clone(),
+                classic: false,
+            }))
+        }),
+        Factory::new("proc.exec", "bpf:tp", |resolved| {
+            Ok(Box::new(events::PrepareExec {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+                classic: true,
             }))
         }),
         Factory::new("proc.exit", "bpf:raw_tp", |resolved| {
@@ -42,6 +50,14 @@ pub fn factories() -> Vec<Factory> {
                 // Applied by the collector, for the reason `syscall` below
                 // gives: nothing else would.
                 filter: resolved.request.filter.clone(),
+                classic: false,
+            }))
+        }),
+        Factory::new("proc.exit", "bpf:tp", |resolved| {
+            Ok(Box::new(events::PrepareExit {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+                classic: true,
             }))
         }),
         Factory::new("proc.signals", "bpf:raw_tp", |resolved| {
@@ -50,6 +66,14 @@ pub fn factories() -> Vec<Factory> {
                 // Applied by the collector, for the reason `syscall` below
                 // gives: nothing else would.
                 filter: resolved.request.filter.clone(),
+                classic: false,
+            }))
+        }),
+        Factory::new("proc.signals", "bpf:tp", |resolved| {
+            Ok(Box::new(events::PrepareSignals {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+                classic: true,
             }))
         }),
         Factory::new("proc.calls", "bpf:raw_tp", |resolved| {
@@ -73,6 +97,14 @@ pub fn factories() -> Vec<Factory> {
                 // `bpf` backend with filtering in the kernel and then leaves
                 // its events alone; see `syscall::Prepare`.
                 filter: resolved.request.filter.clone(),
+                classic: false,
+            }))
+        }),
+        Factory::new("proc.syscall", "bpf:tp", |resolved| {
+            Ok(Box::new(syscall::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+                classic: true,
             }))
         }),
     ]

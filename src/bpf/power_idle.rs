@@ -15,7 +15,8 @@
 
 use super::btf::Btf;
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
-use super::proc_events::{publish, EventStream};
+use super::proc_events::{publish_to, EventStream};
+use super::transport::Output;
 
 /// `cpu_idle(state, cpu_id)` as BTF spells it.
 pub(super) const SIGNATURE: [&str; 2] = ["unsigned int", "unsigned int"];
@@ -53,7 +54,7 @@ const STATE: i16 = EDGE + 8;
 const CPU: i16 = EDGE + 12;
 const DROP_KEY: i16 = EDGE - 8;
 
-fn instructions(btf: &Btf, ring_fd: i32, drops_fd: i32) -> Result<Vec<Insn>, String> {
+fn instructions(btf: &Btf, output: Output, drops_fd: i32) -> Result<Vec<Insn>, String> {
     super::program::prototype(btf, "cpu_idle", &[&SIGNATURE], "the state and the cpu")?;
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
@@ -64,7 +65,15 @@ fn instructions(btf: &Btf, ring_fd: i32, drops_fd: i32) -> Result<Vec<Insn>, Str
     program.push(Insn::stx(BPF_W, R10, STATE, 1));
     program.push(Insn::ldx(BPF_DW, 1, 6, 8));
     program.push(Insn::stx(BPF_W, R10, CPU, 1));
-    publish(&mut program, ring_fd, drops_fd, EDGE, EDGE_BYTES, DROP_KEY);
+    publish_to(
+        &mut program,
+        output,
+        6,
+        drops_fd,
+        EDGE,
+        EDGE_BYTES,
+        DROP_KEY,
+    );
     program.label("done");
     program.push(Insn::mov64_imm(0, 0));
     program.push(Insn::exit());
@@ -129,7 +138,7 @@ mod tests {
             eprintln!("skipped: no kernel BTF");
             return;
         };
-        let program = instructions(&btf, 3, 4).expect("a program");
+        let program = instructions(&btf, Output::Ring(3), 4).expect("a program");
         assert!(program
             .iter()
             .any(|insn| insn.code == 0x85 && insn.imm == helper::RINGBUF_OUTPUT));

@@ -100,6 +100,11 @@ impl RingBuffer {
         })
     }
 
+    /// The map's descriptor, which the programs that write into it load.
+    pub fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self._map.as_raw_fd()
+    }
+
     /// Hands every complete record to `handle`, then publishes the position.
     ///
     /// Returns how many records were consumed, so a caller can tell an empty

@@ -187,6 +187,8 @@ fn trace_only(mode: Mode, source: &str, what: &str) -> Result<(), String> {
 pub struct PrepareExec {
     pub mode: Mode,
     pub filter: Option<FilterExpr>,
+    /// The classic tracepoints (`bpf:tp`), for a kernel without BTF.
+    pub classic: bool,
 }
 
 impl Prepared for PrepareExec {
@@ -202,10 +204,13 @@ impl Prepared for PrepareExec {
             let mut collector = ExecCollector::new(self.filter);
             collector.tree = Some(Tree::rooted_at(root));
             collector.root = Some(root);
+            collector.classic = self.classic;
             return Ok(Box::new(collector));
         }
         let whose = machine_or_cgroup(target, "proc.exec")?;
-        Ok(Box::new(ExecCollector::new(self.filter).within(whose)))
+        let mut collector = ExecCollector::new(self.filter).within(whose);
+        collector.classic = self.classic;
+        Ok(Box::new(collector))
     }
 }
 
@@ -236,6 +241,8 @@ pub struct ExecCollector {
     undecided: Vec<Exec>,
     /// Set for the drain at `stop`, after which nothing is looked at again.
     last_drain: bool,
+    /// Through the classic tracepoints (`bpf:tp`).
+    classic: bool,
 }
 
 /// A process and every process descended from it that this run has seen.
@@ -382,6 +389,7 @@ impl ExecCollector {
             missed_forks: 0,
             undecided: Vec::new(),
             last_drain: false,
+            classic: false,
         }
     }
 
@@ -514,7 +522,11 @@ impl Collector for ExecCollector {
                 Err(reason) => self.unfollowed = Some(reason),
             }
         }
-        self.program = Some(ExecProgram::load(self.whose, RING_BYTES)?);
+        self.program = Some(if self.classic {
+            ExecProgram::load_classic(self.whose, RING_BYTES)?
+        } else {
+            ExecProgram::load(self.whose, RING_BYTES)?
+        });
         Ok(())
     }
 
@@ -590,13 +602,17 @@ impl Collector for ExecCollector {
 pub struct PrepareExit {
     pub mode: Mode,
     pub filter: Option<FilterExpr>,
+    /// The classic tracepoints (`bpf:tp`), for a kernel without BTF.
+    pub classic: bool,
 }
 
 impl Prepared for PrepareExit {
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
         trace_only(self.mode, "proc.exit", "an exit")?;
         let whose = machine_or_cgroup(target, "proc.exit")?;
-        Ok(Box::new(ExitCollector::new(self.filter).within(whose)))
+        let mut collector = ExitCollector::new(self.filter).within(whose);
+        collector.classic = self.classic;
+        Ok(Box::new(collector))
     }
 }
 
@@ -610,6 +626,10 @@ pub struct ExitCollector {
     threads: u64,
     processes: u64,
     predicate: Predicate,
+    /// Through the classic tracepoints (`bpf:tp`).
+    classic: bool,
+    /// Exits whose code the classic programs did not see.
+    uncoded: u64,
 }
 
 impl ExitCollector {
@@ -627,6 +647,8 @@ impl ExitCollector {
             threads: 0,
             processes: 0,
             predicate: Predicate::new(filter),
+            classic: false,
+            uncoded: 0,
         }
     }
 
@@ -638,6 +660,7 @@ impl ExitCollector {
         let mut undecoded = 0;
         let mut threads = 0;
         let mut processes = 0;
+        let mut uncoded = 0;
         let predicate = &mut self.predicate;
         program.drain(
             |exit: Exit| {
@@ -657,6 +680,9 @@ impl ExitCollector {
                 if exit.group_dead != 0 {
                     processes += 1;
                 }
+                if !exit.code_known() {
+                    uncoded += 1;
+                }
                 events.push(event);
                 index += 1;
             },
@@ -664,6 +690,7 @@ impl ExitCollector {
         );
         self.threads += threads;
         self.processes += processes;
+        self.uncoded += uncoded;
         self.inner.note_undecoded(undecoded, "exit");
     }
 }
@@ -683,28 +710,42 @@ impl Default for ExitCollector {
 /// not want the convention never has to accept it. Reporting the kernel's raw
 /// `exit_code` under the name `code` would be worse than either: a task killed
 /// by `SIGKILL` carries 9 in that word and would read as having exited 9.
+///
+/// An exit whose code the classic programs did not see carries none of the
+/// code's fields rather than a zero that reads as a clean exit, and one whose
+/// core bit they cannot know carries no `core_dumped`.
 fn exit_attributes(exit: &Exit) -> Vec<Attr> {
     let mut attrs = vec![
         Attr::uint("count", 1),
         Attr::uint("tid", u64::from(exit.tid)),
         Attr::uint("pid", u64::from(exit.tgid)),
-        Attr::int(
-            "code",
-            exit.status()
-                .map_or_else(|| 128 + i64::from(exit.signal().unwrap_or(0)), i64::from),
-        ),
-        Attr::int("signal", i64::from(exit.signal().unwrap_or(0))),
-        Attr::int("exit_code", i64::from(exit.exit_code)),
-        Attr::uint("core_dumped", u64::from(exit.core_dumped())),
+    ];
+    if exit.code_known() {
+        attrs.extend([
+            Attr::int(
+                "code",
+                exit.status()
+                    .map_or_else(|| 128 + i64::from(exit.signal().unwrap_or(0)), i64::from),
+            ),
+            Attr::int("signal", i64::from(exit.signal().unwrap_or(0))),
+            Attr::int("exit_code", i64::from(exit.exit_code)),
+        ]);
+        if exit.unknown & Exit::CORE_UNKNOWN == 0 {
+            attrs.push(Attr::uint("core_dumped", u64::from(exit.core_dumped())));
+        }
+    }
+    attrs.extend([
         // Every thread's exit fires this tracepoint. Only the last one of a
         // process has this set, and a reader counting programs wants only
         // those -- a count of exits is a count of threads until it is filtered.
         Attr::uint("group_dead", u64::from(exit.group_dead != 0)),
         Attr::uint("cpu", u64::from(exit.cpu)),
         Attr::text("comm", exit.comm()),
-    ];
-    if let Some(status) = exit.status() {
-        attrs.push(Attr::int("status", i64::from(status)));
+    ]);
+    if exit.code_known() {
+        if let Some(status) = exit.status() {
+            attrs.push(Attr::int("status", i64::from(status)));
+        }
     }
     attrs
 }
@@ -715,7 +756,11 @@ impl Collector for ExitCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        self.program = Some(ExitProgram::load(self.whose, RING_BYTES)?);
+        self.program = Some(if self.classic {
+            ExitProgram::load_classic(self.whose, RING_BYTES)?
+        } else {
+            ExitProgram::load(self.whose, RING_BYTES)?
+        });
         Ok(())
     }
 
@@ -762,7 +807,34 @@ impl Collector for ExitCollector {
             if self.processes == 1 { "was" } else { "were" },
             if self.processes == 1 { "its" } else { "their" },
         ));
-        if !ExitProgram::group_dead_is_passed() {
+        if self.classic {
+            notes.push(
+                "through the classic tracepoints: a thread's code is the status it called \
+                 `exit` or `exit_group` with, or the fatal signal it was delivered with no \
+                 handler, as this run saw them, without the kernel's core-dump bit; \
+                 `group_dead` is decided at the drain, the last exit of its process read when \
+                 no thread of it was still running"
+                    .to_owned(),
+            );
+            if self.uncoded > 0 {
+                notes.push(format!(
+                    "{} exit{} no code: neither a call to `exit` nor a fatal signal was seen \
+                     for {}, so the code's fields are absent from {}",
+                    self.uncoded,
+                    if self.uncoded == 1 {
+                        " carries"
+                    } else {
+                        "s carry"
+                    },
+                    if self.uncoded == 1 { "it" } else { "them" },
+                    if self.uncoded == 1 {
+                        "its row"
+                    } else {
+                        "their rows"
+                    },
+                ));
+            }
+        } else if !ExitProgram::group_dead_is_passed() {
             notes.push(
                 "this kernel's `sched_process_exit` does not say whether a thread was its \
                  process's last, so `group_dead` is read from the process's count of live \
@@ -780,6 +852,8 @@ impl Collector for ExitCollector {
 pub struct PrepareSignals {
     pub mode: Mode,
     pub filter: Option<FilterExpr>,
+    /// The classic tracepoint (`bpf:tp`), for a kernel without BTF.
+    pub classic: bool,
 }
 
 impl Prepared for PrepareSignals {
@@ -797,9 +871,9 @@ impl Prepared for PrepareSignals {
                  watch the whole machine"
             )
         })?;
-        Ok(Box::new(
-            SignalCollector::new(filter, mode).with_predicate(self.filter),
-        ))
+        let mut collector = SignalCollector::new(filter, mode).with_predicate(self.filter);
+        collector.classic = self.classic;
+        Ok(Box::new(collector))
     }
 }
 
@@ -812,6 +886,8 @@ pub struct SignalCollector {
     /// A counted run's running totals, by `(target tid, signal)`.
     totals: BTreeMap<(u32, i32), Counted>,
     predicate: Predicate,
+    /// Through the classic tracepoint (`bpf:tp`).
+    classic: bool,
 }
 
 /// One `(task, signal)` pair's totals over a counted run.
@@ -833,6 +909,7 @@ impl SignalCollector {
             program: None,
             totals: BTreeMap::new(),
             predicate: Predicate::new(None),
+            classic: false,
         }
     }
 
@@ -999,7 +1076,11 @@ impl Collector for SignalCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        self.program = Some(SignalProgram::load(self.filter, RING_BYTES)?);
+        self.program = Some(if self.classic {
+            SignalProgram::load_classic(self.filter, RING_BYTES)?
+        } else {
+            SignalProgram::load(self.filter, RING_BYTES)?
+        });
         Ok(())
     }
 
@@ -1054,6 +1135,22 @@ impl Collector for SignalCollector {
             notes.push(
                 "machine-wide: every signal on the machine, including the ones this tool \
                  receives itself"
+                    .to_owned(),
+            );
+        }
+        if self.classic {
+            if let Whose::Cgroup(_) = self.filter {
+                notes.push(
+                    "a cgroup through the classic tracepoint: the signals its tasks sent are \
+                     kept, and the ones they received from outside it are not, since the \
+                     record names the receiver by its id alone"
+                        .to_owned(),
+                );
+            }
+            notes.push(
+                "through the classic tracepoint: the receiver's process is found in `/proc` at \
+                 the drain where the run does not follow it, and is 0 for a receiver that had \
+                 exited by then"
                     .to_owned(),
             );
         }
@@ -1167,7 +1264,7 @@ mod tests {
             group_dead: 1,
             comm: padded("sh"),
             cpu: 3,
-            pad: 0,
+            unknown: 0,
         }
     }
 
@@ -1238,6 +1335,7 @@ mod tests {
         let Err(error) = Box::new(PrepareExit {
             mode: Mode::Trace,
             filter: None,
+            classic: false,
         })
         .attach(&Target::Pid(vec![1])) else {
             panic!("`proc.exit` does not watch one process");
@@ -1247,6 +1345,7 @@ mod tests {
         assert!(Box::new(PrepareExec {
             mode: Mode::Trace,
             filter: None,
+            classic: false,
         })
         .attach(&Target::Pid(vec![1]))
         .is_ok());
@@ -1256,6 +1355,7 @@ mod tests {
             assert!(Box::new(PrepareExit {
                 mode: Mode::Trace,
                 filter: None,
+                classic: false,
             })
             .attach(&Target::Cgroup("/sys/fs/cgroup".into()))
             .is_ok());
@@ -1263,6 +1363,7 @@ mod tests {
         let Err(error) = Box::new(PrepareExit {
             mode: Mode::Trace,
             filter: None,
+            classic: false,
         })
         .attach(&Target::Cgroup("/sys/fs/cgroup/no-such-cgroup-here".into())) else {
             panic!("a cgroup that does not exist names nothing to watch");
@@ -1280,6 +1381,7 @@ mod tests {
                 interval: "100ms".parse().expect("an interval"),
             },
             filter: None,
+            classic: false,
         });
         let Err(error) = prepared.attach(&Target::System) else {
             panic!("a polled mode must be refused");
@@ -1292,12 +1394,14 @@ mod tests {
         let _collector = Box::new(PrepareSignals {
             mode: Mode::Trace,
             filter: None,
+            classic: false,
         })
         .attach(&Target::System)
         .expect("a machine-wide collector");
         let _collector = Box::new(PrepareSignals {
             mode: Mode::Trace,
             filter: None,
+            classic: false,
         })
         // A process that exists: in a container its id is translated to the
         // kernel's, and a pid nobody has is refused there.

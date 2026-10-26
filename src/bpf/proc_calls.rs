@@ -24,20 +24,17 @@
 //! predicate naming one syscall is pushed into the entry program, as it is for
 //! `proc.syscall`.
 
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 
 use super::context::Syscall;
 use super::insn::{count_drop, helper, Insn, Program, Whose};
 use super::insn::{BPF_DW, BPF_W, R10};
 use super::map::{map_failure, Counters, Hash};
-use super::ring::{ring_bytes, RingBuffer};
 use super::sched_common::{push_current_followed_filter, Descendants, Followed};
-use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
+use super::transport::{Output, Transport};
 use crate::bpf::program::load_raw_tracepoint as load;
 
-/// `bpf_probe_read_user_str(dst, size, unsafe_ptr)`, which `insn::helper`
-/// does not name.
-const PROBE_READ_USER_STR: i32 = 114;
+const PROBE_READ_USER_STR: i32 = helper::PROBE_READ_USER_STR;
 
 /// How many threads can be inside a syscall at once and still be timed.
 const MAX_PENDING: u32 = 16384;
@@ -269,7 +266,7 @@ fn enter_instructions(
 fn exit_instructions(
     context: Syscall,
     pending_fd: i32,
-    ring_fd: i32,
+    output: Output,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
     context.check("sys_exit", "its arguments")?;
@@ -338,12 +335,7 @@ fn exit_instructions(
     program.push(Insn::stx(BPF_W, R10, REC_PATH_READ, 0));
 
     program.label("publish");
-    program.extend(Insn::load_map_fd(1, ring_fd));
-    program.push(Insn::mov64_reg(2, R10));
-    program.push(Insn::add64_imm(2, REC as i32));
-    program.push(Insn::mov64_imm(3, CALL_BYTES as i32));
-    program.push(Insn::mov64_imm(4, 0));
-    program.push(Insn::call(helper::RINGBUF_OUTPUT));
+    output.push(&mut program, 6, REC, CALL_BYTES as i32);
     program.jump_to("done", Insn::jsge_imm(0, 0, 0));
     count_drop(&mut program, drops_fd, DROP_KEY, DROP_RING, "done");
 
@@ -358,7 +350,7 @@ fn exit_instructions(
 
 /// The two attached programs, their pending map, their ring and their drops.
 pub struct CallsProgram {
-    ring: RingBuffer,
+    ring: Transport,
     pending: Hash,
     drops: Counters,
     attached: Attached,
@@ -411,7 +403,6 @@ impl CallsProgram {
             .map_or(Followed::only(narrowing.whose), |descendants| {
                 descendants.followed(narrowing.whose)
             });
-        let bytes = ring_bytes(requested_ring_bytes);
         let pending = Hash::create(
             PEND_KEY_BYTES,
             PEND_VALUE_BYTES,
@@ -419,17 +410,17 @@ impl CallsProgram {
             "omn_call_pend",
         )
         .map_err(|error| map_failure("pending call map", error))?;
-        let ring_map = syscall::map_create(BPF_MAP_TYPE_RINGBUF, 0, 0, bytes as u32, "omn_calls")
-            .map_err(|error| map_failure("call ring buffer", error))?;
+        // Stamped where the call began: the first eight bytes of a record.
+        let ring = Transport::create(requested_ring_bytes, Some(0), "omn_calls")?;
         let drops = Counters::create(3, "omn_call_drop")
             .map_err(|error| map_failure("call drop counter", error))?;
 
-        let (pending_fd, ring_fd, drops_fd) =
-            (pending.as_raw_fd(), ring_map.as_raw_fd(), drops.as_raw_fd());
+        let (pending_fd, output, drops_fd) =
+            (pending.as_raw_fd(), ring.output(), drops.as_raw_fd());
         let attached = if classic {
             let context = Syscall::classic()?;
             let enter = enter_instructions(context, narrowing, &followed, pending_fd, drops_fd)?;
-            let exit = exit_instructions(context, pending_fd, ring_fd, drops_fd)?;
+            let exit = exit_instructions(context, pending_fd, output, drops_fd)?;
             // Entry first, for the reason `proc_syscall.rs` gives. The
             // programs compare the task themselves, so the events span the
             // machine.
@@ -458,7 +449,7 @@ impl CallsProgram {
                 pending_fd,
                 drops_fd,
             )?;
-            let exit = exit_instructions(Syscall::Raw(btf), pending_fd, ring_fd, drops_fd)?;
+            let exit = exit_instructions(Syscall::Raw(btf), pending_fd, output, drops_fd)?;
             let enter_program = load(&enter, "omn_call_enter")?;
             let exit_program = load(&exit, "omn_call_exit")?;
             // Entry first, for the reason `proc_syscall.rs` gives.
@@ -471,8 +462,6 @@ impl CallsProgram {
                 _exit_link: exit_link,
             }
         };
-        let ring = RingBuffer::map(ring_map, bytes)
-            .map_err(|error| format!("cannot map the call ring buffer: {error}"))?;
         Ok(Self {
             ring,
             pending,
@@ -625,7 +614,8 @@ mod tests {
             .filter(|insn| insn.code == 0x85 && insn.imm == PROBE_READ_USER_STR)
             .count();
         assert_eq!(reads, 2);
-        let exit = exit_instructions(Syscall::Raw(&btf), 3, 4, 5).expect("the exit program");
+        let exit =
+            exit_instructions(Syscall::Raw(&btf), 3, Output::Ring(4), 5).expect("the exit program");
         // The classic road, at the offsets every kernel's `raw_syscalls`
         // format has published (`id` at 8, `args` at 16, `ret` at 16).
         let classic = Syscall::Classic {
@@ -640,7 +630,7 @@ mod tests {
             enter.contains(&Insn::ldx(BPF_DW, 1, 6, 16 + 8)),
             "openat's path pointer"
         );
-        exit_instructions(classic, 3, 4, 5).expect("the classic exit");
+        exit_instructions(classic, 3, Output::PerfArray(4), 5).expect("the classic exit");
         assert_eq!(
             exit.iter()
                 .filter(|insn| insn.code == 0x85 && insn.imm == PROBE_READ_USER_STR)

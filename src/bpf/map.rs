@@ -103,8 +103,20 @@ impl Hash {
         max_entries: u32,
         name: &str,
     ) -> io::Result<Self> {
+        Self::create_typed(BPF_MAP_TYPE_HASH, key_bytes, value_bytes, max_entries, name)
+    }
+
+    /// A map of another hash type, `BPF_MAP_TYPE_LRU_HASH`'s: read and drained
+    /// the same way.
+    pub fn create_typed(
+        map_type: u32,
+        key_bytes: usize,
+        value_bytes: usize,
+        max_entries: u32,
+        name: &str,
+    ) -> io::Result<Self> {
         let fd = syscall::map_create(
-            BPF_MAP_TYPE_HASH,
+            map_type,
             key_bytes as u32,
             value_bytes as u32,
             max_entries,

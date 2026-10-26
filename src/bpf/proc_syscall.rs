@@ -33,7 +33,7 @@
 
 use std::os::fd::OwnedFd;
 
-use super::btf::Btf;
+use super::context::Syscall;
 use super::insn::{
     self, count_drop, helper, push_current_filter, Insn, Log2Labels, Program, Whose, BPF_DW, BPF_W,
     R10,
@@ -55,14 +55,6 @@ mod extra_helper {
     /// task is exactly the one a syscall histogram is interesting about.
     pub const GET_CURRENT_COMM: i32 = 16;
 }
-
-/// The prototypes these programs are written against.
-///
-/// `sys_exit`'s second argument is the *return value*, not the syscall number:
-/// the number is only on the entry side, which is the whole reason the pending
-/// map carries it rather than being keyed by it.
-pub(super) const ENTER_SIGNATURE: [&str; 2] = ["pt_regs *", "long int"];
-pub(super) const EXIT_SIGNATURE: [&str; 2] = ["pt_regs *", "long int"];
 
 /// How many threads may be inside a syscall at once before the entry program
 /// stops being able to record new ones.
@@ -250,13 +242,13 @@ pub struct Narrowing {
 
 /// The program on `sys_enter`: a task has called into the kernel.
 fn enter_instructions(
-    btf: &Btf,
+    context: Syscall,
     narrowing: Narrowing,
     descendants: Option<i32>,
     pending_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
-    crate::bpf::program::prototype(btf, "sys_enter", &[&ENTER_SIGNATURE], "the syscall number")?;
+    context.check("sys_enter", "the syscall number")?;
 
     let mut program = Program::new();
     // r6 keeps the context, r8 the timestamp and r9 the syscall number; all
@@ -303,8 +295,8 @@ fn enter_instructions(
         }
     }
 
-    // The second argument is the syscall number.
-    program.push(Insn::ldx(BPF_DW, 9, 6, 8));
+    // The syscall number.
+    program.push(Insn::ldx(BPF_DW, 9, 6, context.nr_at()));
     if let Some(nr) = narrowing.syscall_nr {
         program.jump_to("the_syscall", Insn::jeq_imm(9, nr as i32, 0));
         // A call of the target's that the predicate declines: counted, so the
@@ -350,12 +342,12 @@ fn enter_instructions(
 /// pending map, so the lookup that opens this program is the same filter,
 /// applied where it cannot disagree with itself.
 fn exit_instructions(
-    btf: &Btf,
+    context: Syscall,
     pending_fd: i32,
     rows_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
-    crate::bpf::program::prototype(btf, "sys_exit", &[&EXIT_SIGNATURE], "the syscall number")?;
+    context.check("sys_exit", "the syscall number")?;
 
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
@@ -399,9 +391,9 @@ fn exit_instructions(
 
     // Whether the call failed, kept where a new row's value is built: one
     // for a return value in `[-4095, -1]`, zero otherwise. The return value
-    // is the tracepoint's second argument, the context's second word.
+    // is where the context says.
     program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_ERRORS, 0));
-    program.push(Insn::ldx(BPF_DW, 1, 6, 8));
+    program.push(Insn::ldx(BPF_DW, 1, 6, context.ret_at()));
     program.jump_to("not_an_error", Insn::jsge_imm(1, 0, 0));
     program.jump_to("an_error", Insn::jsge_imm(1, -4095, 0));
     program.jump_to("not_an_error", Insn::ja());
@@ -471,12 +463,23 @@ pub struct SyscallProgram {
     pending: Hash,
     rows: Rows,
     drops: Counters,
-    enter_program: OwnedFd,
-    _enter_link: OwnedFd,
-    exit_program: OwnedFd,
-    _exit_link: OwnedFd,
+    attached: Attached,
     /// The processes a process target started, followed from their fork.
     descendants: Option<Descendants>,
+}
+
+/// The two programs and what holds them attached.
+enum Attached {
+    Raw {
+        enter_program: OwnedFd,
+        _enter_link: OwnedFd,
+        exit_program: OwnedFd,
+        _exit_link: OwnedFd,
+    },
+    Classic {
+        enter: super::attach::PerfAttachment,
+        exit: super::attach::PerfAttachment,
+    },
 }
 
 /// What one drain found, beside the measurements.
@@ -495,8 +498,17 @@ impl SyscallProgram {
     /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
     /// program's own counters can say an occurrence was never seen.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::program::skipped([&self.enter_program, &self.exit_program])
-            + self.descendants.as_ref().map_or(0, Descendants::skipped)
+        let programs = match &self.attached {
+            Attached::Raw {
+                enter_program,
+                exit_program,
+                ..
+            } => crate::bpf::program::skipped([enter_program, exit_program]),
+            Attached::Classic { enter, exit } => {
+                crate::bpf::program::skipped([enter.program(), exit.program()])
+            }
+        };
+        programs + self.descendants.as_ref().map_or(0, Descendants::skipped)
     }
 
     /// Processes the target started that were not followed, because the map
@@ -506,7 +518,17 @@ impl SyscallProgram {
     }
 
     pub fn load(narrowing: Narrowing) -> Result<Self, String> {
-        let btf = super::kernel_btf()?;
+        Self::load_on(narrowing, false)
+    }
+
+    /// The classic tracepoints `raw_syscalls:sys_enter` and `sys_exit`
+    /// (`bpf:tp`), for a kernel without BTF; their field offsets come from
+    /// tracefs.
+    pub fn load_classic(narrowing: Narrowing) -> Result<Self, String> {
+        Self::load_on(narrowing, true)
+    }
+
+    fn load_on(narrowing: Narrowing, classic: bool) -> Result<Self, String> {
         // A process target is followed into every process it starts, as the
         // `sched` sources follow it (`sched_common::Descendants`).
         let descendants = match narrowing.whose {
@@ -526,22 +548,24 @@ impl SyscallProgram {
         let drops = Counters::create(3, "omn_sys_drop")
             .map_err(|error| map_failure("syscall drop counter", error))?;
 
+        let context = if classic {
+            Syscall::classic()?
+        } else {
+            Syscall::Raw(super::kernel_btf()?)
+        };
         let enter = enter_instructions(
-            btf,
+            context,
             narrowing,
             descendants.as_ref().map(Descendants::map_fd),
             pending.as_raw_fd(),
             drops.as_raw_fd(),
         )?;
         let exit = exit_instructions(
-            btf,
+            context,
             pending.as_raw_fd(),
             rows.as_raw_fd(),
             drops.as_raw_fd(),
         )?;
-
-        let enter_program = load(&enter, "omn_sys_enter")?;
-        let exit_program = load(&exit, "omn_sys_exit")?;
 
         // Attached in this order on purpose, for the reason `runqlat.rs`
         // records: a call recorded by a program whose partner is not attached
@@ -550,17 +574,43 @@ impl SyscallProgram {
         // exit seen before any entry was recorded would close a call nobody
         // opened, and the lookup that fails is the only thing standing between
         // that and a duration measured from an uninitialised timestamp.
-        let enter_link = crate::bpf::program::attach_raw("sys_enter", &enter_program)?;
-        let exit_link = crate::bpf::program::attach_raw("sys_exit", &exit_program)?;
+        let attached = if classic {
+            // The programs compare the task themselves, so the events span
+            // the machine.
+            let scope = super::attach::Scope::System;
+            let enter = super::attach::tracepoint(
+                "raw_syscalls",
+                "sys_enter",
+                &enter,
+                "omn_sys_enter",
+                scope,
+            )?;
+            let exit = super::attach::tracepoint(
+                "raw_syscalls",
+                "sys_exit",
+                &exit,
+                "omn_sys_exit",
+                scope,
+            )?;
+            Attached::Classic { enter, exit }
+        } else {
+            let enter_program = load(&enter, "omn_sys_enter")?;
+            let exit_program = load(&exit, "omn_sys_exit")?;
+            let enter_link = crate::bpf::program::attach_raw("sys_enter", &enter_program)?;
+            let exit_link = crate::bpf::program::attach_raw("sys_exit", &exit_program)?;
+            Attached::Raw {
+                enter_program,
+                _enter_link: enter_link,
+                exit_program,
+                _exit_link: exit_link,
+            }
+        };
 
         Ok(Self {
             pending,
             rows,
             drops,
-            enter_program,
-            _enter_link: enter_link,
-            exit_program,
-            _exit_link: exit_link,
+            attached,
             descendants,
         })
     }
@@ -618,6 +668,7 @@ impl SyscallProgram {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bpf::btf::Btf;
 
     fn kernel_btf() -> Option<Btf> {
         match Btf::from_kernel() {
@@ -689,8 +740,9 @@ mod tests {
         const KTIME_GET_BOOT_NS: i32 = 125;
         let Some(btf) = kernel_btf() else { return };
         for program in [
-            enter_instructions(&btf, Narrowing::default(), None, 3, 4).expect("a program"),
-            exit_instructions(&btf, 3, 4, 5).expect("a program"),
+            enter_instructions(Syscall::Raw(&btf), Narrowing::default(), None, 3, 4)
+                .expect("a program"),
+            exit_instructions(Syscall::Raw(&btf), 3, 4, 5).expect("a program"),
         ] {
             let called = helpers_called(&program);
             assert!(called.contains(&helper::KTIME_GET_NS));
@@ -705,14 +757,14 @@ mod tests {
     #[test]
     fn a_syscall_predicate_is_written_into_the_instruction_stream() {
         let Some(btf) = kernel_btf() else { return };
-        let everything =
-            enter_instructions(&btf, Narrowing::default(), None, 3, 4).expect("a program");
+        let everything = enter_instructions(Syscall::Raw(&btf), Narrowing::default(), None, 3, 4)
+            .expect("a program");
         assert!(
             !everything.iter().any(|insn| insn.imm == 257),
             "a run that named no syscall compares against none"
         );
         let narrowed = enter_instructions(
-            &btf,
+            Syscall::Raw(&btf),
             Narrowing {
                 whose: Whose::Any,
                 syscall_nr: Some(257),
@@ -740,7 +792,7 @@ mod tests {
     fn the_process_filter_and_the_syscall_filter_are_both_in_the_entry_program() {
         let Some(btf) = kernel_btf() else { return };
         let both = enter_instructions(
-            &btf,
+            Syscall::Raw(&btf),
             Narrowing {
                 whose: Whose::Process(4242),
                 syscall_nr: Some(257),
@@ -753,7 +805,7 @@ mod tests {
         assert_eq!(both.iter().filter(|insn| insn.imm == 4242).count(), 1);
         assert_eq!(both.iter().filter(|insn| insn.imm == 257).count(), 1);
 
-        let exit = exit_instructions(&btf, 3, 4, 5).expect("a program");
+        let exit = exit_instructions(Syscall::Raw(&btf), 3, 4, 5).expect("a program");
         assert!(
             !exit.iter().any(|insn| insn.imm == 4242 || insn.imm == 257),
             "the exit program filters through the pending map and nothing else"
@@ -767,7 +819,7 @@ mod tests {
     #[test]
     fn the_pending_entry_is_read_before_it_is_deleted() {
         let Some(btf) = kernel_btf() else { return };
-        let program = exit_instructions(&btf, 3, 4, 5).expect("a program");
+        let program = exit_instructions(Syscall::Raw(&btf), 3, 4, 5).expect("a program");
         let delete_at = program
             .iter()
             .position(|insn| insn.code == 0x85 && insn.imm == helper::MAP_DELETE_ELEM)
@@ -790,8 +842,9 @@ mod tests {
     fn both_programs_are_built_against_the_running_kernel() {
         let Some(btf) = kernel_btf() else { return };
         for program in [
-            enter_instructions(&btf, Narrowing::default(), None, 3, 4).expect("a program"),
-            exit_instructions(&btf, 3, 4, 5).expect("a program"),
+            enter_instructions(Syscall::Raw(&btf), Narrowing::default(), None, 3, 4)
+                .expect("a program"),
+            exit_instructions(Syscall::Raw(&btf), 3, 4, 5).expect("a program"),
         ] {
             assert_eq!(program.last().copied(), Some(Insn::exit()));
             super::super::insn::audit(&program).expect("the audit passes");
@@ -907,7 +960,7 @@ mod tests {
     #[test]
     fn the_exit_program_reads_the_name_on_every_call() {
         let Some(btf) = kernel_btf() else { return };
-        let program = exit_instructions(&btf, 3, 4, 5).expect("a program");
+        let program = exit_instructions(Syscall::Raw(&btf), 3, 4, 5).expect("a program");
         let comm_call = program
             .iter()
             .position(|insn| insn.code == 0x85 && insn.imm == extra_helper::GET_CURRENT_COMM)
@@ -931,7 +984,7 @@ mod tests {
     #[test]
     fn the_row_map_is_taken_from_the_slot_once_per_run() {
         let Some(btf) = kernel_btf() else { return };
-        let program = exit_instructions(&btf, 3, 4, 5).expect("a program");
+        let program = exit_instructions(Syscall::Raw(&btf), 3, 4, 5).expect("a program");
         crate::bpf::map::assert_rows_taken_once(&program, 4);
     }
 }

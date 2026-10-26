@@ -22,16 +22,18 @@
 //! is: a program that reads a `task_struct *` out of a slot holding an integer
 //! does not fail, it produces a plausible number.
 
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::collections::BTreeMap;
+use std::os::fd::OwnedFd;
 
 use super::btf::Btf;
+use super::context::Record;
 use super::insn::{
     helper, push_current_filter, push_task_filter, read_field, read_narrow, read_pointer, Insn,
     Program, Subject, TaskFields, Whose, BPF_DW, BPF_W, R10,
 };
-use super::map::{map_failure, Counters};
-use super::ring::{ring_bytes, RingBuffer};
-use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
+use super::map::{map_failure, Counters, Hash};
+use super::syscall;
+use super::transport::{Output, Transport};
 use crate::bpf::program::LICENSE;
 
 /// The prototypes these programs are written against, as the kernel publishes
@@ -97,7 +99,10 @@ pub struct Exit {
     pub group_dead: u32,
     pub(crate) comm: [u8; COMM_BYTES],
     pub cpu: u32,
-    pub(crate) pad: u32,
+    /// What the program could not read, by bit: [`Exit::CODE_UNKNOWN`] and
+    /// [`Exit::GROUP_UNKNOWN`]. Zero from the raw program, which reads both
+    /// out of the task; the classic one has neither in its record.
+    pub unknown: u32,
 }
 
 const EXIT_BYTES: usize = 48;
@@ -195,6 +200,20 @@ impl Exec {
 }
 
 impl Exit {
+    /// `exit_code` is not known: the task left without a call to `exit` or
+    /// `exit_group` and without a fatal signal this run saw delivered.
+    pub const CODE_UNKNOWN: u32 = 1;
+    /// `group_dead` is not in the record, and was decided at the drain.
+    pub const GROUP_UNKNOWN: u32 = 2;
+    /// Whether a core was dumped is not known: a code from the classic
+    /// programs is the signal or the status, without the kernel's core bit.
+    pub const CORE_UNKNOWN: u32 = 4;
+
+    /// Whether `exit_code` is the task's.
+    pub fn code_known(&self) -> bool {
+        self.unknown & Self::CODE_UNKNOWN == 0
+    }
+
     pub fn comm(&self) -> String {
         text(&self.comm)
     }
@@ -235,7 +254,7 @@ impl Exit {
             group_dead: word(bytes, 20),
             comm,
             cpu: word(bytes, 40),
-            pad: 0,
+            unknown: word(bytes, 44),
         })
     }
 }
@@ -303,7 +322,7 @@ const EXIT_CODE: i16 = EXIT_EVENT + 16;
 const EXIT_GROUP_DEAD: i16 = EXIT_EVENT + 20;
 const EXIT_COMM: i16 = EXIT_EVENT + 24;
 const EXIT_CPU: i16 = EXIT_EVENT + 40;
-const EXIT_PAD: i16 = EXIT_EVENT + 44;
+const EXIT_UNKNOWN: i16 = EXIT_EVENT + 44;
 const EXIT_DROP_KEY: i16 = EXIT_EVENT - 8;
 const EXIT_FILTER: i16 = EXIT_EVENT - 24;
 /// Eight bytes for the walk to `signal->live` on a kernel whose tracepoint
@@ -322,26 +341,23 @@ const SIG_SENDER_COMM: i16 = SIG_EVENT + 48;
 const SIG_DROP_KEY: i16 = SIG_EVENT - 8;
 const SIG_FILTER: i16 = SIG_EVENT - 24;
 
-/// Publishes the record on the stack, and counts it when the ring is full.
+/// Publishes the record on the stack into either transport, the context in
+/// `ctx_reg`, and counts it when the ring is full.
 ///
 /// A full ring returns an error, the event is gone, and nothing anywhere else
 /// records that it existed -- the BPF ring buffer does not report its own
 /// overflows. So the program counts them itself, which is the only reason a
 /// stream missing a third of its events does not look like a quiet machine.
-pub(super) fn publish(
+pub(super) fn publish_to(
     program: &mut Program,
-    ring_fd: i32,
+    output: Output,
+    ctx_reg: u8,
     drops_fd: i32,
     event: i16,
     bytes: usize,
     drop_key: i16,
 ) {
-    program.extend(Insn::load_map_fd(1, ring_fd));
-    program.push(Insn::mov64_reg(2, R10));
-    program.push(Insn::add64_imm(2, event as i32));
-    program.push(Insn::mov64_imm(3, bytes as i32));
-    program.push(Insn::mov64_imm(4, 0));
-    program.push(Insn::call(helper::RINGBUF_OUTPUT));
+    output.push(program, ctx_reg, event, bytes as i32);
 
     program.jump_to("done", Insn::jsge_imm(0, 0, 0));
     program.push(Insn::st_imm(BPF_W, R10, drop_key, 0));
@@ -360,7 +376,7 @@ pub(super) fn publish(
 fn exec_instructions(
     btf: &Btf,
     whose: Whose,
-    ring_fd: i32,
+    output: Output,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
     crate::bpf::program::prototype(
@@ -426,9 +442,10 @@ fn exec_instructions(
     program.push(Insn::ldx(BPF_DW, 3, R10, EXEC_PATH_PTR));
     program.push(Insn::call(helper::PROBE_READ_KERNEL_STR));
 
-    publish(
+    publish_to(
         &mut program,
-        ring_fd,
+        output,
+        6,
         drops_fd,
         EXEC_EVENT,
         EXEC_BYTES,
@@ -456,7 +473,7 @@ fn exec_instructions(
 fn exit_instructions(
     btf: &Btf,
     whose: Whose,
-    ring_fd: i32,
+    output: Output,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
     let passes_group_dead = crate::bpf::program::prototype(
@@ -489,7 +506,7 @@ fn exit_instructions(
     program.push(Insn::stx(BPF_W, R10, EXIT_CPU, 0));
     // Every byte of the record is written before it is published; a padding
     // word left uninitialised is whatever was on the stack before.
-    program.push(Insn::st_imm(BPF_W, R10, EXIT_PAD, 0));
+    program.push(Insn::st_imm(BPF_W, R10, EXIT_UNKNOWN, 0));
 
     match live {
         // The second argument says whether this was the last thread of its
@@ -525,9 +542,10 @@ fn exit_instructions(
     read_field(&mut program, EXIT_CODE, 4, 7, exit_code_offset);
     read_field(&mut program, EXIT_COMM, COMM_BYTES as i32, 7, comm_offset);
 
-    publish(
+    publish_to(
         &mut program,
-        ring_fd,
+        output,
+        6,
         drops_fd,
         EXIT_EVENT,
         EXIT_BYTES,
@@ -552,7 +570,7 @@ fn exit_instructions(
 fn signal_instructions(
     btf: &Btf,
     whose: Whose,
-    ring_fd: i32,
+    output: Output,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
     crate::bpf::program::prototype(
@@ -624,9 +642,10 @@ fn signal_instructions(
     }
 
     program.label("emit");
-    publish(
+    publish_to(
         &mut program,
-        ring_fd,
+        output,
+        6,
         drops_fd,
         SIG_EVENT,
         SIGNAL_BYTES,
@@ -647,10 +666,35 @@ fn signal_instructions(
 /// Dropping it detaches: the link, the program and the maps are file
 /// descriptors, and the kernel unloads the program when the last one closes.
 pub struct EventStream {
-    ring: RingBuffer,
+    ring: Transport,
     drops: Counters,
-    program: OwnedFd,
-    _link: OwnedFd,
+    attached: Vec<Attached>,
+    /// Maps the classic programs share among themselves, held for as long as
+    /// they run.
+    _maps: Vec<Hash>,
+}
+
+/// One program and what holds it attached.
+enum Attached {
+    Raw { program: OwnedFd, _link: OwnedFd },
+    Classic(super::attach::PerfAttachment),
+}
+
+impl Attached {
+    fn program(&self) -> &OwnedFd {
+        match self {
+            Attached::Raw { program, .. } => program,
+            Attached::Classic(attachment) => attachment.program(),
+        }
+    }
+}
+
+/// A classic program to attach: its tracepoint, its instructions, its name.
+pub(super) struct ClassicProgram {
+    pub category: &'static str,
+    pub tracepoint: &'static str,
+    pub instructions: Vec<Insn>,
+    pub name: &'static str,
 }
 
 impl EventStream {
@@ -660,7 +704,7 @@ impl EventStream {
     /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
     /// program's own counters can say an occurrence was never seen.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::program::skipped([&self.program])
+        crate::bpf::program::skipped(self.attached.iter().map(Attached::program))
     }
 
     /// Creates the two maps, builds the program with their descriptors, loads
@@ -669,17 +713,15 @@ impl EventStream {
         tracepoint: &str,
         name: &str,
         requested_ring_bytes: usize,
-        build: impl FnOnce(&Btf, i32, i32) -> Result<Vec<Insn>, String>,
+        build: impl FnOnce(&Btf, Output, i32) -> Result<Vec<Insn>, String>,
     ) -> Result<Self, String> {
         let btf = super::kernel_btf()?;
-        let bytes = ring_bytes(requested_ring_bytes);
-
-        let ring_map = syscall::map_create(BPF_MAP_TYPE_RINGBUF, 0, 0, bytes as u32, name)
-            .map_err(|error| map_failure(&format!("`{tracepoint}` ring buffer"), error))?;
+        // Every record here is stamped in its first eight bytes.
+        let ring = Transport::create(requested_ring_bytes, Some(0), name)?;
         let drops = Counters::create(1, name)
             .map_err(|error| map_failure(&format!("`{tracepoint}` drop counter"), error))?;
 
-        let instructions = build(btf, ring_map.as_raw_fd(), drops.as_raw_fd())?;
+        let instructions = build(btf, ring.output(), drops.as_raw_fd())?;
         let program = syscall::prog_load(
             syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
             &instructions,
@@ -696,14 +738,45 @@ impl EventStream {
 
         let link = crate::bpf::program::attach_raw(tracepoint, &program)?;
 
-        let ring = RingBuffer::map(ring_map, bytes)
-            .map_err(|error| format!("cannot map the `{tracepoint}` ring buffer: {error}"))?;
-
         Ok(Self {
             ring,
             drops,
-            program,
-            _link: link,
+            attached: vec![Attached::Raw {
+                program,
+                _link: link,
+            }],
+            _maps: Vec::new(),
+        })
+    }
+
+    /// The classic tracepoints' form (`bpf:tp`): `build` is handed the
+    /// transport and the drop counter and returns the programs, in the order
+    /// they are attached, with the maps they share. The one that publishes
+    /// last: a helper program attached after it would miss what fired first.
+    pub(super) fn load_classic(
+        name: &str,
+        requested_ring_bytes: usize,
+        build: impl FnOnce(Output, i32) -> Result<(Vec<ClassicProgram>, Vec<Hash>), String>,
+    ) -> Result<Self, String> {
+        let ring = Transport::create(requested_ring_bytes, Some(0), name)?;
+        let drops = Counters::create(1, name)
+            .map_err(|error| map_failure(&format!("`{name}` drop counter"), error))?;
+        let (programs, maps) = build(ring.output(), drops.as_raw_fd())?;
+        let mut attached = Vec::with_capacity(programs.len());
+        for program in programs {
+            attached.push(Attached::Classic(super::attach::tracepoint(
+                program.category,
+                program.tracepoint,
+                &program.instructions,
+                program.name,
+                super::attach::Scope::System,
+            )?));
+        }
+        Ok(Self {
+            ring,
+            drops,
+            attached,
+            _maps: maps,
         })
     }
 
@@ -727,51 +800,666 @@ impl EventStream {
     }
 }
 
+/// `BPF_MAP_TYPE_LRU_HASH`: a map the kernel evicts the oldest entry of when
+/// it is full, for what the classic programs remember about the machine's
+/// tasks without a free to forget them by.
+const BPF_MAP_TYPE_LRU_HASH: u32 = 9;
+/// How many tasks the classic programs remember at once.
+const CLASSIC_TASKS: u32 = 16384;
+/// `CLONE_THREAD`, the flag that makes a new task a thread of its parent's
+/// group rather than a process.
+const CLONE_THREAD: i32 = 0x0001_0000;
+/// Scratch the classic helper programs use for a key and a value.
+const HELPER_KEY: i16 = -8;
+const HELPER_VALUE: i16 = -16;
+
+fn lru(name: &str, what: &str) -> Result<Hash, String> {
+    Hash::create_typed(BPF_MAP_TYPE_LRU_HASH, 4, 4, CLASSIC_TASKS, name)
+        .map_err(|error| map_failure(what, error))
+}
+
+fn finish(program: Program) -> Result<Vec<Insn>, String> {
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
+/// `task:task_newtask`, in the parent's context: a new process's parent, by
+/// its thread group, into `parents` -- the `ppid` a classic exec record does
+/// not carry. A new thread is not a process and is left out.
+fn newtask_parents(record: &Record, parents_fd: i32) -> Result<Vec<Insn>, String> {
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    record.load(&mut program, 7, 6, "clone_flags", HELPER_VALUE)?;
+    program.jump_to("done", Insn::jset_imm(7, CLONE_THREAD, 0));
+    record.load(&mut program, 1, 6, "pid", HELPER_VALUE)?;
+    program.push(Insn::stx(BPF_W, R10, HELPER_KEY, 1));
+    program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
+    program.push(Insn::rsh64_imm(0, 32));
+    program.push(Insn::stx(BPF_W, R10, HELPER_VALUE, 0));
+    program.extend(Insn::load_map_fd(1, parents_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, HELPER_KEY as i32));
+    program.push(Insn::mov64_reg(3, R10));
+    program.push(Insn::add64_imm(3, HELPER_VALUE as i32));
+    program.push(Insn::mov64_imm(4, 0));
+    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    finish(program)
+}
+
+/// The classic program on `sched:sched_process_exec`, which runs in the task
+/// that exec'd: its ids, name and cpu from the helpers, `old_pid` and the
+/// path from the record, the parent from `parents`.
+fn classic_exec_instructions(
+    record: &Record,
+    whose: Whose,
+    parents_fd: i32,
+    output: Output,
+    drops_fd: i32,
+) -> Result<Vec<Insn>, String> {
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    if let Whose::Cgroup(_) = whose {
+        push_current_filter(&mut program, whose, EXEC_FILTER, "done");
+    }
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::stx(BPF_DW, R10, EXEC_EVENT, 0));
+    program.push(Insn::call(helper::GET_SMP_PROCESSOR_ID));
+    program.push(Insn::stx(BPF_W, R10, EXEC_CPU, 0));
+    program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
+    program.push(Insn::stx(BPF_W, R10, EXEC_TID, 0));
+    program.push(Insn::rsh64_imm(0, 32));
+    program.push(Insn::stx(BPF_W, R10, EXEC_TGID, 0));
+    record.load(&mut program, 1, 6, "old_pid", EXEC_PATH_PTR)?;
+    program.push(Insn::stx(BPF_W, R10, EXEC_OLD_PID, 1));
+    program.push(Insn::mov64_reg(1, R10));
+    program.push(Insn::add64_imm(1, EXEC_COMM as i32));
+    program.push(Insn::mov64_imm(2, COMM_BYTES as i32));
+    program.push(Insn::call(GET_CURRENT_COMM));
+
+    program.push(Insn::st_imm(BPF_W, R10, EXEC_PPID, 0));
+    program.push(Insn::st_imm(BPF_W, R10, EXEC_PAD, 0));
+    program.extend(Insn::load_map_fd(1, parents_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, EXEC_TGID as i32));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    program.jump_to("parent_known", Insn::jeq_imm(0, 0, 0));
+    program.push(Insn::ldx(BPF_W, 1, 0, 0));
+    program.push(Insn::stx(BPF_W, R10, EXEC_PPID, 1));
+    program.label("parent_known");
+
+    record.copy_string(&mut program, 6, "filename", EXEC_FILENAME, PATH_BYTES)?;
+    publish_to(
+        &mut program,
+        output,
+        6,
+        drops_fd,
+        EXEC_EVENT,
+        EXEC_BYTES,
+        EXEC_DROP_KEY,
+    );
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    finish(program)
+}
+
+/// Writes `(value_reg) ` under the current task's thread group (`by_group`)
+/// or thread id into `map`, `flags` as `bpf_map_update_elem` takes them.
+fn store_current(program: &mut Program, map: i32, by_group: bool, value_reg: u8, flags: i32) {
+    program.push(Insn::stx(BPF_W, R10, HELPER_VALUE, value_reg));
+    program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
+    if by_group {
+        program.push(Insn::rsh64_imm(0, 32));
+    }
+    program.push(Insn::stx(BPF_W, R10, HELPER_KEY, 0));
+    program.extend(Insn::load_map_fd(1, map));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, HELPER_KEY as i32));
+    program.push(Insn::mov64_reg(3, R10));
+    program.push(Insn::add64_imm(3, HELPER_VALUE as i32));
+    program.push(Insn::mov64_imm(4, flags));
+    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
+}
+
+/// `BPF_NOEXIST`: the first code a dying group records is its code, as the
+/// kernel keeps the first `group_exit_code`.
+const BPF_NOEXIST: i32 = 1;
+
+/// `syscalls:sys_enter_exit_group` and `sys_enter_exit`: the status a task
+/// asked to leave with, `(status & 0xff) << 8` as the kernel stores it, under
+/// its group for `exit_group` and under itself for `exit`.
+fn exit_call_instructions(record: &Record, map: i32, by_group: bool) -> Result<Vec<Insn>, String> {
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    record.load(&mut program, 7, 6, "error_code", HELPER_VALUE)?;
+    program.push(Insn::and64_imm(7, 0xff));
+    program.push(Insn::lsh64_imm(7, 8));
+    store_current(
+        &mut program,
+        map,
+        by_group,
+        7,
+        if by_group { BPF_NOEXIST } else { 0 },
+    );
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    finish(program)
+}
+
+/// Signals whose default action is to ignore, stop or continue a task.
+const SURVIVED: [i32; 8] = [17, 18, 19, 20, 21, 22, 23, 28];
+
+/// `signal:signal_generate`: the last signal sent to each task, by the
+/// receiver's id. What a `SIGKILL` delivery is read against: a fatal signal
+/// to a task with no handler is turned into a `SIGKILL` of its whole group as
+/// it is sent (`complete_signal`), and the group leaves with the signal sent,
+/// not with the `SIGKILL` each thread is then delivered.
+fn generated_instructions(record: &Record, generated: i32) -> Result<Vec<Insn>, String> {
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    record.load(&mut program, 1, 6, "pid", HELPER_VALUE)?;
+    program.push(Insn::stx(BPF_W, R10, HELPER_KEY, 1));
+    record.load(&mut program, 1, 6, "sig", HELPER_VALUE)?;
+    program.push(Insn::stx(BPF_W, R10, HELPER_VALUE, 1));
+    program.extend(Insn::load_map_fd(1, generated));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, HELPER_KEY as i32));
+    program.push(Insn::mov64_reg(3, R10));
+    program.push(Insn::add64_imm(3, HELPER_VALUE as i32));
+    program.push(Insn::mov64_imm(4, 0));
+    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    finish(program)
+}
+
+/// `signal:signal_deliver`: a signal whose default action ends the task,
+/// delivered with no handler, is the code the task and its group leave with
+/// -- the group's first such code, the task's own last. `SIGKILL` cannot be
+/// caught, so its handler is not looked at, and a `SIGKILL` is the fatal
+/// signal last sent to the task or its group when there is one: the kernel
+/// kills a group with `SIGKILL` for the signal that was sent.
+fn fatal_signal_instructions(
+    record: &Record,
+    group_codes: i32,
+    thread_codes: i32,
+    generated: i32,
+) -> Result<Vec<Insn>, String> {
+    const SIG_DFL: i32 = 0;
+    const SENT: [(&str, &str); 2] = [
+        ("sent_by_thread", "thread_sent"),
+        ("sent_by_group", "group_sent"),
+    ];
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    record.load(&mut program, 7, 6, "sig", HELPER_VALUE)?;
+    program.jump_to("killed", Insn::jeq_imm(7, 9, 0));
+    record.load(&mut program, 1, 6, "sa_handler", HELPER_VALUE)?;
+    program.jump_to("done", Insn::jne_imm(1, SIG_DFL, 0));
+    for signal in SURVIVED {
+        program.jump_to("done", Insn::jeq_imm(7, signal, 0));
+    }
+    program.jump_to("fatal", Insn::ja());
+
+    // A `SIGKILL`: the fatal signal sent to this thread, else to its group.
+    program.label("killed");
+    for (by_group, (lookup, found)) in [false, true].into_iter().zip(SENT) {
+        program.label(lookup);
+        program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
+        if by_group {
+            program.push(Insn::rsh64_imm(0, 32));
+        }
+        program.push(Insn::stx(BPF_W, R10, HELPER_KEY, 0));
+        program.extend(Insn::load_map_fd(1, generated));
+        program.push(Insn::mov64_reg(2, R10));
+        program.push(Insn::add64_imm(2, HELPER_KEY as i32));
+        program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+        program.jump_to(found, Insn::jne_imm(0, 0, 0));
+    }
+    program.jump_to("fatal", Insn::ja());
+    for (_, found) in SENT {
+        program.label(found);
+        program.push(Insn::ldx(BPF_W, 8, 0, 0));
+        program.jump_to("fatal", Insn::jeq_imm(8, 0, 0));
+        for signal in SURVIVED {
+            program.jump_to("fatal", Insn::jeq_imm(8, signal, 0));
+        }
+        program.push(Insn::mov64_reg(7, 8));
+        program.jump_to("fatal", Insn::ja());
+    }
+
+    program.label("fatal");
+    store_current(&mut program, group_codes, true, 7, BPF_NOEXIST);
+    store_current(&mut program, thread_codes, false, 7, 0);
+    // A delivered signal is no longer the last one sent.
+    program.label("done");
+    program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
+    program.push(Insn::stx(BPF_W, R10, HELPER_KEY, 0));
+    program.extend(Insn::load_map_fd(1, generated));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, HELPER_KEY as i32));
+    program.push(Insn::call(helper::MAP_DELETE_ELEM));
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    finish(program)
+}
+
+/// Forgets a code under the key the record's field or the current task
+/// names: an exec starts a group over, and a freed task's id is free.
+fn forget_instructions(
+    record: Option<(&Record, &str)>,
+    map: i32,
+    by_group: bool,
+) -> Result<Vec<Insn>, String> {
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    match record {
+        Some((record, field)) => {
+            record.load(&mut program, 1, 6, field, HELPER_VALUE)?;
+            program.push(Insn::stx(BPF_W, R10, HELPER_KEY, 1));
+        }
+        None => {
+            program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
+            if by_group {
+                program.push(Insn::rsh64_imm(0, 32));
+            }
+            program.push(Insn::stx(BPF_W, R10, HELPER_KEY, 0));
+        }
+    }
+    program.extend(Insn::load_map_fd(1, map));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, HELPER_KEY as i32));
+    program.push(Insn::call(helper::MAP_DELETE_ELEM));
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    finish(program)
+}
+
+/// The classic program on `sched:sched_process_exit`, in the exiting task:
+/// the group's code first, the thread's own then, and unknown when neither
+/// was seen; `group_dead` from the record where the kernel publishes it.
+fn classic_exit_instructions(
+    record: &Record,
+    whose: Whose,
+    group_codes: i32,
+    thread_codes: i32,
+    output: Output,
+    drops_fd: i32,
+) -> Result<Vec<Insn>, String> {
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    if let Whose::Cgroup(_) = whose {
+        push_current_filter(&mut program, whose, EXIT_FILTER, "done");
+    }
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::stx(BPF_DW, R10, EXIT_EVENT, 0));
+    program.push(Insn::call(helper::GET_SMP_PROCESSOR_ID));
+    program.push(Insn::stx(BPF_W, R10, EXIT_CPU, 0));
+    program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
+    program.push(Insn::stx(BPF_W, R10, EXIT_TID, 0));
+    program.push(Insn::rsh64_imm(0, 32));
+    program.push(Insn::stx(BPF_W, R10, EXIT_TGID, 0));
+    program.push(Insn::mov64_reg(1, R10));
+    program.push(Insn::add64_imm(1, EXIT_COMM as i32));
+    program.push(Insn::mov64_imm(2, COMM_BYTES as i32));
+    program.push(Insn::call(GET_CURRENT_COMM));
+
+    let mut unknown = Exit::CORE_UNKNOWN as i32;
+    program.push(Insn::st_imm(BPF_W, R10, EXIT_GROUP_DEAD, 0));
+    if record.has("group_dead") {
+        record.load(&mut program, 1, 6, "group_dead", EXIT_SCRATCH)?;
+        program.push(Insn::stx(BPF_W, R10, EXIT_GROUP_DEAD, 1));
+    } else {
+        unknown |= Exit::GROUP_UNKNOWN as i32;
+    }
+
+    program.push(Insn::st_imm(BPF_W, R10, EXIT_CODE, 0));
+    program.push(Insn::st_imm(BPF_W, R10, EXIT_UNKNOWN, unknown));
+    for (map, key, found) in [
+        (group_codes, EXIT_TGID, "group_code"),
+        (thread_codes, EXIT_TID, "thread_code"),
+    ] {
+        program.extend(Insn::load_map_fd(1, map));
+        program.push(Insn::mov64_reg(2, R10));
+        program.push(Insn::add64_imm(2, key as i32));
+        program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+        program.jump_to(found, Insn::jne_imm(0, 0, 0));
+    }
+    program.push(Insn::st_imm(
+        BPF_W,
+        R10,
+        EXIT_UNKNOWN,
+        unknown | Exit::CODE_UNKNOWN as i32,
+    ));
+    program.jump_to("code_read", Insn::ja());
+    program.label("group_code");
+    program.push(Insn::ldx(BPF_W, 1, 0, 0));
+    program.push(Insn::stx(BPF_W, R10, EXIT_CODE, 1));
+    program.jump_to("code_read", Insn::ja());
+    program.label("thread_code");
+    program.push(Insn::ldx(BPF_W, 1, 0, 0));
+    program.push(Insn::stx(BPF_W, R10, EXIT_CODE, 1));
+    program.label("code_read");
+    // The thread's own code is this exit's alone.
+    program.extend(Insn::load_map_fd(1, thread_codes));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, EXIT_TID as i32));
+    program.push(Insn::call(helper::MAP_DELETE_ELEM));
+
+    publish_to(
+        &mut program,
+        output,
+        6,
+        drops_fd,
+        EXIT_EVENT,
+        EXIT_BYTES,
+        EXIT_DROP_KEY,
+    );
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    finish(program)
+}
+
+/// The classic program on `signal:signal_generate`, in the sender's context:
+/// the receiver is the record's `pid`, its thread id; its thread group comes
+/// from `threads` where the target's threads are kept, and is found in
+/// `/proc` at the drain otherwise.
+fn classic_signal_instructions(
+    record: &Record,
+    whose: Whose,
+    threads: Option<i32>,
+    output: Output,
+    drops_fd: i32,
+) -> Result<Vec<Insn>, String> {
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::stx(BPF_DW, R10, SIG_EVENT, 0));
+    program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
+    program.push(Insn::stx(BPF_W, R10, SIG_SENDER_TID, 0));
+    program.push(Insn::rsh64_imm(0, 32));
+    program.push(Insn::stx(BPF_W, R10, SIG_SENDER_TGID, 0));
+    program.push(Insn::mov64_reg(1, R10));
+    program.push(Insn::add64_imm(1, SIG_SENDER_COMM as i32));
+    program.push(Insn::mov64_imm(2, COMM_BYTES as i32));
+    program.push(Insn::call(GET_CURRENT_COMM));
+    record.load(&mut program, 1, 6, "sig", SIG_FILTER)?;
+    program.push(Insn::stx(BPF_W, R10, SIG_NUMBER, 1));
+    record.load(&mut program, 1, 6, "result", SIG_FILTER)?;
+    program.push(Insn::stx(BPF_W, R10, SIG_RESULT, 1));
+    record.load(&mut program, 1, 6, "pid", SIG_FILTER)?;
+    program.push(Insn::stx(BPF_W, R10, SIG_TARGET_TID, 1));
+    program.push(Insn::st_imm(BPF_W, R10, SIG_TARGET_TGID, 0));
+    record.copy(&mut program, 6, "comm", SIG_COMM, COMM_BYTES)?;
+    if let Some(threads) = threads {
+        program.extend(Insn::load_map_fd(1, threads));
+        program.push(Insn::mov64_reg(2, R10));
+        program.push(Insn::add64_imm(2, SIG_TARGET_TID as i32));
+        program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+        program.jump_to("group_read", Insn::jeq_imm(0, 0, 0));
+        program.push(Insn::ldx(BPF_W, 1, 0, 0));
+        program.push(Insn::stx(BPF_W, R10, SIG_TARGET_TGID, 1));
+        program.label("group_read");
+    }
+
+    // Kept when either end is the target's, as the raw program keeps it.
+    match whose {
+        Whose::Any => {}
+        Whose::Process(root) => {
+            program.push(Insn::ldx(BPF_W, 1, R10, SIG_TARGET_TGID));
+            program.jump_to("emit", Insn::jeq_imm(1, root as i32, 0));
+            program.push(Insn::ldx(BPF_W, 1, R10, SIG_SENDER_TGID));
+            program.jump_to("done", Insn::jne_imm(1, root as i32, 0));
+        }
+        Whose::Thread(tid) => {
+            program.push(Insn::ldx(BPF_W, 1, R10, SIG_TARGET_TID));
+            program.jump_to("emit", Insn::jeq_imm(1, tid as i32, 0));
+            program.push(Insn::ldx(BPF_W, 1, R10, SIG_SENDER_TID));
+            program.jump_to("done", Insn::jne_imm(1, tid as i32, 0));
+        }
+        // The receiver's cgroup is not in the record: what the cgroup's
+        // tasks sent is kept, and the collector says so.
+        Whose::Cgroup(_) => push_current_filter(&mut program, whose, SIG_FILTER, "done"),
+    }
+    program.label("emit");
+    publish_to(
+        &mut program,
+        output,
+        6,
+        drops_fd,
+        SIG_EVENT,
+        SIGNAL_BYTES,
+        SIG_DROP_KEY,
+    );
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    finish(program)
+}
+
+/// The thread group a live thread belongs to, from `/proc`: what a classic
+/// record that names a task by its id leaves to the drain.
+fn group_of(tid: u32) -> Option<u32> {
+    let status = std::fs::read_to_string(format!("/proc/{tid}/status")).ok()?;
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("Tgid:"))?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// The parent of a live process, from `/proc/<pid>/stat`.
+fn parent_of(pid: u32) -> Option<u32> {
+    let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, rest) = text.rsplit_once(')')?;
+    rest.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// Whether any thread of `tgid` is still running: what decides, at the
+/// drain, that a classic exit record without `group_dead` was its process's
+/// last. A zombie or a dead entry is not running.
+fn has_live_thread(tgid: u32) -> bool {
+    let Ok(threads) = std::fs::read_dir(format!("/proc/{tgid}/task")) else {
+        return false;
+    };
+    threads.flatten().any(|thread| {
+        std::fs::read_to_string(thread.path().join("stat"))
+            .ok()
+            .and_then(|stat| {
+                let (_, rest) = stat.rsplit_once(')')?;
+                rest.split_whitespace().next().map(str::to_owned)
+            })
+            .is_some_and(|state| state != "Z" && state != "X")
+    })
+}
+
 /// The `sched_process_exec` stream.
-pub struct ExecProgram(EventStream);
+pub struct ExecProgram {
+    stream: EventStream,
+    /// The classic record carries no parent: a process older than the run
+    /// has its parent read from `/proc` at the drain.
+    classic: bool,
+}
 
 impl ExecProgram {
     /// See [`EventStream::skipped`].
     pub fn skipped(&self) -> u64 {
-        self.0.skipped()
+        self.stream.skipped()
     }
 
     pub fn load(whose: Whose, requested_ring_bytes: usize) -> Result<Self, String> {
-        EventStream::load(
+        let stream = EventStream::load(
             "sched_process_exec",
             "omn_exec",
             requested_ring_bytes,
-            move |btf, ring, drops| exec_instructions(btf, whose, ring, drops),
-        )
-        .map(Self)
+            move |btf, output, drops| exec_instructions(btf, whose, output, drops),
+        )?;
+        Ok(Self {
+            stream,
+            classic: false,
+        })
     }
 
-    pub fn drain(&mut self, handle: impl FnMut(Exec), undecoded: &mut u64) {
-        self.0.drain(Exec::from_bytes, handle, undecoded);
+    /// The classic tracepoints (`bpf:tp`), for a kernel without BTF.
+    pub fn load_classic(whose: Whose, requested_ring_bytes: usize) -> Result<Self, String> {
+        let stream =
+            EventStream::load_classic("omn_exec", requested_ring_bytes, |output, drops| {
+                let newtask = Record::of("task", "task_newtask")?;
+                let exec = Record::of("sched", "sched_process_exec")?;
+                let parents = lru("omn_exec_par", "exec parents map")?;
+                let programs = vec![
+                    ClassicProgram {
+                        category: "task",
+                        tracepoint: "task_newtask",
+                        instructions: newtask_parents(&newtask, parents.as_raw_fd())?,
+                        name: "omn_exec_fork",
+                    },
+                    ClassicProgram {
+                        category: "sched",
+                        tracepoint: "sched_process_exec",
+                        instructions: classic_exec_instructions(
+                            &exec,
+                            whose,
+                            parents.as_raw_fd(),
+                            output,
+                            drops,
+                        )?,
+                        name: "omn_exec",
+                    },
+                ];
+                Ok((programs, vec![parents]))
+            })?;
+        Ok(Self {
+            stream,
+            classic: true,
+        })
+    }
+
+    pub fn drain(&mut self, mut handle: impl FnMut(Exec), undecoded: &mut u64) {
+        let classic = self.classic;
+        self.stream.drain(
+            Exec::from_bytes,
+            |mut exec: Exec| {
+                if classic && exec.ppid == 0 {
+                    exec.ppid = parent_of(exec.tgid).unwrap_or(0);
+                }
+                handle(exec)
+            },
+            undecoded,
+        );
     }
 
     pub fn dropped(&self) -> u64 {
-        self.0.dropped()
+        self.stream.dropped()
     }
 }
 
 /// The `sched_process_exit` stream.
-pub struct ExitProgram(EventStream);
+pub struct ExitProgram {
+    stream: EventStream,
+    classic: bool,
+}
 
 impl ExitProgram {
     /// See [`EventStream::skipped`].
     pub fn skipped(&self) -> u64 {
-        self.0.skipped()
+        self.stream.skipped()
     }
 
     pub fn load(whose: Whose, requested_ring_bytes: usize) -> Result<Self, String> {
-        EventStream::load(
+        let stream = EventStream::load(
             "sched_process_exit",
             "omn_exit",
             requested_ring_bytes,
-            move |btf, ring, drops| exit_instructions(btf, whose, ring, drops),
-        )
-        .map(Self)
+            move |btf, output, drops| exit_instructions(btf, whose, output, drops),
+        )?;
+        Ok(Self {
+            stream,
+            classic: false,
+        })
+    }
+
+    /// The classic tracepoints (`bpf:tp`): the exit's code is the status
+    /// `exit` or `exit_group` was called with, or the fatal signal delivered
+    /// with no handler, as this run saw them.
+    pub fn load_classic(whose: Whose, requested_ring_bytes: usize) -> Result<Self, String> {
+        let stream =
+            EventStream::load_classic("omn_exit", requested_ring_bytes, |output, drops| {
+                let exit = Record::of("sched", "sched_process_exit")?;
+                let exit_group = Record::of("syscalls", "sys_enter_exit_group")?;
+                let exit_call = Record::of("syscalls", "sys_enter_exit")?;
+                let deliver = Record::of("signal", "signal_deliver")?;
+                let generate = Record::of("signal", "signal_generate")?;
+                let free = Record::of("sched", "sched_process_free")?;
+                let group = lru("omn_exit_grp", "exit codes map")?;
+                let thread = lru("omn_exit_thr", "thread exit codes map")?;
+                let sent = lru("omn_exit_sent", "signals sent map")?;
+                let (group_fd, thread_fd, sent_fd) =
+                    (group.as_raw_fd(), thread.as_raw_fd(), sent.as_raw_fd());
+                let program = |category, tracepoint, instructions, name| ClassicProgram {
+                    category,
+                    tracepoint,
+                    instructions,
+                    name,
+                };
+                let programs = vec![
+                    program(
+                        "syscalls",
+                        "sys_enter_exit_group",
+                        exit_call_instructions(&exit_group, group_fd, true)?,
+                        "omn_exit_xgrp",
+                    ),
+                    program(
+                        "syscalls",
+                        "sys_enter_exit",
+                        exit_call_instructions(&exit_call, thread_fd, false)?,
+                        "omn_exit_xthr",
+                    ),
+                    program(
+                        "signal",
+                        "signal_generate",
+                        generated_instructions(&generate, sent_fd)?,
+                        "omn_exit_sent",
+                    ),
+                    program(
+                        "signal",
+                        "signal_deliver",
+                        fatal_signal_instructions(&deliver, group_fd, thread_fd, sent_fd)?,
+                        "omn_exit_sig",
+                    ),
+                    program(
+                        "sched",
+                        "sched_process_exec",
+                        forget_instructions(None, group_fd, true)?,
+                        "omn_exit_exec",
+                    ),
+                    program(
+                        "sched",
+                        "sched_process_free",
+                        forget_instructions(Some((&free, "pid")), group_fd, true)?,
+                        "omn_exit_free",
+                    ),
+                    program(
+                        "sched",
+                        "sched_process_exit",
+                        classic_exit_instructions(
+                            &exit, whose, group_fd, thread_fd, output, drops,
+                        )?,
+                        "omn_exit",
+                    ),
+                ];
+                Ok((programs, vec![group, thread, sent]))
+            })?;
+        Ok(Self {
+            stream,
+            classic: true,
+        })
     }
 
     /// Whether this kernel's tracepoint passes `group_dead`, rather than the
@@ -782,40 +1470,110 @@ impl ExitProgram {
             .is_ok_and(|signature| signature == EXIT_SIGNATURE)
     }
 
-    pub fn drain(&mut self, handle: impl FnMut(Exit), undecoded: &mut u64) {
-        self.0.drain(Exit::from_bytes, handle, undecoded);
+    /// Hands every exit to `handle`. A classic record without `group_dead` is
+    /// decided here: the last exit of its group this drain read, when no
+    /// thread of the group is still running.
+    pub fn drain(&mut self, mut handle: impl FnMut(Exit), undecoded: &mut u64) {
+        if !self.classic {
+            self.stream.drain(Exit::from_bytes, handle, undecoded);
+            return;
+        }
+        let mut batch = Vec::new();
+        self.stream
+            .drain(Exit::from_bytes, |exit| batch.push(exit), undecoded);
+        let mut last: BTreeMap<u32, usize> = BTreeMap::new();
+        for (at, exit) in batch.iter().enumerate() {
+            if exit.unknown & Exit::GROUP_UNKNOWN != 0 {
+                last.insert(exit.tgid, at);
+            }
+        }
+        for (at, mut exit) in batch.into_iter().enumerate() {
+            if exit.unknown & Exit::GROUP_UNKNOWN != 0 {
+                exit.group_dead =
+                    u32::from(last.get(&exit.tgid) == Some(&at) && !has_live_thread(exit.tgid));
+            }
+            handle(exit);
+        }
     }
 
     pub fn dropped(&self) -> u64 {
-        self.0.dropped()
+        self.stream.dropped()
     }
 }
 
 /// The `signal_generate` stream.
-pub struct SignalProgram(EventStream);
+pub struct SignalProgram {
+    stream: EventStream,
+    classic: bool,
+    /// The target's threads, for a process target on the classic road.
+    _threads: Option<super::sched_common::Descendants>,
+}
 
 impl SignalProgram {
     /// See [`EventStream::skipped`].
     pub fn skipped(&self) -> u64 {
-        self.0.skipped()
+        self.stream.skipped()
     }
 
     pub fn load(whose: Whose, requested_ring_bytes: usize) -> Result<Self, String> {
-        EventStream::load(
+        let stream = EventStream::load(
             "signal_generate",
             "omn_signal",
             requested_ring_bytes,
-            move |btf, ring, drops| signal_instructions(btf, whose, ring, drops),
-        )
-        .map(Self)
+            move |btf, output, drops| signal_instructions(btf, whose, output, drops),
+        )?;
+        Ok(Self {
+            stream,
+            classic: false,
+            _threads: None,
+        })
     }
 
-    pub fn drain(&mut self, handle: impl FnMut(Signal), undecoded: &mut u64) {
-        self.0.drain(Signal::from_bytes, handle, undecoded);
+    /// The classic tracepoint (`bpf:tp`). A process target's threads are
+    /// kept by the classic follower, so a signal for one of them is known
+    /// as the target's in the kernel.
+    pub fn load_classic(whose: Whose, requested_ring_bytes: usize) -> Result<Self, String> {
+        let threads = match whose {
+            Whose::Process(root) => Some(super::sched_common::Descendants::follow_threads(root)?),
+            _ => None,
+        };
+        let threads_fd = threads.as_ref().and_then(|threads| threads.threads_fd());
+        let stream =
+            EventStream::load_classic("omn_signal", requested_ring_bytes, |output, drops| {
+                let generate = Record::of("signal", "signal_generate")?;
+                let programs = vec![ClassicProgram {
+                    category: "signal",
+                    tracepoint: "signal_generate",
+                    instructions: classic_signal_instructions(
+                        &generate, whose, threads_fd, output, drops,
+                    )?,
+                    name: "omn_signal",
+                }];
+                Ok((programs, Vec::new()))
+            })?;
+        Ok(Self {
+            stream,
+            classic: true,
+            _threads: threads,
+        })
+    }
+
+    pub fn drain(&mut self, mut handle: impl FnMut(Signal), undecoded: &mut u64) {
+        let classic = self.classic;
+        self.stream.drain(
+            Signal::from_bytes,
+            |mut signal: Signal| {
+                if classic && signal.target_tgid == 0 {
+                    signal.target_tgid = group_of(signal.target_tid).unwrap_or(0);
+                }
+                handle(signal)
+            },
+            undecoded,
+        );
     }
 
     pub fn dropped(&self) -> u64 {
-        self.0.dropped()
+        self.stream.dropped()
     }
 }
 
@@ -871,7 +1629,7 @@ mod tests {
             ),
             (EXIT_COMM, offset_of!(Exit, comm), "exit.comm"),
             (EXIT_CPU, offset_of!(Exit, cpu), "exit.cpu"),
-            (EXIT_PAD, offset_of!(Exit, pad), "exit.pad"),
+            (EXIT_UNKNOWN, offset_of!(Exit, unknown), "exit.unknown"),
         ] {
             assert_eq!(
                 (stack - EXIT_EVENT) as usize,
@@ -937,7 +1695,7 @@ mod tests {
             group_dead: 1,
             comm: [0; COMM_BYTES],
             cpu: 0,
-            pad: 0,
+            unknown: 0,
         };
         // `exit(7)` is 7 in the second byte and nothing in the first.
         assert_eq!(exited(7 << 8).status(), Some(7));
@@ -994,15 +1752,15 @@ mod tests {
         for (name, program) in [
             (
                 "exec",
-                exec_instructions(&btf, Whose::Any, 3, 4).expect("a program"),
+                exec_instructions(&btf, Whose::Any, Output::Ring(3), 4).expect("a program"),
             ),
             (
                 "exit",
-                exit_instructions(&btf, Whose::Any, 3, 4).expect("a program"),
+                exit_instructions(&btf, Whose::Any, Output::Ring(3), 4).expect("a program"),
             ),
             (
                 "signal",
-                signal_instructions(&btf, Whose::Any, 3, 4).expect("a program"),
+                signal_instructions(&btf, Whose::Any, Output::Ring(3), 4).expect("a program"),
             ),
         ] {
             let called = helpers_called(&program);
@@ -1025,15 +1783,15 @@ mod tests {
         let Some(btf) = kernel_btf() else { return };
         for (program, bytes) in [
             (
-                exec_instructions(&btf, Whose::Any, 3, 4).expect("a program"),
+                exec_instructions(&btf, Whose::Any, Output::Ring(3), 4).expect("a program"),
                 EXEC_BYTES,
             ),
             (
-                exit_instructions(&btf, Whose::Any, 3, 4).expect("a program"),
+                exit_instructions(&btf, Whose::Any, Output::Ring(3), 4).expect("a program"),
                 EXIT_BYTES,
             ),
             (
-                signal_instructions(&btf, Whose::Any, 3, 4).expect("a program"),
+                signal_instructions(&btf, Whose::Any, Output::Ring(3), 4).expect("a program"),
                 SIGNAL_BYTES,
             ),
         ] {
@@ -1057,12 +1815,14 @@ mod tests {
     #[test]
     fn the_signal_filter_is_present_only_when_a_process_was_named() {
         let Some(btf) = kernel_btf() else { return };
-        let machine_wide = signal_instructions(&btf, Whose::Any, 3, 4).expect("a program");
+        let machine_wide =
+            signal_instructions(&btf, Whose::Any, Output::Ring(3), 4).expect("a program");
         assert!(
             !machine_wide.iter().any(|insn| insn.imm == 4242),
             "a machine-wide program compares against no process"
         );
-        let filtered = signal_instructions(&btf, Whose::Process(4242), 3, 4).expect("a program");
+        let filtered =
+            signal_instructions(&btf, Whose::Process(4242), Output::Ring(3), 4).expect("a program");
         assert_eq!(
             filtered.iter().filter(|insn| insn.imm == 4242).count(),
             2,
@@ -1076,7 +1836,7 @@ mod tests {
     #[test]
     fn the_exec_path_is_read_as_a_string_rather_than_as_a_fixed_block() {
         let Some(btf) = kernel_btf() else { return };
-        let program = exec_instructions(&btf, Whose::Any, 3, 4).expect("a program");
+        let program = exec_instructions(&btf, Whose::Any, Output::Ring(3), 4).expect("a program");
         let called = helpers_called(&program);
         assert!(
             called.contains(&helper::PROBE_READ_KERNEL_STR),
@@ -1110,5 +1870,123 @@ mod tests {
         };
         assert!(reason.contains("this kernel declares"), "{reason}");
         assert!(reason.contains("task_struct *"), "{reason}");
+    }
+
+    fn classic(text: &str) -> Record {
+        Record::from_layout("test", super::super::attach::parse_layout(text))
+    }
+
+    /// The layouts Debian 10's 4.19 publishes, which the classic programs
+    /// were written against.
+    fn exec_419() -> Record {
+        classic(
+            "\tfield:__data_loc char[] filename;\toffset:8;\tsize:4;\tsigned:1;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:pid_t old_pid;\toffset:16;\tsize:4;\tsigned:1;\n",
+        )
+    }
+
+    fn exit_419() -> Record {
+        classic(
+            "\tfield:char comm[16];\toffset:8;\tsize:16;\tsigned:1;\n\
+             \tfield:pid_t pid;\toffset:24;\tsize:4;\tsigned:1;\n\
+             \tfield:int prio;\toffset:28;\tsize:4;\tsigned:1;\n",
+        )
+    }
+
+    fn signal_419() -> Record {
+        classic(
+            "\tfield:int sig;\toffset:8;\tsize:4;\tsigned:1;\n\
+             \tfield:int errno;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:int code;\toffset:16;\tsize:4;\tsigned:1;\n\
+             \tfield:char comm[16];\toffset:20;\tsize:16;\tsigned:1;\n\
+             \tfield:pid_t pid;\toffset:36;\tsize:4;\tsigned:1;\n\
+             \tfield:int group;\toffset:40;\tsize:4;\tsigned:1;\n\
+             \tfield:int result;\toffset:44;\tsize:4;\tsigned:1;\n",
+        )
+    }
+
+    /// Every classic program builds against 4.19's layouts, passes the
+    /// audit, publishes through the transport it is handed, the context
+    /// first, and reads the monotonic clock.
+    #[test]
+    fn the_classic_programs_build_against_the_4_19_records() {
+        let output = Output::PerfArray(3);
+        for (name, program) in [
+            (
+                "exec",
+                classic_exec_instructions(&exec_419(), Whose::Any, 5, output, 4),
+            ),
+            (
+                "exit",
+                classic_exit_instructions(&exit_419(), Whose::Any, 5, 6, output, 4),
+            ),
+            (
+                "signal",
+                classic_signal_instructions(
+                    &signal_419(),
+                    Whose::Process(4242),
+                    Some(7),
+                    output,
+                    4,
+                ),
+            ),
+        ] {
+            let program = program.unwrap_or_else(|error| panic!("{name}: {error}"));
+            let called = helpers_called(&program);
+            assert!(called.contains(&helper::KTIME_GET_NS), "{name}");
+            assert!(program.iter().any(Output::is_output_call), "{name}");
+            assert!(!called.contains(&helper::RINGBUF_OUTPUT), "{name}");
+        }
+    }
+
+    /// Without `group_dead` in its record the exit program says so in the
+    /// record, for the drain to decide; with it the field is read.
+    #[test]
+    fn a_classic_exit_marks_what_its_record_lacks() {
+        let output = Output::PerfArray(3);
+        let lacking = classic_exit_instructions(&exit_419(), Whose::Any, 5, 6, output, 4).unwrap();
+        assert!(lacking.contains(&Insn::st_imm(
+            BPF_W,
+            R10,
+            EXIT_UNKNOWN,
+            (Exit::GROUP_UNKNOWN | Exit::CORE_UNKNOWN) as i32
+        )));
+        let with_group = classic(
+            "\tfield:char comm[16];\toffset:8;\tsize:16;\tsigned:1;\n\
+             \tfield:pid_t pid;\toffset:24;\tsize:4;\tsigned:1;\n\
+             \tfield:int prio;\toffset:28;\tsize:4;\tsigned:1;\n\
+             \tfield:bool group_dead;\toffset:32;\tsize:1;\tsigned:0;\n",
+        );
+        let read = classic_exit_instructions(&with_group, Whose::Any, 5, 6, output, 4).unwrap();
+        assert!(read.contains(&Insn::ldx(super::super::insn::BPF_B, 1, 6, 32)));
+        assert!(read.contains(&Insn::st_imm(
+            BPF_W,
+            R10,
+            EXIT_UNKNOWN,
+            Exit::CORE_UNKNOWN as i32
+        )));
+    }
+
+    /// A signal is fatal by default unless it is one of the eight that stop,
+    /// continue or are ignored, and `SIGKILL` whatever its handler says.
+    #[test]
+    fn the_fatal_signal_program_skips_the_signals_a_task_survives() {
+        let deliver = classic(
+            "\tfield:int sig;\toffset:8;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long sa_handler;\toffset:24;\tsize:8;\tsigned:0;\n",
+        );
+        let program = fatal_signal_instructions(&deliver, 5, 6, 7).unwrap();
+        for survived in [17, 18, 19, 20, 21, 22, 23, 28] {
+            assert!(
+                program
+                    .iter()
+                    .any(|insn| insn.code == 0x15 && insn.imm == survived),
+                "{survived}"
+            );
+        }
+        assert!(program
+            .iter()
+            .any(|insn| insn.code == 0x15 && insn.imm == 9));
     }
 }

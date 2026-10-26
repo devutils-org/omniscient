@@ -7,7 +7,9 @@
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter(pt_regs *, long int)", "raw_tracepoint:sys_exit(pt_regs *, long int)", "bpf_map:ringbuf"], cost: extreme, drained: true,
        filter_in_program: [syscall]}
-    - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit", "bpf"], cost: extreme, equivalent: true, drained: true}
+    - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit",
+         "tracepoint:task:task_newtask", "tracepoint:sched:sched_process_free", "bpf"], cost: extreme, equivalent: true, drained: true,
+       filter_in_program: [syscall]}
   modes: [trace, count]
   emits: [hist, topk, rate, raw, summary]
   targets: {pid: native, tid: native, cgroup: bpf_only, launch: native, system: native}
@@ -39,7 +41,8 @@
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter(pt_regs *, long int)", "raw_tracepoint:sys_exit(pt_regs *, long int)", "bpf_map:ringbuf"], cost: extreme,
        filter_in_program: [syscall]}
-    - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit", "bpf"], cost: extreme, equivalent: true,
+    - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit",
+         "tracepoint:task:task_newtask", "tracepoint:sched:sched_process_free", "bpf"], cost: extreme, equivalent: true,
        filter_in_program: [syscall]}
   modes: [trace]
   emits: [raw, timeline, hist, summary, topk]
@@ -73,7 +76,10 @@
   unit: count
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_process_exec(task_struct *, pid_t, linux_binprm *)", "bpf_map:ringbuf"], cost: low}
-    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_process_exec", "bpf"], cost: low, equivalent: true}
+    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_process_exec", "tracepoint:task:task_newtask", "bpf"], cost: low,
+       degraded: "the record names no parent: `ppid` is the process that forked it during the run, or
+         `/proc`'s at the drain for one older than the run, so a process reparented before its exec
+         names its first parent, and one gone by the drain names none"}
   modes: [trace]
   emits: [raw, timeline, topk, summary]
   targets: {system: native, cgroup: bpf_only, pid: native, launch: native}
@@ -99,7 +105,13 @@
   unit: count
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_process_exit(task_struct *, bool)|(task_struct *)", "bpf_map:ringbuf"], cost: low}
-    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_process_exit", "bpf"], cost: low, equivalent: true}
+    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_process_exit", "tracepoint:syscalls:sys_enter_exit_group",
+         "tracepoint:syscalls:sys_enter_exit", "tracepoint:signal:signal_deliver", "tracepoint:signal:signal_generate",
+         "tracepoint:sched:sched_process_free", "bpf"], cost: low,
+       degraded: "the record carries no exit code: `code` is the status `exit` or `exit_group` was called
+         with, or the fatal signal delivered with no handler, as this run saw them -- absent where
+         neither was seen, and with no `core_dumped`; `group_dead` is decided at the drain, the last
+         exit of a process read when none of its threads still runs"}
   modes: [trace]
   emits: [raw, timeline, topk, summary]
   targets: {system: native, cgroup: bpf_only}
@@ -199,7 +211,10 @@
   unit: count
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:signal_generate(int, kernel_siginfo *, task_struct *, int, int)", "bpf_map:ringbuf"], cost: low}
-    - {id: "bpf:tp", requires: ["tracepoint:signal:signal_generate", "bpf"], cost: low, equivalent: true}
+    - {id: "bpf:tp", requires: ["tracepoint:signal:signal_generate", "bpf"], cost: low,
+       degraded: "the record names the receiver by its thread id alone: its process is read from
+         `/proc` at the drain unless the target is a process, and a cgroup keeps only what its tasks
+         sent"}
   modes: [trace, count]
   emits: [raw, topk, rate, summary]
   targets: {pid: bpf_only, system: native, cgroup: bpf_only}

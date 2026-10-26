@@ -52,6 +52,8 @@ pub struct Prepare {
     /// the rest is applied here; `Prepare` is where the split is decided,
     /// because it is the last place a request can still be refused.
     pub filter: Option<FilterExpr>,
+    /// The classic tracepoints (`bpf:tp`), for a kernel without BTF.
+    pub classic: bool,
 }
 
 impl Prepared for Prepare {
@@ -74,11 +76,13 @@ impl Prepared for Prepare {
             Some(filter) => pushed_down_syscall(filter)?,
             None => None,
         };
-        Ok(Box::new(SyscallCollector::new(
+        let mut collector = SyscallCollector::new(
             Narrowing { whose, syscall_nr },
             self.mode,
             self.filter.map(numbers_read_as_nr),
-        )))
+        );
+        collector.classic = self.classic;
+        Ok(Box::new(collector))
     }
 }
 
@@ -210,6 +214,8 @@ type CountedRows = std::collections::BTreeMap<(u32, u32, u32, u32, String), Coun
 
 pub struct SyscallCollector {
     narrowing: Narrowing,
+    /// Through the classic tracepoints (`bpf:tp`).
+    classic: bool,
     mode: Mode,
     program: Option<SyscallProgram>,
     losses: Losses,
@@ -245,6 +251,7 @@ impl SyscallCollector {
     pub fn new(narrowing: Narrowing, mode: Mode, predicate: Option<FilterExpr>) -> Self {
         Self {
             narrowing,
+            classic: false,
             mode,
             program: None,
             losses: Losses::default(),
@@ -493,7 +500,11 @@ impl Collector for SyscallCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        self.program = Some(SyscallProgram::load(self.narrowing)?);
+        self.program = Some(if self.classic {
+            SyscallProgram::load_classic(self.narrowing)?
+        } else {
+            SyscallProgram::load(self.narrowing)?
+        });
         self.window_opened_ns = monotonic_ns();
         Ok(())
     }
@@ -660,6 +671,7 @@ mod tests {
                 freq: "997hz".parse().expect("a frequency"),
             },
             filter: None,
+            classic: false,
         });
         let Err(error) = prepared.attach(&Target::Pid(vec![1])) else {
             panic!("a sampled mode must be refused");
@@ -672,6 +684,7 @@ mod tests {
         let prepared = Box::new(Prepare {
             mode: Mode::Trace,
             filter: None,
+            classic: false,
         });
         let Err(error) = prepared.attach(&Target::Iface("eth0".to_owned())) else {
             panic!("an interface makes no syscalls");
@@ -771,6 +784,7 @@ mod tests {
         let prepared = Box::new(Prepare {
             mode: Mode::Trace,
             filter: Some(expression),
+            classic: false,
         });
         assert!(prepared.attach(&Target::Pid(vec![1])).is_err());
     }

@@ -82,6 +82,7 @@ mod sched_numa;
 mod sched_runqlen;
 mod switch_count;
 mod syscall;
+mod transport;
 // Stream U's: reading `.note.stapsdt` and putting a uprobe on what it names.
 pub mod usdt;
 mod wakeup;
@@ -307,7 +308,7 @@ fn old_read(insn: &insn::Insn) -> Option<i32> {
     }
     match insn.imm {
         helper::PROBE_READ_KERNEL | helper::PROBE_READ_USER => Some(BPF_PROBE_READ),
-        helper::PROBE_READ_KERNEL_STR => Some(BPF_PROBE_READ_STR),
+        helper::PROBE_READ_KERNEL_STR | helper::PROBE_READ_USER_STR => Some(BPF_PROBE_READ_STR),
         _ => None,
     }
 }
@@ -363,10 +364,21 @@ pub static MEMLOCK_BEFORE: OnceLock<libc::rlimit> = OnceLock::new();
 /// maps take.
 fn memlock_refuses_maps() -> bool {
     const BPF_MAP_TYPE_ARRAY: u32 = 2;
+    large_map_refused() && syscall::map_create(BPF_MAP_TYPE_ARRAY, 4, 8, 1, "omn_memlock").is_ok()
+}
+
+/// Whether a 1 MiB map is refused for permission. What [`lift_memlock`]
+/// acts on: before 5.11 the charge is the user's (`user_struct.locked_vm`),
+/// shared by every process of that user and given back only after a map is
+/// freed, some time after its last descriptor closes -- so right after
+/// another run the small map is refused too, the probe above said the limit
+/// was not the reason, nothing was raised, and every eBPF source was refused
+/// as if `CAP_BPF` were missing (debian-10 and ubuntu-20.04 as root, a run
+/// started just after another).
+fn large_map_refused() -> bool {
+    const BPF_MAP_TYPE_ARRAY: u32 = 2;
     let large = syscall::map_create(BPF_MAP_TYPE_ARRAY, 4, 4096, 256, "omn_memlock");
-    let refused =
-        matches!(&large, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied);
-    refused && syscall::map_create(BPF_MAP_TYPE_ARRAY, 4, 8, 1, "omn_memlock").is_ok()
+    matches!(&large, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied)
 }
 
 /// Raises `RLIMIT_MEMLOCK` where the kernel charges eBPF maps to it (before
@@ -384,7 +396,7 @@ pub fn lift_memlock() {
     // SAFETY: a valid pointer to an rlimit this frame owns.
     if unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut limit) } != 0
         || limit.rlim_cur == libc::RLIM_INFINITY
-        || !memlock_refuses_maps()
+        || !large_map_refused()
     {
         return;
     }
@@ -922,8 +934,8 @@ mod tests {
             ("contention_end", &sched_lock::END_SIGNATURE[..]),
             ("sys_enter", &sched_futex::ENTER_SIGNATURE[..]),
             ("sys_exit", &sched_futex::EXIT_SIGNATURE[..]),
-            ("sys_enter", &proc_syscall::ENTER_SIGNATURE[..]),
-            ("sys_exit", &proc_syscall::EXIT_SIGNATURE[..]),
+            ("sys_enter", &context::SYS_ENTER[..]),
+            ("sys_exit", &context::SYS_EXIT[..]),
             ("sys_enter", &context::SYS_ENTER[..]),
             ("sys_exit", &context::SYS_EXIT[..]),
             ("irq_handler_entry", &sched_irq::ENTRY_SIGNATURE[..]),

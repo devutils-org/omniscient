@@ -18,8 +18,8 @@ use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 /// Commands, from `include/uapi/linux/bpf.h`.
 const BPF_MAP_CREATE: i32 = 0;
 const BPF_MAP_LOOKUP_ELEM: i32 = 1;
-#[cfg(test)]
 const BPF_MAP_UPDATE_ELEM: i32 = 2;
+const BPF_MAP_DELETE_ELEM: i32 = 3;
 const BPF_MAP_GET_NEXT_KEY: i32 = 4;
 const BPF_PROG_LOAD: i32 = 5;
 const BPF_RAW_TRACEPOINT_OPEN: i32 = 17;
@@ -517,11 +517,11 @@ pub fn map_lookup_percpu_u64(map_fd: RawFd, key: u32, cpus: usize) -> io::Result
 /// kernel reads that many bytes through the pointers and has no way to be told
 /// otherwise.
 ///
-/// Nothing in this build writes into a map the kernel fills -- the programs do
-/// that, and userspace only drains. It exists so the round trip through
-/// `map_create`, `map_next_key` and `map_take` can be checked against the
-/// kernel instead of against itself.
-#[cfg(test)]
+/// A map the programs fill is only drained from here. The writes are a perf
+/// event array's slots, which hold the events the programs write into
+/// (`transport.rs`), and the tests' round trip through `map_create`,
+/// `map_next_key` and `map_take`, checked against the kernel instead of
+/// against itself.
 pub fn map_update(map_fd: RawFd, key: &[u8], value: &[u8]) -> io::Result<()> {
     let mut attr = MapElemAttr {
         map_fd: map_fd as u32,
@@ -551,10 +551,63 @@ pub fn map_update(map_fd: RawFd, key: &[u8], value: &[u8]) -> io::Result<()> {
 /// anything that lands between the two halves of a read-then-delete is gone
 /// with nothing recording that it existed -- a total quietly short by whatever
 /// happened in that window, which is the shape of error this layer exists to
-/// refuse. Hash maps have served this command since 5.14, below the project's
-/// kernel floor.
+/// refuse. Hash maps have served this command since 5.14.
+///
+/// **Before 5.14** the kernel refuses it for a hash, and a lookup followed by
+/// a delete is all there is. That is exact for the maps the drains here empty
+/// once nothing writes them -- a [`crate::bpf::map::Rows`] map retired a
+/// grace period ago -- and opens the window above only on a map read while
+/// its programs run, which on these kernels is a map of tasks that left, one
+/// entry each, rather than a count still being added to.
 pub fn map_take(map_fd: RawFd, key: &[u8], value_bytes: usize) -> io::Result<Option<Vec<u8>>> {
-    elem_or_absent(BPF_MAP_LOOKUP_AND_DELETE_ELEM, map_fd, key, value_bytes)
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static REFUSED: AtomicBool = AtomicBool::new(false);
+    if !REFUSED.load(Ordering::Relaxed) {
+        match elem_or_absent(BPF_MAP_LOOKUP_AND_DELETE_ELEM, map_fd, key, value_bytes) {
+            Err(error) if refuses_the_command(&error) => REFUSED.store(true, Ordering::Relaxed),
+            other => return other,
+        }
+    }
+    let Some(value) = elem_or_absent(BPF_MAP_LOOKUP_ELEM, map_fd, key, value_bytes)? else {
+        return Ok(None);
+    };
+    map_delete(map_fd, key)?;
+    Ok(Some(value))
+}
+
+/// Whether an error is a kernel refusing a command or a map type it has not
+/// been taught: `EINVAL`, `ENOTSUPP` (524, the kernel's own) or `EOPNOTSUPP`.
+fn refuses_the_command(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::EINVAL) | Some(524) | Some(libc::EOPNOTSUPP)
+    )
+}
+
+/// Removes one element; an element already gone is not an error.
+pub fn map_delete(map_fd: RawFd, key: &[u8]) -> io::Result<()> {
+    let mut attr = MapElemAttr {
+        map_fd: map_fd as u32,
+        pad: 0,
+        key: key.as_ptr() as u64,
+        value: 0,
+        flags: 0,
+    };
+    let result = unsafe {
+        bpf(
+            BPF_MAP_DELETE_ELEM,
+            &mut attr as *mut _ as *mut libc::c_void,
+            std::mem::size_of::<MapElemAttr>() as u32,
+        )
+    };
+    if result < 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ENOENT) {
+            return Ok(());
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Reads a value without removing it.

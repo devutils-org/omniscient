@@ -40,6 +40,8 @@ pub const BPF_W: u8 = 0x00;
 /// `family`, `dport` and `i_mode` are two bytes.
 pub const BPF_H: u8 = 0x08;
 pub const BPF_DW: u8 = 0x18;
+/// The byte width: a classic record's `__u8` fields, `protocol` on 4.19.
+pub const BPF_B: u8 = 0x10;
 
 /// Addressing modes.
 const BPF_IMM: u8 = 0x00;
@@ -114,6 +116,9 @@ pub mod helper {
     /// destination, so the slot has to be cleared first -- otherwise the map
     /// carries this program's own stack contents to userspace.
     pub const PROBE_READ_KERNEL_STR: i32 = 115;
+    /// `bpf_probe_read_user_str(dst, size, unsafe_ptr)`: a string in the
+    /// caller's memory, a path a syscall was handed.
+    pub const PROBE_READ_USER_STR: i32 = 114;
     pub const RINGBUF_OUTPUT: i32 = 130;
     /// `bpf_seq_write(seq, data, len)`: an iterator program's output.
     pub const SEQ_WRITE: i32 = 127;

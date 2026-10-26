@@ -23,7 +23,8 @@ use super::insn::{
     helper, push_task_filter, read_field, read_narrow, read_pointer, Insn, Program, Subject,
     TaskFields, Whose, BPF_DW, BPF_W, R10,
 };
-use super::proc_events::{publish, EventStream};
+use super::proc_events::{publish_to, EventStream};
+use super::transport::Output;
 
 /// `mark_victim(task_struct *, uid_t)` since 6.8; the uid was added then, and
 /// before it the tracepoint was handed the task alone.
@@ -136,7 +137,12 @@ fn rss_counters(btf: &Btf) -> Result<[i32; 4], String> {
     Ok([MM_FILEPAGES, MM_ANONPAGES, MM_SWAPENTS, MM_SHMEMPAGES].map(|slot| first + slot * stride))
 }
 
-fn instructions(btf: &Btf, whose: Whose, ring_fd: i32, drops_fd: i32) -> Result<Vec<Insn>, String> {
+fn instructions(
+    btf: &Btf,
+    whose: Whose,
+    output: Output,
+    drops_fd: i32,
+) -> Result<Vec<Insn>, String> {
     let signature = btf.tracepoint_signature("mark_victim")?;
     let passes_uid = if signature == SIGNATURE {
         true
@@ -212,9 +218,10 @@ fn instructions(btf: &Btf, whose: Whose, ring_fd: i32, drops_fd: i32) -> Result<
     }
     program.label("sizes_read");
 
-    publish(
+    publish_to(
         &mut program,
-        ring_fd,
+        output,
+        6,
         drops_fd,
         EVENT,
         VICTIM_BYTES,
@@ -313,7 +320,8 @@ mod tests {
             counters.windows(2).all(|pair| pair[0] < pair[1]),
             "{counters:?}"
         );
-        let program = instructions(&btf, Whose::Process(4242), 3, 4).expect("a program");
+        let program =
+            instructions(&btf, Whose::Process(4242), Output::Ring(3), 4).expect("a program");
         let compared = program
             .iter()
             .position(|insn| insn.imm == 4242)
@@ -323,7 +331,7 @@ mod tests {
             .position(|insn| insn.code == 0x85 && insn.imm == helper::RINGBUF_OUTPUT)
             .expect("the publish");
         assert!(compared < published);
-        let machine = instructions(&btf, Whose::Any, 3, 4).expect("a program");
+        let machine = instructions(&btf, Whose::Any, Output::Ring(3), 4).expect("a program");
         assert!(!machine.iter().any(|insn| insn.imm == 4242));
     }
 }

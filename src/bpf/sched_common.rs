@@ -328,19 +328,44 @@ pub fn push_kernel_wait(
 /// The root is not in the map: it is compared as a constant first, which is
 /// the case of every program that starts nothing, and costs the target's own
 /// events no lookup.
+///
+/// **Without BTF** the same maps are kept by two classic tracepoints instead
+/// (`Descendants::follow_classic`): `task:task_newtask`, which fires in the
+/// parent's context inside `copy_process` -- also before the child runs --
+/// and carries the child's id and its `clone_flags`, so a new thread is told
+/// from a new process by `CLONE_THREAD`; and `sched:sched_process_free`,
+/// whose `pid` is the freed task's own id, a process's when its leader goes.
+/// A classic record names a task by its id alone and never its thread group,
+/// so this follower also keeps every thread of the root and of what it
+/// started (`Descendants::threads_fd`), for a program that must tell whose a
+/// task is from a record's `pid`.
 pub struct Descendants {
     root: u32,
     followed: Hash,
     /// Processes freed since the last read of [`Descendants::parents`], with
     /// their parents: the free program moves an entry here as it deletes it.
     exited: Hash,
+    /// Every thread of the root and of the processes followed, with its
+    /// thread group: the classic follower's.
+    threads: Option<Hash>,
     missed: Counters,
     /// Processes already under the root that the map had no room for.
     missed_at_start: u64,
-    fork_program: OwnedFd,
-    _fork_link: OwnedFd,
-    free_program: OwnedFd,
-    _free_link: OwnedFd,
+    programs: FollowPrograms,
+}
+
+/// The two programs that keep the maps, and what holds them attached.
+enum FollowPrograms {
+    Raw {
+        fork_program: OwnedFd,
+        _fork_link: OwnedFd,
+        free_program: OwnedFd,
+        _free_link: OwnedFd,
+    },
+    Classic {
+        newtask: super::attach::PerfAttachment,
+        free: super::attach::PerfAttachment,
+    },
 }
 
 /// How many processes one run follows at once beside its root.
@@ -351,6 +376,10 @@ const FOLLOW_DROP_KEY: i16 = -24;
 pub(super) const FORK_SIGNATURE: [&str; 2] = ["task_struct *", "task_struct *"];
 pub(super) const FREE_SIGNATURE: [&str; 1] = ["task_struct *"];
 const FOLLOW_LICENSE: &str = "Dual MIT/GPL";
+/// How many threads the classic follower keeps, the root's included.
+const MAX_FOLLOWED_THREADS: u32 = 65536;
+/// `CLONE_THREAD`: the new task joins its parent's thread group.
+const CLONE_THREAD: i32 = 0x0001_0000;
 
 /// Whose tasks a program keeps: the target as [`Whose`] says, and, for a
 /// process, the map of the processes it started.
@@ -479,30 +508,129 @@ impl Descendants {
     /// Attached before the existing ones are read, so that a fork between the
     /// read and the attach is not missed: it is seen by the program, and the
     /// read finds it again, which is harmless.
+    ///
+    /// Through the raw tracepoints where the kernel has them, the classic ones
+    /// otherwise -- no BTF, or a BTF without the tracepoints' types (5.4's,
+    /// before `btf_trace_*` was published) -- and the raw refusal is the
+    /// one said when neither attaches.
     pub fn follow(root: u32) -> Result<Self, String> {
-        let btf = super::kernel_btf()?;
+        let raw = super::kernel_btf().and_then(|btf| Self::follow_raw(btf, root));
+        match raw {
+            Ok(descendants) => Ok(descendants),
+            Err(raw) => Self::follow_classic(root).map_err(|classic| {
+                format!("{raw}; and through the classic tracepoints, {classic}")
+            }),
+        }
+    }
+
+    /// The classic follower whatever the kernel has: what a program that
+    /// tells a task's owner from a record's `pid` needs, for its threads map.
+    pub fn follow_threads(root: u32) -> Result<Self, String> {
+        Self::follow_classic(root)
+    }
+
+    fn maps() -> Result<(Hash, Hash, Counters), String> {
         let followed = Hash::create(4, 4, MAX_DESCENDANTS, "omn_sched_desc")
             .map_err(|error| map_failure("descendants map", error))?;
         let exited = Hash::create(4, 4, MAX_DESCENDANTS, "omn_sched_dexit")
             .map_err(|error| map_failure("exited descendants map", error))?;
         let missed = Counters::create(1, "omn_sched_dmiss")
             .map_err(|error| map_failure("descendants drop counter", error))?;
+        Ok((followed, exited, missed))
+    }
+
+    fn follow_raw(btf: &Btf, root: u32) -> Result<Self, String> {
+        let (followed, exited, missed) = Self::maps()?;
         let fork = fork_instructions(btf, root, followed.as_raw_fd(), missed.as_raw_fd())?;
         let free = free_instructions(btf, followed.as_raw_fd(), exited.as_raw_fd())?;
         let fork_program = load_raw(&fork, "omn_sched_fork")?;
         let fork_link = crate::bpf::program::attach_raw("sched_process_fork", &fork_program)?;
         let free_program = load_raw(&free, "omn_sched_free")?;
         let free_link = crate::bpf::program::attach_raw("sched_process_free", &free_program)?;
-        let mut descendants = Self {
-            root,
-            followed,
-            exited,
-            missed,
-            missed_at_start: 0,
+        let programs = FollowPrograms::Raw {
             fork_program,
             _fork_link: fork_link,
             free_program,
             _free_link: free_link,
+        };
+        Ok(Self::populated(
+            root, followed, exited, None, missed, programs,
+        ))
+    }
+
+    fn follow_classic(root: u32) -> Result<Self, String> {
+        let (followed, exited, missed) = Self::maps()?;
+        let threads = Hash::create(4, 4, MAX_FOLLOWED_THREADS, "omn_sched_thr")
+            .map_err(|error| map_failure("followed threads map", error))?;
+        let newtask = super::attach::tracepoint_layout("task", "task_newtask")?;
+        let free = super::attach::tracepoint_layout("sched", "sched_process_free")?;
+        let at = |layout: &super::attach::Layout, field: &str, tracepoint: &str| {
+            layout
+                .get(field)
+                .map(|field| field.offset)
+                .ok_or_else(|| format!("`{tracepoint}` has no `{field}` field"))
+        };
+        let newtask_fields = NewTaskFields {
+            pid: at(&newtask, "pid", "task:task_newtask")?,
+            clone_flags: at(&newtask, "clone_flags", "task:task_newtask")?,
+        };
+        let freed_pid = at(&free, "pid", "sched:sched_process_free")?;
+        let maps = ClassicMaps {
+            followed: followed.as_raw_fd(),
+            exited: exited.as_raw_fd(),
+            threads: threads.as_raw_fd(),
+            missed: missed.as_raw_fd(),
+        };
+        let newtask_program = newtask_instructions(root, newtask_fields, maps)?;
+        let free_program = classic_free_instructions(freed_pid, maps)?;
+        let scope = super::attach::Scope::System;
+        let newtask = super::attach::tracepoint(
+            "task",
+            "task_newtask",
+            &newtask_program,
+            "omn_sched_newt",
+            scope,
+        )?;
+        let free = super::attach::tracepoint(
+            "sched",
+            "sched_process_free",
+            &free_program,
+            "omn_sched_free",
+            scope,
+        )?;
+        let programs = FollowPrograms::Classic { newtask, free };
+        Ok(Self::populated(
+            root,
+            followed,
+            exited,
+            Some(threads),
+            missed,
+            programs,
+        ))
+    }
+
+    /// Adds the processes already under `root`, and their threads where the
+    /// follower keeps them.
+    ///
+    /// The programs are attached before the existing ones are read, so that a
+    /// fork between the read and the attach is not missed: it is seen by the
+    /// program, and the read finds it again, which is harmless.
+    fn populated(
+        root: u32,
+        followed: Hash,
+        exited: Hash,
+        threads: Option<Hash>,
+        missed: Counters,
+        programs: FollowPrograms,
+    ) -> Self {
+        let mut descendants = Self {
+            root,
+            followed,
+            exited,
+            threads,
+            missed,
+            missed_at_start: 0,
+            programs,
         };
         for (tgid, parent) in processes_under(root) {
             if tgid != root {
@@ -513,8 +641,21 @@ impl Descendants {
                     descendants.missed_at_start += 1;
                 }
             }
+            if let Some(threads) = &descendants.threads {
+                for tid in threads_of(tgid) {
+                    if update_elem(threads.as_raw_fd(), tid, tgid).is_err() {
+                        descendants.missed_at_start += 1;
+                    }
+                }
+            }
         }
-        Ok(descendants)
+        descendants
+    }
+
+    /// The map of every followed thread to its thread group, the classic
+    /// follower's.
+    pub fn threads_fd(&self) -> Option<i32> {
+        self.threads.as_ref().map(Hash::as_raw_fd)
     }
 
     pub fn map_fd(&self) -> i32 {
@@ -580,7 +721,16 @@ impl Descendants {
     /// Runs of the two programs the kernel skipped, as every program here
     /// reports them.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::program::skipped([&self.fork_program, &self.free_program])
+        match &self.programs {
+            FollowPrograms::Raw {
+                fork_program,
+                free_program,
+                ..
+            } => crate::bpf::program::skipped([fork_program, free_program]),
+            FollowPrograms::Classic { newtask, free } => {
+                crate::bpf::program::skipped([newtask.program(), free.program()])
+            }
+        }
     }
 }
 
@@ -704,6 +854,140 @@ fn free_instructions(btf: &Btf, followed_fd: i32, exited_fd: i32) -> Result<Vec<
     let instructions = program.build();
     super::insn::audit(&instructions)?;
     Ok(instructions)
+}
+
+/// Where `task:task_newtask` keeps the new task's id and its clone flags.
+#[derive(Debug, Clone, Copy)]
+struct NewTaskFields {
+    pid: i16,
+    clone_flags: i16,
+}
+
+/// The classic follower's maps, as its programs load them.
+#[derive(Debug, Clone, Copy)]
+struct ClassicMaps {
+    followed: i32,
+    exited: i32,
+    threads: i32,
+    missed: i32,
+}
+
+/// `task:task_newtask`, in the parent's context: a new task whose parent's
+/// thread group is the root's or followed joins the threads map, and joins
+/// the processes when it is not a thread (`CLONE_THREAD`).
+fn newtask_instructions(
+    root: u32,
+    fields: NewTaskFields,
+    maps: ClassicMaps,
+) -> Result<Vec<Insn>, String> {
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
+    program.push(Insn::rsh64_imm(0, 32));
+    program.push(Insn::stx(BPF_W, R10, FOLLOW_VALUE, 0));
+    program.jump_to("parent_followed", Insn::jeq_imm(0, root as i32, 0));
+    program.extend(Insn::load_map_fd(1, maps.followed));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, FOLLOW_VALUE as i32));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    program.jump_to("done", Insn::jeq_imm(0, 0, 0));
+    program.label("parent_followed");
+
+    // The new task's id, and whether it is a thread of its parent's group.
+    program.push(Insn::ldx(BPF_W, 7, 6, fields.pid));
+    program.push(Insn::stx(BPF_W, R10, FOLLOW_KEY, 7));
+    program.push(Insn::ldx(BPF_DW, 8, 6, fields.clone_flags));
+    // A thread's group is its parent's, already in `FOLLOW_VALUE`; a new
+    // process is a group of its own.
+    program.jump_to("thread_value", Insn::jset_imm(8, CLONE_THREAD, 0));
+    program.push(Insn::stx(BPF_W, R10, FOLLOW_DROP_KEY, 7));
+    program.jump_to("thread_update", Insn::ja());
+    program.label("thread_value");
+    program.push(Insn::ldx(BPF_W, 1, R10, FOLLOW_VALUE));
+    program.push(Insn::stx(BPF_W, R10, FOLLOW_DROP_KEY, 1));
+    program.label("thread_update");
+    program.extend(Insn::load_map_fd(1, maps.threads));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, FOLLOW_KEY as i32));
+    program.push(Insn::mov64_reg(3, R10));
+    program.push(Insn::add64_imm(3, FOLLOW_DROP_KEY as i32));
+    program.push(Insn::mov64_imm(4, 0));
+    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
+    program.jump_to("thread_kept", Insn::jsge_imm(0, 0, 0));
+    count_drop(&mut program, maps.missed, FOLLOW_DROP_KEY, 0, "thread_kept");
+    program.label("thread_kept");
+
+    program.jump_to("done", Insn::jset_imm(8, CLONE_THREAD, 0));
+    // The value is the parent's thread group, the child's `ppid` for as long
+    // as the map holds it (`Descendants::parents`).
+    program.extend(Insn::load_map_fd(1, maps.followed));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, FOLLOW_KEY as i32));
+    program.push(Insn::mov64_reg(3, R10));
+    program.push(Insn::add64_imm(3, FOLLOW_VALUE as i32));
+    program.push(Insn::mov64_imm(4, 0));
+    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
+    program.jump_to("done", Insn::jsge_imm(0, 0, 0));
+    count_drop(&mut program, maps.missed, FOLLOW_DROP_KEY, 0, "done");
+
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
+/// `sched:sched_process_free`: the freed task leaves the threads map, and a
+/// process leaves the followed ones when the task is its leader, whose id is
+/// the group's. A thread that is not a leader has an id no process is keyed
+/// by, so the lookup misses and nothing else changes.
+fn classic_free_instructions(pid_at: i16, maps: ClassicMaps) -> Result<Vec<Insn>, String> {
+    let mut program = Program::new();
+    program.push(Insn::ldx(BPF_W, 1, 1, pid_at));
+    program.push(Insn::stx(BPF_W, R10, FOLLOW_KEY, 1));
+    program.extend(Insn::load_map_fd(1, maps.threads));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, FOLLOW_KEY as i32));
+    program.push(Insn::call(helper::MAP_DELETE_ELEM));
+    program.extend(Insn::load_map_fd(1, maps.followed));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, FOLLOW_KEY as i32));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    program.jump_to("done", Insn::jeq_imm(0, 0, 0));
+    // Kept in the exited map until the next drain reads it, as the raw
+    // follower keeps it.
+    program.push(Insn::ldx(BPF_W, 1, 0, 0));
+    program.push(Insn::stx(BPF_W, R10, FOLLOW_VALUE, 1));
+    program.extend(Insn::load_map_fd(1, maps.exited));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, FOLLOW_KEY as i32));
+    program.push(Insn::mov64_reg(3, R10));
+    program.push(Insn::add64_imm(3, FOLLOW_VALUE as i32));
+    program.push(Insn::mov64_imm(4, 0));
+    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
+    program.extend(Insn::load_map_fd(1, maps.followed));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, FOLLOW_KEY as i32));
+    program.push(Insn::call(helper::MAP_DELETE_ELEM));
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
+/// The threads of `tgid` now, by id.
+fn threads_of(tgid: u32) -> Vec<u32> {
+    std::fs::read_dir(format!("/proc/{tgid}/task"))
+        .map(|threads| {
+            threads
+                .flatten()
+                .filter_map(|thread| thread.file_name().to_str()?.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The processes under `root` now, root included, each with the process it
