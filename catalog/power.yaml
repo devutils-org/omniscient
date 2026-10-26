@@ -1,4 +1,4 @@
-# Family `power` — see CATALOG.md section 7.
+# Family `power` — see docs/CATALOG.md section 7.
 # This family is also a CONFOUNDER for every other one: thermal throttling and
 # AVX-512 frequency licensing silently corrupt CPU and GPU measurements. The
 # harness collects it at all times and invalidates any throttled run.

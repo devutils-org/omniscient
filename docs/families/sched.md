@@ -55,7 +55,7 @@ and each of those differs for a reason its own file gives.
 
 `lock:contention_begin` and `lock:contention_end`, which is why this backend
 requires `kernel>=6.1`, the release that added them. There is no kernel floor
-for the tool as a whole -- `DECISIONS.md` settled in the fifteenth wave that
+for the tool as a whole -- `docs/DECISIONS.md` settled in the fifteenth wave that
 each backend carries its own `kernel>=`, and 5.15 is served -- so on an older
 kernel this source is the one that answers "missing", with that requirement,
 rather than the tool refusing to start. The tracepoints are what keep it from
@@ -529,7 +529,7 @@ still_held`. Unlike the shim, it also sees glibc's own callers of
 
 ## Index rows for the coordinator
 
-For `examples/README.md` and `GUIDE.md`, `sched` table:
+For `examples/README.md` and `docs/GUIDE.md`, `sched` table:
 
 ```
 | `sched-mutex-known-hold.yml` | Two threads, one pthread mutex, a known number of acquisitions held for a known time. |

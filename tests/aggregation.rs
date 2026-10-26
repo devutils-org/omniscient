@@ -721,7 +721,7 @@ fn a_clean_run_of_the_same_workload_gains_nothing() {
 /// samples the kernel declines to deliver are the ones from the busiest
 /// moment. And unlike a drop it yields no numerator -- a throttle is a window,
 /// not a count of what was in it -- so the honest answer is that the number is
-/// not knowable, which is the answer `DECISIONS.md` already chose for the loss
+/// not knowable, which is the answer `docs/DECISIONS.md` already chose for the loss
 /// line. This test is here to hold the tool to saying that rather than
 /// dividing a throttle count by something and calling it a rate.
 ///

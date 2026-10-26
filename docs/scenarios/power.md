@@ -14,8 +14,8 @@ reporting none, a core whose residency is read from the wrong file, a package
 whose energy is a plausible constant. Every scenario below is built to catch
 that shape.
 
-Read `BRIEF.md` for the four scenario classes, `docs/families/power.md` for
-what the collectors had to decide, and `CATALOG.md` §7 for the vocabulary.
+Read `docs/dev/BRIEF.md` for the four scenario classes, `docs/families/power.md` for
+what the collectors had to decide, and `docs/CATALOG.md` §7 for the vocabulary.
 
 ---
 
@@ -318,7 +318,7 @@ by `Drop` in the test rather than by a signal at the end of the file.
 
 ## What this family contributes to a crossing
 
-One line, as `BRIEF.md` asks:
+One line, as `docs/dev/BRIEF.md` asks:
 
 > `power` knows what the machine was doing *to* the measurement — the clock the
 > core actually ran at, whether it ever went idle, how hot it was and whether it
@@ -484,7 +484,7 @@ in `docs/open-findings.md` for the stream that owns the runner.
 > `every_axis_this_family_declares_is_served_or_refused_by_name`, whose exit-3 arm
 > now accepts both ways of reaching that code.
 
-`BRIEF.md` class D asks for three answers to be told apart, because they lead to
+`docs/dev/BRIEF.md` class D asks for three answers to be told apart, because they lead to
 three different next steps — change the request, change the machine, write the
 collector. Measured:
 
@@ -518,7 +518,7 @@ and then refuses at attach time*. `trace` is declared by `power.freq` and
 `power.cstate`; the only backend that could serve it is `bpf:tp`, which has no
 collector, so the resolver falls through to `fs:sys`, which cannot trace
 anything. The message is exactly right and the exit code says "a failure while
-running" rather than "this build does not implement it". `STATE.md` already
+running" rather than "this build does not implement it". `docs/dev/STATE.md` already
 carries the neighbouring item — *an exit code for "valid, but this mechanism is
 not built"* — and this is the same hole seen from the mode axis rather than the
 backend axis.

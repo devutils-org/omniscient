@@ -144,7 +144,7 @@ make && cargo test --test view_workloads -- --nocapture
 `--nocapture` shows the lines a counted drop prints (`... with N events
 counted as dropped`), which is what a busy machine produces.
 
-## Decision lines for DECISIONS.md
+## Decision lines for docs/DECISIONS.md
 
 - **A view workload reads its parameters from its manifest.** The manifest is
   the truth a test holds the tool to and the program's input at once, so

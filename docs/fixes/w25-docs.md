@@ -15,7 +15,7 @@ Branch `feat/w25-docs`. Done sequentially by one agent, in the main checkout.
 - **`docs/view/system.md`, `process.md`, `request.md`**: the machine's
   process list, the `dir` split, a recording's capacity, the request's
   bytes read and queued (the stale "bytes on the network" gone).
-- **`GUIDE.md`**: "The shape of a run" -- a program alone, a target beside a
+- **`docs/GUIDE.md`**: "The shape of a run" -- a program alone, a target beside a
   program, several sources over one window, `-r N`, and the three exit
   codes.
 - **`docs/bench.md`**: what `io.fsync`'s share was (the trampolines' unlink,

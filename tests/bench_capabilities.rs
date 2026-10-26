@@ -2,7 +2,7 @@
 //! binary a user runs: `src/capabilities.rs` is this stream's, and these are
 //! the two things it added.
 //!
-//! - **The prefetcher state**, captured and never changed (`ROADMAP.md` phase
+//! - **The prefetcher state**, captured and never changed (`docs/ROADMAP.md` phase
 //!   8, boundary 5), in every resolved file.
 //! - **`dynamic-linking`**, stream S's request: every preload source requires
 //!   it, and it read as unverified on every run of any of them. It is now

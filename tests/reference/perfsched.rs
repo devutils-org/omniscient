@@ -1,5 +1,5 @@
 //! Parsers for the `perfsched` family's reference tools. Each turns a tool's
-//! output into the values a pair compares (BRIEF.md, "Decided before this
+//! output into the values a pair compares (docs/dev/BRIEF.md, "Decided before this
 //! wave").
 //!
 //! Keys are `<what>.<field>`: a syscall, a command name or a lock type, then

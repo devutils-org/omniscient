@@ -656,7 +656,7 @@ output rather than in a sentence.
 
 ### To the coordinator
 
-- **Index rows**, for `examples/README.md` and `GUIDE.md`:
+- **Index rows**, for `examples/README.md` and `docs/GUIDE.md`:
 
   ```
   | `mem-false-sharing.yml` | Two processes on one cache line, then on two. |
@@ -674,12 +674,12 @@ output rather than in a sentence.
   are now `mem.heap.alloc` on `bpf:uprobe`; the third is `mem.numa`'s `pmu`
   backend alone. The two new scenarios belong under a heading there: the
   sections above are written so that they can be moved as they are.
-- **`STATE.md`**: `mem.latency` and `mem.sharing` leave the "PEBS or IBS" row of
+- **`docs/dev/STATE.md`**: `mem.latency` and `mem.sharing` leave the "PEBS or IBS" row of
   what is left, and the table of what works end to end gains a line --
   `mem.latency`, `mem.sharing` | `perf_event_open`, AMD IBS op sampling | a
   pointer chase over 4 KiB against one over 64 MiB, and two processes on one
   line against two. `mem` goes to 22 of 23 with a collector.
-- **`CATALOG.md` line 160** lists "AMD IBS" for `mem.latency` beside PEBS as if
+- **`docs/CATALOG.md` line 160** lists "AMD IBS" for `mem.latency` beside PEBS as if
   the two were one; the catalog now says what IBS loses on family 17h.
 - **A flake that failed twice**: `scenario_mem::both_huge_page_backends_read_the_same_promotion_counter`,
   already in the eighth wave's tally, failed in this stream's run of the file

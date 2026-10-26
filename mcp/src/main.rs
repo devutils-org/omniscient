@@ -1,6 +1,6 @@
 //! `omn-mcp`: a model reads what omn already writes.
 //!
-//! `ROADMAP.md` phase 11. An MCP server over stdio -- one JSON-RPC message per
+//! `docs/ROADMAP.md` phase 11. An MCP server over stdio -- one JSON-RPC message per
 //! line in, one per line out -- exposing objects that exist: the catalog, a
 //! run's resolved file and results document, and the capability sweep. It is
 //! a second surface on those objects, the way a session file is a second

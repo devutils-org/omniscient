@@ -1,6 +1,6 @@
 # `omn-mcp` -- a model reads it
 
-`ROADMAP.md` phase 11, landed by the twelfth wave's stream M. An MCP server
+`docs/ROADMAP.md` phase 11, landed by the twelfth wave's stream M. An MCP server
 over stdio, `mcp/` in the workspace, building the binary `omn-mcp` over the
 `omn` library. It exposes what already exists -- the catalog, a run's
 resolved file and results document, the capability sweep -- and it is a
@@ -360,7 +360,7 @@ conditions, and each is the reason it can exist without breaking boundary 5.
 
 1. **Opt-in, by the person who starts the server.** `--allow-run DURATION`
    and nothing else enables it; absent, every call is refused with the reason.
-   This is `make CAPTURE=1`'s shape from `DECISIONS.md`: the one power here
+   This is `make CAPTURE=1`'s shape from `docs/DECISIONS.md`: the one power here
    that is closer to acting than observing is granted only when asked for, by
    the person, once.
 2. **Bounded by the server, not the caller.** `duration` is required, and
@@ -545,7 +545,7 @@ engine's (`docs/families/join.md`):
 |---|---|
 | `join-overlap-machine.yml` | A thread's waits laid across the machine's memory-pressure readings with no key: `overlap` over state the machine holds once. |
 
-## For `DECISIONS.md`
+## For `docs/DECISIONS.md`
 
 | Decision | Choice | Reason |
 |---|---|---|

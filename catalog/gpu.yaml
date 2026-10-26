@@ -1,4 +1,4 @@
-# Family `gpu` — see CATALOG.md section 8.
+# Family `gpu` — see docs/CATALOG.md section 8.
 # NVIDIA is proprietary: no DRM scheduler tracepoints, no exposed kernel PMU.
 # Everything goes through vendor:*. AMD and Intel have the full kernel stack.
 # The catalog reflects that asymmetry rather than hiding it.

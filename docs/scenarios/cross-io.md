@@ -26,10 +26,10 @@ its partitions, kernel 7.2.
 
 ## Where the crossing starts, said first
 
-`ROADMAP.md` phase 4 names ten boundaries for the vertical case. Four of them
+`docs/ROADMAP.md` phase 4 names ten boundaries for the vertical case. Four of them
 are the I/O path, and this is what this build reaches of each:
 
-| # | Boundary | `ROADMAP.md` says | What this build has | Evidence earned here |
+| # | Boundary | `docs/ROADMAP.md` says | What this build has | Evidence earned here |
 |---|---|---|---|---|
 | 5 | `read()` → cache miss | fd → `file:dev+ino`, KEY | nothing: `io.syscall` and `io.fs` need `fentry` | **not measured** |
 | 6 | FS → block submission | re-read `task_storage` at `block_rq_issue`, IDENTITY | the submitting thread, read from `current` at `block_rq_issue` | **KEY on the task, TEMPORAL on the read** |
@@ -42,8 +42,8 @@ that reads `syscall -> block issue   NOT SEEN ... needs fentry: io.syscall,
 io.fs`, and the time that segment took is in the residue, where it is measured,
 not in any segment, where it would be invented.
 
-**Boundary 6 is not IDENTITY, and the brief asked for it to be.** `BRIEF.md`
-writes "boundary 6 is `IDENTITY`". The mechanism `ROADMAP.md` gives for it is a
+**Boundary 6 is not IDENTITY, and the brief asked for it to be.** `docs/dev/BRIEF.md`
+writes "boundary 6 is `IDENTITY`". The mechanism `docs/ROADMAP.md` gives for it is a
 request id put into task storage at the request's entry and read back at
 `block_rq_issue`, which is what makes it a *propagated* identity: the downstream
 event carries something the upstream one put there. The entry is boundary 3,
@@ -198,7 +198,7 @@ direct reads inside the same window, and at least 99 % of them must be found.
 
 ## The scoped key, against a bare pointer
 
-`BRIEF.md`: *show that no completion was attributed to a request that had
+`docs/dev/BRIEF.md`: *show that no completion was attributed to a request that had
 already finished. That check is the whole argument for the key being scoped
 rather than a pointer, and it belongs in a test and not only in a document.*
 

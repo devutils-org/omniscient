@@ -1,4 +1,4 @@
-# The portability matrix over distributions (ROADMAP.md, phase 13;
+# The portability matrix over distributions (docs/ROADMAP.md, phase 13;
 # docs/distroproof.md). Every image boots on its own kernel and userspace; the
 # release archive is installed as a user installs it, its file capabilities
 # granted in `setup`, and `omn selftest` sweeps the guest as the user `test`.

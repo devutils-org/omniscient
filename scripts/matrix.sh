@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The portability matrix: ROADMAP.md's "Portability" and "Degradation" rows.
+# The portability matrix: docs/ROADMAP.md's "Portability" and "Degradation" rows.
 # docs/portability.md says what each cell checks and what the cells found.
 #
 #   scripts/matrix.sh                    every kernel under every configuration
@@ -8,7 +8,7 @@
 #   scripts/matrix.sh [KERNEL...] [--configs caps,root,...]
 #
 # KERNEL is an Ubuntu mainline version (v6.1.188) or `host`, the kernel this
-# machine runs. The defaults are the floor's side of DECISIONS.md -- 5.15,
+# machine runs. The defaults are the floor's side of docs/DECISIONS.md -- 5.15,
 # which is under it, and 6.1, which is it -- then 6.6, the LTS where
 # uprobe-multi arrived, then the host's own. The configurations are in
 # scripts/vm/cell.sh.

@@ -1,6 +1,6 @@
 # Stream run, the twenty-fourth wave: the run's shape
 
-Branch `feat/w24-run`. Every item of `BRIEF.md`'s "run" section but one
+Branch `feat/w24-run`. Every item of `docs/dev/BRIEF.md`'s "run" section but one
 landed: the machine's capacity in a recording lands in two files other
 streams own, and is filed below. Two items moved a file outside this
 stream's row. Both are said first.
@@ -175,7 +175,7 @@ None. Everything above ran with what `make` grants (`CAP_BPF`,
 `CAP_PERFMON`), and the perf comparisons ran unprivileged
 (`perf_event_paranoid` -1 here).
 
-## Decision lines for `DECISIONS.md`
+## Decision lines for `docs/DECISIONS.md`
 
 - **A program beside a target is the window, not a second target.** In a
   session it is `launch:`, beside the requests. The runner launches it,
@@ -224,7 +224,7 @@ None. Everything above ran with what `make` grants (`CAP_BPF`,
 - **lazy**: `TraceArgs::source` is a `Vec<SourceId>` now
   (`value_delimiter = ','`). The family-name dispatch lands where
   `cli::to_session` loops over `args.source` and calls `request_for`.
-- **coordinator** (`man/omn.1`, `GUIDE.md`, `CATALOG.md`): document
+- **coordinator** (`man/omn.1`, `docs/GUIDE.md`, `docs/CATALOG.md`): document
   `-r/--repeat`, a program beside a target, a session's `launch:`, several
   sources, `--pid` ending at its exit, exit 1's three last lines, and
   `lifetime.exit_code`/`signal`.

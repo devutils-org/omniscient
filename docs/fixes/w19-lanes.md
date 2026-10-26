@@ -1,6 +1,6 @@
 # The nineteenth wave, stream lanes
 
-Branch `feat/w19-lanes`, from `main` at `91a0cef`. `BRIEF.md`, "lanes --
+Branch `feat/w19-lanes`, from `main` at `91a0cef`. `docs/dev/BRIEF.md`, "lanes --
 threads side by side": one lane per thread, its states along time, with a lane
 per GPU stream now that `gpu.kernel` has a collector, so a kernel and the host
 thread that waited for it line up. Files touched: `view/src/views/lanes.rs`,
@@ -170,7 +170,7 @@ None. The recording was made with the capabilities `make` grants
 (`cap_bpf,cap_perfmon`) and nothing else; no sysctl, clock or module was
 touched.
 
-## Decision lines for DECISIONS.md
+## Decision lines for docs/DECISIONS.md
 
 - **lanes rebuilds a thread's states from instants, never from windows**:
   blocks are switch-out → wakeup, and `sched.offcpu`'s windowed rows only

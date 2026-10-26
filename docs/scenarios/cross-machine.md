@@ -15,7 +15,7 @@ decomposition exists, the verdict is its parts plus a residue, printed. Where
 the evidence is only that two things happened at the same time, the verdict
 says `TEMPORAL` and nothing stronger.
 
-Read `BRIEF.md` (stream P4) for the mission, `docs/scenarios/power.md`,
+Read `docs/dev/BRIEF.md` (stream P4) for the mission, `docs/scenarios/power.md`,
 `cpu.md`, `mem.md` and `io.md` for the workloads reused here, and
 `examples/allocation-cost.yml` for the join these started from.
 
@@ -182,7 +182,7 @@ evidence is `TEMPORAL` is requested below.
 
 ### What the verdict cannot say: when
 
-`BRIEF.md` asks for verdicts of the form *throttled for 1.2 s of 5 s, and the
+`docs/dev/BRIEF.md` asks for verdicts of the form *throttled for 1.2 s of 5 s, and the
 instruction rate over that interval is not comparable to the rest*. The
 frequency half of that exists: `power.freq` is a timeline, and it shows which
 100 ms ticks ran below the run's own peak. The instruction half does not.

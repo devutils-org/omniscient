@@ -118,7 +118,7 @@ sudoers line in `CLAUDE.md` already allows for the worktrees); the two
 end-to-end join tests need none, only `/sys/devices/system/cpu/cpu*/cpufreq`
 and `cpuidle`, and skip with the machine's reason without them.
 
-## For DECISIONS.md
+## For docs/DECISIONS.md
 
 - **An integer attribute has one canonical form**: `Uint` when non-negative,
   `Int` only when negative, and the two are equal where they spell the same
@@ -140,7 +140,7 @@ stream engine":
 - to the resolver stream: swap `src/main.rs` (`assemble`, around line 1234)
   and `src/triage/engine.rs` (around line 220) to `join::decompose_within`,
   with the exact calls, and remove the two `check_paired_parts` refusals;
-- to the coordinator: the `ROADMAP.md` exit criteria this stream's tests now
+- to the coordinator: the `docs/ROADMAP.md` exit criteria this stream's tests now
   hold (phase 1 round trip, phase 4 evidence, phase 5 load and evictions to
   `[x]`; phase 5 boundary stays `[~]`).
 

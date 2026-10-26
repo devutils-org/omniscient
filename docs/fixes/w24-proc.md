@@ -1,6 +1,6 @@
 # The twenty-fourth wave, stream proc
 
-Branch `feat/w24-proc`. Every item in `BRIEF.md`'s `### proc` landed, the
+Branch `feat/w24-proc`. Every item in `docs/dev/BRIEF.md`'s `### proc` landed, the
 defect first, apart from what the last section asks of other streams.
 
 **Shared layer, said first.** Three files outside this stream's own:
@@ -131,7 +131,7 @@ passed (1 new), `cargo test --test scenario_proc` 29 passed, after `make`
 (capabilities granted); clippy (`--workspace --all-targets`) and `fmt
 --check` clean. `cargo test --test cli` (for the documents): 32 passed, 1
 failed -- `the_catalog_document_s_cost_column_is_the_catalog_s_chain`, on
-`CATALOG.md`'s `mem.numa` and `mem.swap` rows, which came in with the merge of
+`docs/CATALOG.md`'s `mem.numa` and `mem.swap` rows, which came in with the merge of
 main (stream mem's) and which this stream does not touch.
 
 ## Privileged runs wanted
@@ -163,5 +163,5 @@ None: everything above ran under the capabilities `make` grants.
   `default:` block could name it (`poll@1s`, `summary`) beside `proc.threads`.
 - **triage**: sessions in `examples/` for `proc.tasks`, `proc.calls` and
   `proc.exec` on a launch, if the scenarios should be rerunnable by `-f`.
-- **coordinator**: `CATALOG.md` and `man/omn.1` for the two new sources,
+- **coordinator**: `docs/CATALOG.md` and `man/omn.1` for the two new sources,
   the two new keys, and `proc.exec`'s new targets.

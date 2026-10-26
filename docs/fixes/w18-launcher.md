@@ -1,6 +1,6 @@
 # Stream launcher, eighteenth wave: the budget and the stop
 
-`STATE.md` "After the seventeenth wave" item 4's `src/` half and item 11's
+`docs/dev/STATE.md` "After the seventeenth wave" item 4's `src/` half and item 11's
 registry line. The asks came from `docs/fixes/w17-build.md` ("a budget weighs
 the launched process alone") and `docs/fixes/w17-python.md` ("a run the budget
 stopped says the budget held"), filed in `docs/open-findings.md` under the
@@ -232,7 +232,7 @@ change the launcher or the meter.
 
 ---
 
-## 5. For DECISIONS.md
+## 5. For docs/DECISIONS.md
 
 - **A launched program's budget denominator is its process tree**: the
   program's cpu, every live or unreaped descendant's, and what each reaped,
@@ -284,7 +284,7 @@ take a stopped run for a complete one.
 ### To the coordinator
 
 - `src/collect/mem/mod.rs`: the one line of section 1.4, outside the row.
-- `STATE.md` item 11: "`WEIGHS_ITS_SAMPLES` into the collector registry" is
+- `docs/dev/STATE.md` item 11: "`WEIGHS_ITS_SAMPLES` into the collector registry" is
   done; item 4: the denominator and the stop are done, `run_session`'s half is
   stream mcp's.
 - `docs/open-findings.md`, the seventeenth wave's "a run the budget stopped

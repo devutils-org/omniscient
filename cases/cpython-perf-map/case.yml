@@ -35,7 +35,7 @@ needs:
   - run: [python3, -c, 'import sys; hasattr(sys, "activate_stack_trampoline") or sys.exit("this python3 has no perf trampoline (no sys.activate_stack_trampoline): a build without it, or older than 3.12")']
     for: the perf map `-X perf` writes, which is what this case is about
 
-# The perf map is read under `--symbols local` (DECISIONS.md, stream symbols):
+# The perf map is read under `--symbols local` (docs/DECISIONS.md, stream symbols):
 # a file the target wrote on this machine, asking nothing of anyone.
 symbols: local
 

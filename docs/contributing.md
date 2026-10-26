@@ -28,7 +28,7 @@ not.
 
 ## A catalog entry
 
-The schema is in `CATALOG.md` §1. Four things are easy to get wrong:
+The schema is in `docs/CATALOG.md` §1. Four things are easy to get wrong:
 
 **The backend chain is ordered and the first viable one wins.** Put the backend
 that answers the question best first, not the one most likely to be available:

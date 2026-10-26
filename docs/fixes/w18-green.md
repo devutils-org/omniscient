@@ -1,6 +1,6 @@
 # Stream green, eighteenth wave: the CI's two cells green
 
-`BRIEF.md`, "green". The run read is 37155975223 (`b37a925`), both cells red;
+`docs/dev/BRIEF.md`, "green". The run read is 37155975223 (`b37a925`), both cells red;
 its logs are in `../omniscient-ci-logs/37155975223/`. Files changed:
 `.github/workflows/ci.yml`, `src/collect/mem/{swap,wss}.rs`,
 `tests/encoders.rs`, `docs/flaky.md`, and the `mem.wss` caveat in
@@ -317,7 +317,7 @@ the coordinator's (`git push` of `main`, then `gh run watch`, then
 `.github/scripts/skip-gate.sh` over each cell's `target/test.log` if a cell is
 red on a skip).
 
-## Decision lines for `DECISIONS.md`
+## Decision lines for `docs/DECISIONS.md`
 
 - **The CI's bpftool is upstream's static build, pinned by version and
   sha256** (`libbpf/bpftool` v7.7.0), with Ubuntu's `linux-tools` as the

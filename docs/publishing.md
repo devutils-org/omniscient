@@ -12,27 +12,25 @@ on the day.
 | Files that usually hold secrets (`.env`, `.pem`, `.key`, `id_*`, keystores, databases) | none ever added |
 | Largest files | `tests/view_fixtures/*/results.json`, 2 to 5.3 MB each: test fixtures, nothing to remove |
 | Commit authors | one person, under two addresses: `moha.bekh.pro@gmail.com` and `mohabekpro@gmail.com`. Both become public with the history |
-| Local paths | `/home/moha/...` in 43 files, mostly `STATE.md` and `docs/briefs/`: working notes, harmless, a little untidy |
+| Local paths | `/home/moha/...` in 43 files, mostly `docs/dev/STATE.md` and `docs/dev/briefs/`: working notes, harmless, a little untidy |
 | Private addresses | two LAN addresses (`192.168.1.20`, `192.168.1.36`) in `tests/reference/captures/bpftrace/`: real captures of the development machine's traffic |
-| Scratch files | `tmp.sh` is tracked (an NVIDIA profiling check) |
+| Scratch files | `tmp.sh` was tracked (an NVIDIA profiling check); removed on 2026-10-26 |
 
-Nothing has to be rewritten out of the history. The addresses, the local paths
-and `tmp.sh` are choices, listed below.
+Nothing has to be rewritten out of the history. The addresses and the local
+paths are choices, listed below.
 
 ## On the day
 
-1. Optional, before publishing:
-   - remove `tmp.sh`, or move the check it holds into `scripts/`;
+1. Done on 2026-10-26, before publishing: `tmp.sh` removed; the root tidied
+   to `README.md`, `REFERENCE.md`, `CLAUDE.md` and the licenses, with
+   `ROADMAP.md`, `DECISIONS.md`, `CATALOG.md`, `GUIDE.md` and `DEMO.md` moved
+   into `docs/`, and the agents' working notes (`STATE.md`, `BRIEF.md`,
+   `briefs/`) into `docs/dev/`, every reference rewritten in one commit; the
+   README says what `docs/dev/` is. Left as choices:
    - replace the two LAN addresses in the bpftrace captures with documentation
      addresses (`192.0.2.x`), if they should not be public;
-   - set one commit address for the future (`git config user.email`); the
-     history keeps both.
-   - tidy the root, as atfq, distroproof and xpac now are: keep `README.md`,
-     `REFERENCE.md`, `CLAUDE.md` and the licenses there, move `ROADMAP.md`,
-     `DECISIONS.md`, `CATALOG.md`, `GUIDE.md` and `DEMO.md` into `docs/`, and the
-     agent's working notes (`STATE.md`, `BRIEF.md`) into `docs/dev/`. They are
-     cited by name in some 200 files, `src/`, `scripts/` and the `Makefile`
-     included, so the move is one commit that rewrites every reference;
+   - set one commit address for the future (`git config user.email`, the
+     GitHub `noreply` one); the history keeps both;
    - add `CHANGELOG.md` and `SECURITY.md` (`docs/contributing.md` can move to
      the root as `CONTRIBUTING.md`, where GitHub looks for it).
 2. Decide where it lives. The site builds every repository link as

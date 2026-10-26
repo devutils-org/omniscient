@@ -193,7 +193,7 @@ wave with `io.readahead` beside 48 processes re-reading a cached file on 24
 cpus: 377 000 to 478 000 skipped runs in a two-second session, and the
 workload's own lookups short by 3 to 15 of 256. Nothing was silent, but the
 count is every task's, not the target's, so it is never slack for one
-workload's count (`DECISIONS.md`, the fourteenth wave). Narrowing earlier does
+workload's count (`docs/DECISIONS.md`, the fourteenth wave). Narrowing earlier does
 not stop the skips, since the guard is taken before the program runs, but it
 does keep the target's own runs short, which is why a process target lost none
 of its lookups below; a shorter program does not help (below).
@@ -232,7 +232,7 @@ preemption off, or `recursion_misses` per task.
 
 ## Privileges
 
-`CAP_BPF` and `CAP_PERFMON`, as settled in `DECISIONS.md`. Root works because
+`CAP_BPF` and `CAP_PERFMON`, as settled in `docs/DECISIONS.md`. Root works because
 root has them. An unprivileged run is refused, and the refusal names both
 capabilities and the `setcap` line that grants them; it is never served by a
 lesser backend that answers a different question.

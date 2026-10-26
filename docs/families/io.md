@@ -870,7 +870,7 @@ their traffic for as long as the run lasts for the same reason.
   do not, and three through a mapping, each named for the function that timed
   it.
 
-Both need rows in `examples/README.md` and `GUIDE.md`, which are the
+Both need rows in `examples/README.md` and `docs/GUIDE.md`, which are the
 coordinator's; the test holding the indexes to the disk is red on this branch
 until then, as the brief said it would be.
 
@@ -1096,14 +1096,14 @@ beside.
 - `examples/io-readahead-patterns.yml` -- readahead in front of a sequential
   reader, and not in front of a random one.
 
-The rows for `examples/README.md` and `GUIDE.md`, the same in both:
+The rows for `examples/README.md` and `docs/GUIDE.md`, the same in both:
 
 ```
 | `io-cold-then-warm.yml` | One file read cold and then warm: every page missed once, and the second read served from the cache. |
 | `io-readahead-patterns.yml` | Readahead in front of a sequential reader, and not in front of a random one. |
 ```
 
-`GUIDE.md` line 130 still names `io.readahead` among the sources left without a
+`docs/GUIDE.md` line 130 still names `io.readahead` among the sources left without a
 collector.
 
 ## Tests red on this branch, and why

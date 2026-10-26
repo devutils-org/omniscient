@@ -547,7 +547,7 @@ impl Split {
 /// the reader's thread (KEY), and of that thread's reads it is the one whose
 /// window contains it (TEMPORAL). Nothing stronger exists in this build. An
 /// IDENTITY link would need a request id placed in task storage at the syscall
-/// and read back at `block_rq_issue` -- boundaries 3, 5 and 6 of `ROADMAP.md`
+/// and read back at `block_rq_issue` -- boundaries 3, 5 and 6 of `docs/ROADMAP.md`
 /// phase 4 -- and the syscall edge is behind `fentry`.
 fn split(
     reads: &[Read],

@@ -1,6 +1,6 @@
 # The nineteenth wave, stream ledger
 
-Branch `feat/w19-ledger`, from `main` at `91a0cef`. `BRIEF.md`, "ledger --
+Branch `feat/w19-ledger`, from `main` at `91a0cef`. `docs/dev/BRIEF.md`, "ledger --
 what a process costs": one process's cost sheet across every resource `omn`
 measures, each line with its losses and trust, and the sources that could
 not be served said in place. Owned: `view/src/views/ledger.rs`, its
@@ -101,7 +101,7 @@ OMN_VIEW_BLESS=1 cargo test --test view_snapshots ledger
 OMN_VIEW_BLESS=1 cargo test -p omn-view --lib ledger
 ```
 
-## Decision lines for DECISIONS.md
+## Decision lines for docs/DECISIONS.md
 
 - **The ledger charges energy to a process by cpu share, and says so.** RAPL
   counts a package; the sheet shows the machine's joules as measured and,

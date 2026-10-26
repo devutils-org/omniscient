@@ -2,8 +2,8 @@
 
 Branch `feat/w21-collectors`, from `main` at `320c2aa` (stream data merged),
 with `main` merged again at `f12a857` (stream run's review fixes).
-`BRIEF.md`, "collectors -- the fields the views and the cases wait for";
-`STATE.md`, "What remains", item 4 (`net.request`'s bytes and the start of
+`docs/dev/BRIEF.md`, "collectors -- the fields the views and the cases wait for";
+`docs/dev/STATE.md`, "What remains", item 4 (`net.request`'s bytes and the start of
 its longest sleep) and item 7 (`io.bytes`'s polled baseline,
 `cpu.oncpu_time`'s `fs:proc` caveat); `docs/fixes/w21-data.md`'s requests
 to this stream (`fields()`, the `dir` key, `provenance()` in the profile).
@@ -106,7 +106,7 @@ cargo test --test vertical
 Wanted: `rx_bytes` 52 52 53 51 56, `tx_bytes` 59 59 59 59 131134, four
 `fields` at zero, 16 passed.
 
-## Decision lines for DECISIONS.md
+## Decision lines for docs/DECISIONS.md
 
 - **A request's `rx_bytes` start at its first byte's arrival, not at its
   birth.** A server declares a request once it has parsed it, so `copied_seq`
@@ -152,7 +152,7 @@ Wanted: `rx_bytes` 52 52 53 51 56, `tx_bytes` 59 59 59 59 131134, four
   `holder_since_ns`, and its result `fields` (read them in place of
   `Undrawn::of`'s sentences). The system view's disk and network rows can ask
   `--keys dev,dir` / `--keys iface,dir` for series per direction.
-- **docs (`CATALOG.md`)**: `dir` among the keys of `io.bytes`, `io.iops`,
+- **docs (`docs/CATALOG.md`)**: `dir` among the keys of `io.bytes`, `io.iops`,
   `io.merges` and `net.bytes` (`fs:proc`); `net.request`'s row: `rx_bytes`,
   `tx_bytes`, `holder_since_ns`, `fields`.
 - **coordinator (flaky tally)**: `scenario_cpu::a_counted_window_is_the_same_number_in_every_format_that_carries_it`

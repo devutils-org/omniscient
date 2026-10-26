@@ -101,7 +101,7 @@ Reasoned, not shown:
 - Locking clocks or toggling persistence to verify the verdicts: privileged
   (section 8).
 
-## 4. Decision lines for `DECISIONS.md`
+## 4. Decision lines for `docs/DECISIONS.md`
 
 - **The device's clocks are reported, never changed** (moves to settled):
   every NVML run states each device's shader clock lock, application clocks,

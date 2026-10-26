@@ -2,7 +2,7 @@
 //! The `lock:contention_begin` / `lock:contention_end` pair: a thread that had
 //! to wait for a kernel lock.
 //!
-//! This is the source the kernel floor of 6.1 was chosen for. `DECISIONS.md`
+//! This is the source the kernel floor of 6.1 was chosen for. `docs/DECISIONS.md`
 //! settled on that floor so that kernel lock contention could be measured from
 //! tracepoints the kernel itself maintains, rather than from a set of kprobes
 //! on `mutex_lock`, `down_read`, `rt_spin_lock` and everything else that

@@ -1,5 +1,5 @@
 //! The observer effect: does a collector serialize what it observes?
-//! (`ROADMAP.md` phase 8, task 6.)
+//! (`docs/ROADMAP.md` phase 8, task 6.)
 //!
 //! An asynchronous sequence -- four threads on four cores, each doing its own
 //! work with nothing shared -- takes about as long as one thread doing one

@@ -1436,7 +1436,7 @@ static ONE_TIME_CPU_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 /// that meets a new module pays for its table once, inside the window; read
 /// against the few milliseconds a waiting target has burnt by the first
 /// check, that one load stopped runs whose rate was a fraction of their
-/// ceiling (`DECISIONS.md`, "What the budget's first check may stop a run
+/// ceiling (`docs/DECISIONS.md`, "What the budget's first check may stop a run
 /// on").
 pub fn one_time_cpu_ns() -> u64 {
     ONE_TIME_CPU_NS.load(std::sync::atomic::Ordering::Relaxed)

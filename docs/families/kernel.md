@@ -304,7 +304,7 @@ here in the per-file run; not touched.
 
 None: this stream added no session.
 
-## For `DECISIONS.md`
+## For `docs/DECISIONS.md`
 
 - **A wakeup issued in interrupt context has the interrupt as its waker**
   (tid 0, `waker_context`), and a target keeps it only as its wakee. The
@@ -583,13 +583,13 @@ holds on both sides of that merge.
 
 ## Index rows
 
-For `examples/README.md` and `GUIDE.md`, in the `sched` table:
+For `examples/README.md` and `docs/GUIDE.md`, in the `sched` table:
 
 ```
 | `sched-cgroup.yml` | A cgroup and everything below it: its blocked time, its run queue waits, and who woke it. |
 ```
 
-## For `DECISIONS.md`
+## For `docs/DECISIONS.md`
 
 - **`--cgroup` means the cgroup and every cgroup below it, compared in the
   kernel**, by level against the task's default-hierarchy ancestry: the
@@ -614,7 +614,7 @@ The stock machine from the kernel side: what the CI's two runs on Linux 6.17
 (`../omniscient-ci-logs/`, paranoid 4 and paranoid 2, no capabilities) showed
 in the `sched`, `proc`, `io`, `net` and `mem` files, the read-ahead lookup the
 coordinator filed, the requests the thirteenth wave left for S and N, and the
-one open line of `DECISIONS.md`.
+one open line of `docs/DECISIONS.md`.
 
 ## 1. 6.17's prototypes
 
@@ -894,7 +894,7 @@ and `proc-loss.yml` (the workloads count what they inherit), and
 `sched-forced-backends.yml` (it pins `sched.switches`' `bpf:tp` in `count`,
 since `bpf:raw_tp` is written now).
 
-## For `DECISIONS.md`
+## For `docs/DECISIONS.md`
 
 - **Closed: `sched.switches` gets a `sched_switch` program, second in the
   chain.** It serves every target in `count`, and is reached first for a
@@ -911,7 +911,7 @@ since `bpf:raw_tp` is written now).
   in user mode, and the count it would give is zero.
 - **An `fentry:` requirement carries its prototypes** like a raw tracepoint's
   (`fentry:name(a, b)|(c, d)`); a bare name asks for existence only.
-  (`CATALOG.md` §1's notation list.)
+  (`docs/CATALOG.md` §1's notation list.)
 - **A requirement a collector's own start decides is probed by that start**:
   `phc` by `hwts::clock_support`, `ethtool` by resolving the family.
 - **A loss counted over the whole machine is not slack for one workload's

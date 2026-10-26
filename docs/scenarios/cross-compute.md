@@ -1,7 +1,7 @@
 # The compute crossing
 
 Where one task's wall clock went: on a cpu, waiting for one, or blocked, and
-on what. This is stream P2 of the seventh wave, and it is where `ROADMAP.md`
+on what. This is stream P2 of the seventh wave, and it is where `docs/ROADMAP.md`
 phase 10 starts: thread state analysis answers *why is this slow*, which is the
 question people arrive with, where USE answers *what is saturated*.
 
@@ -266,7 +266,7 @@ each event holds many blocks -- and a wakeup join onto a drained total is
 refused with that reason, before anything is attached, rather than attributing
 drains and calling it `WAKEUP`.
 
-The seventh wave's brief (`docs/briefs/wave-7-crossings.md`) names `sched.wakeup -> sched.offcpu` for "what released each
+The seventh wave's brief (`docs/dev/briefs/wave-7-crossings.md`) names `sched.wakeup -> sched.offcpu` for "what released each
 block". A `sched.offcpu` event is a total drained every 100 ms and stands for as
 many blocks as its `blocks` attribute says -- 159, 171, 169 and 101 for the pipe
 read here. A wakeup join credits each `to` event to the most recent wakeup of
@@ -343,7 +343,7 @@ The polled second opinion read between 170 and 190 ms against the kernel's
 190.3 to 206.0 across the runs here: always a multiple of ten, always short, by
 10 to 26 ms. Each reading is the delta of a tick counter since the last poll, and the
 cpu the task spent between the last poll and its exit is in no reading. That is
-the open question `STATE.md` names -- *the closing read of a polled counter* --
+the open question `docs/dev/STATE.md` names -- *the closing read of a polled counter* --
 met on a third family. For a launched program the reap already has the exact
 answer: `wait4` returns the child's `rusage`. The test holds the row to one poll
 and one tick of the kernel's figure and no closer.
@@ -491,7 +491,7 @@ And the `never ran` wording is gone: a chain with events attributed to it is
 itself -- `examples/join-decompose-compute.yml` -- and `omn latency` asks for
 it as a question since the tenth wave.
 
-Then the objective. `STATE.md` puts it as a request parameter -- *limited for
+Then the objective. `docs/dev/STATE.md` puts it as a request parameter -- *limited for
 what* -- and this crossing shows why it has to come before any verdict: the
 three-states task is 29 % on cpu, 35 % runnable and 45 % off cpu, and whether
 that is a cpu problem, a contention problem or a blocking problem depends on

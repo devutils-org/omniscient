@@ -287,7 +287,7 @@ impl Collector for DevCollector {
         Ok(events)
     }
 
-    /// Reads nothing: the runner closes the window (`DECISIONS.md`, "the
+    /// Reads nothing: the runner closes the window (`docs/DECISIONS.md`, "the
     /// runner closes the window"). Its last round of `sample` calls lands at
     /// the moment the stop condition is met, so the last interval is already
     /// measured; a read here covered the few microseconds since, and put a

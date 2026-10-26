@@ -28,7 +28,7 @@ without trouble. The `ls -l` and `head` in the defect entry were run from a
 *third* process, which Yama's `ptrace_scope` refuses; that says nothing about
 the reader that matters.
 
-The real cause is timing, and it is the trap `STATE.md` records twice already,
+The real cause is timing, and it is the trap `docs/dev/STATE.md` records twice already,
 in a third shape. `open_target_symbols` builds the symbolizer "at the first
 tick", documented as the only window in which a launched program has both
 execed and not yet exited. There is no such window: `drive()` reads every
@@ -314,14 +314,14 @@ machine should know what they are looking at.
 
 It opens a sampling event over a process exactly as `cpu.profile` and
 `sched.switches` do, so it has the same blind spot and now the only one of the
-three that says nothing about it. `STATE.md` claims it "states that it sees the
+three that says nothing about it. `docs/dev/STATE.md` claims it "states that it sees the
 target task only"; it does not. It is stream E's file, and the signature is in
 `docs/open-findings.md`.
 
 ### The exit codes, the late-tick reason, and the runner's pace
 
 `cpu` 4, 5, 6, 8 and 10 and `sched` 5, 6, 8 and 9 are stream A's and stream B's
-by `BRIEF.md`, and none was touched. Two of them were felt while working here
+by `docs/dev/BRIEF.md`, and none was touched. Two of them were felt while working here
 and are worth a line each for whoever does own them:
 
 - **`--mode` beside `-f` is discarded** (the `cpu` 5 family), which cost a

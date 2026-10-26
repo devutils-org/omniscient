@@ -374,7 +374,7 @@ impl<'a> Spending<'a> {
             // of 6 of a waiting program stopped 0.1 s in, at 45 to 310 %,
             // where their whole windows read 16 to 26 %). A collection over
             // its ceiling at its running rate passes the slack within a
-            // second or two of a busy target (`DECISIONS.md`).
+            // second or two of a busy target (`docs/DECISIONS.md`).
             if spent
                 .excess_ns(ceiling)
                 .is_some_and(|excess| excess < BUDGET_SLACK_NS as f64)

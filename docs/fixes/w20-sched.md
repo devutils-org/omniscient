@@ -1,7 +1,7 @@
 # Stream sched, twentieth wave: the sched collectors the views found short
 
 Branch `feat/w20-sched`, on `444900b`. Items 8 (sched) and 11 (`sched.lock`,
-`sched.futex` following descendants) of `STATE.md`, and the two example
+`sched.futex` following descendants) of `docs/dev/STATE.md`, and the two example
 headers of item 10.
 
 ## 1. What landed
@@ -141,14 +141,14 @@ scripts/bench.sh backends   # the cost table; sched.wakeup's `cost: med` re-chec
   the drain (catalog caveat, `src/collect/sched/offcpu.rs` `drain_into`).
   `stamped: start` on a join to `sched.offcpu` therefore covers
   `[ts, ts + span]` where the blocks lie in `[ts - window_ns, ts]`.
-- **docs** (`CATALOG.md`'s sched section): `sched.wakeup`'s new fields
+- **docs** (`docs/CATALOG.md`'s sched section): `sched.wakeup`'s new fields
   (`wakee_comm`, `waker_comm`, `served_in_tid`, `served_in_comm`, `irq`,
   `softirq`); `sched.lock` launchable; lock and futex following children.
 - **view** (the timebar's and wake's names): `wakee_comm`/`waker_comm` are
   now explicit, and `comm` is the wakee's as before. The wake view's want
   (`irq` on `hardirq`, `served_in_tid` on `softirq`) is served, minus the
   timer/IPI case.
-- **The coordinator** (`STATE.md` item 8/11, `docs/scenarios/sched.md`): the
+- **The coordinator** (`docs/dev/STATE.md` item 8/11, `docs/scenarios/sched.md`): the
   timebar finding that `comm` is the waker's is withdrawn (section 2), and the
   scenarios file's offcpu stamping line should match the catalog.
 

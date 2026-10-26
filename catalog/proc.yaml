@@ -1,4 +1,4 @@
-# Family `proc` (processes and syscalls) — see CATALOG.md section 9.
+# Family `proc` (processes and syscalls) — see docs/CATALOG.md section 9.
 
 - id: proc.syscall
   family: proc

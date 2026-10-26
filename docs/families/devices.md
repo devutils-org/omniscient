@@ -221,7 +221,7 @@ every namespace. The device is named after the test's pid now.
 Filed in `docs/open-findings.md` under "the thirteenth wave, stream N":
 `pub mod psi;` for R; `net.softirq`'s `facts()` at R's merge; the tally's #20
 for R; P's `validate.rs` test that used `mem.swap` as its broken promise; the
-`mem.faults` THP caveat for P and `DECISIONS.md`; `topk` back into
+`mem.faults` THP caveat for P and `docs/DECISIONS.md`; `topk` back into
 `net.bytes` after R's merge, for the coordinator.
 
 For the coordinator, not filed there:
@@ -236,13 +236,13 @@ For the coordinator, not filed there:
   `io.latency`, `mem.kmalloc`, `mem.compaction`, `net.drops`,
   `net.tcp.lifetime` or `net.tcp.retransmit` is closed by the sweep above;
   `proc.exit` and `net.request` are not this stream's.
-- `CATALOG.md`: no new notation.
+- `docs/CATALOG.md`: no new notation.
 
 ## Index rows
 
 No session was added.
 
-## For `DECISIONS.md`
+## For `docs/DECISIONS.md`
 
 - **A program that reads the same slots out of several prototypes lists them
   all, and its catalog line lists the same shapes in the same order**, held

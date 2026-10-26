@@ -1,4 +1,4 @@
-# Family `runtime` (late phase) — see CATALOG.md section 10.
+# Family `runtime` (late phase) — see docs/CATALOG.md section 10.
 # The layer above the kernel: GC, JIT, allocator, interpreter. Without it, a GC
 # pause or a JIT deoptimization gets attributed to the wrong resource.
 # Not a closed family: it is the extension point where users declare their probes.

@@ -130,7 +130,7 @@ fn parent_of(pid: i32) -> Option<i32> {
 /// either way, because a reading that is late is a measurement and a reading
 /// that never happens is not.
 ///
-/// This is the same trap the symbolizer records in `STATE.md` -- for a launched
+/// This is the same trap the symbolizer records in `docs/dev/STATE.md` -- for a launched
 /// program, `start` is too early -- and the same answer: the first read is the
 /// right moment, once the program exists.
 pub fn wait_for_exec(pid: i32) -> Option<Duration> {

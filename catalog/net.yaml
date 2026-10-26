@@ -1,4 +1,4 @@
-# Family `net` — see CATALOG.md section 5.
+# Family `net` — see docs/CATALOG.md section 5.
 # The key that crosses the whole stack is sock:cookie (bpf_get_socket_cookie),
 # not the PID: on receive, processing happens in softirq, outside any process
 # context. bpf_sk_storage carries keys along the socket.

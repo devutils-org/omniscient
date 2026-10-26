@@ -84,7 +84,7 @@ Reasoned:
 None beyond what `make` grants (`cap_bpf,cap_perfmon` were on
 `target/debug/omn` for every run above).
 
-## Decision lines for DECISIONS.md
+## Decision lines for docs/DECISIONS.md
 
 - A sampling collector that reads one ring per key reports, per ring, every
   loss the run counts for it -- drops and throttles -- since a placement that
@@ -110,7 +110,7 @@ None beyond what `make` grants (`cap_bpf,cap_perfmon` were on
 - **coordinator** (`docs/open-findings.md`, the nineteenth wave's tally and
   "Not flaky"): `runner::a_profile_s_losses_land_...` is fixed by `bdef096`;
   `unwind::a_stripped_build_...`'s second shape addressed by `c7c90c1`.
-  `STATE.md` item 4 and item 11's "`unwind`'s stripped-build second shape".
+  `docs/dev/STATE.md` item 4 and item 11's "`unwind`'s stripped-build second shape".
 - **triage**: `triage::a_verdict_read_off_a_lossy_profile_...` was filed as
   red under load wherever it ran; if its verdict reads per-series shortfalls
   of a throttled profile, it may move with `bdef096`. Worth one rerun on the

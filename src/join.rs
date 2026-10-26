@@ -259,7 +259,7 @@ pub struct Rule {
     pub tier: Tier,
 }
 
-/// Where a join is applied (`ROADMAP.md` phase 5, "join placement": decided
+/// Where a join is applied (`docs/ROADMAP.md` phase 5, "join placement": decided
 /// per rule, not globally).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

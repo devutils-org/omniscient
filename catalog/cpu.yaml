@@ -1,4 +1,4 @@
-# Family `cpu` — see CATALOG.md section 2.
+# Family `cpu` — see docs/CATALOG.md section 2.
 # Every entry declares an ORDERED backend chain: the resolver keeps the first one
 # viable on this machine and writes it into the resolved file.
 

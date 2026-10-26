@@ -150,7 +150,7 @@ impl Collector for BacklogCollector {
     }
 
     /// A count's closing read. A poll's last interval is the runner's last
-    /// tick (`DECISIONS.md`, "the runner closes the window"): a read here
+    /// tick (`docs/DECISIONS.md`, "the runner closes the window"): a read here
     /// covered the microseconds since and put a zero point at the previous
     /// one's offset into every series. A snapshot has no window to close.
     fn stop(&mut self) -> Vec<Event> {

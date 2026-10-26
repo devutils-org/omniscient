@@ -187,7 +187,7 @@ at once except `scenario_mem::both_huge_page_backends_read_the_same_promotion_co
   gaps into explained ones: `scripts/matrix.sh here && scripts/matrix.sh &&
   cargo test --test portability` (it boots guests; never run by this stream).
 
-## For DECISIONS.md
+## For docs/DECISIONS.md
 
 - **`cpu.cycles` on a cpu with no hardware PMU is served by the cpu clock**
   (`pmu:sw`, degraded, "CPU time, not cycles: blind to DVFS"), closing the
@@ -219,8 +219,8 @@ stream probes":
 - The runner stream (`examples/bench/harness.rs`): the guardrail through
   `power.throttle`, or the phase 9 sentence corrected.
 - R (`src/catalog.rs`): `Cost::Extreme`'s doc comment (J's, again).
-- The coordinator: `CATALOG.md:510`, a `docs/scenarios/cpu.md` row,
-  `CLAUDE.md`'s counts (92 and 56 here), `DECISIONS.md`'s open line.
+- The coordinator: `docs/CATALOG.md:510`, a `docs/scenarios/cpu.md` row,
+  `CLAUDE.md`'s counts (92 and 56 here), `docs/DECISIONS.md`'s open line.
 
 ## Session index rows
 

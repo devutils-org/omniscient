@@ -88,7 +88,7 @@ nothing), so the after-window clause was not run.
 collect::tests` (55, one new), `cargo test -p omn-view` (209, one new),
 `cargo test --test cli --test runner --test view_model`, clippy, fmt.
 
-## Decision lines for `DECISIONS.md`
+## Decision lines for `docs/DECISIONS.md`
 
 - A late round's swallowed readings are counted beside the late tick, not
   as late ticks: the tick count stays "rounds that overran".

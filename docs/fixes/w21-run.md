@@ -1,8 +1,8 @@
 # The twenty-first wave, stream run
 
-Branch `feat/w21-run`, from `main` at `156f1c5`. `BRIEF.md`, "run -- the
+Branch `feat/w21-run`, from `main` at `156f1c5`. `docs/dev/BRIEF.md`, "run -- the
 run's outcome, and what `omn top` opens on": the failure channel, `assemble`,
-`top_live`, `--program-stderr` and the manual, the `CATALOG.md` cost-cell
+`top_live`, `--program-stderr` and the manual, the `docs/CATALOG.md` cost-cell
 test, and the adopted-orphans denominator proposed with numbers.
 
 ## What landed
@@ -62,7 +62,7 @@ Five commits, each with its tests.
     every run, `lifetime.adopted_ended`; `lifetime.left_running` for what
     could not be signalled); exit 1 for a collector that broke its program;
     `process` the first screen of `--pid` too.
-- **`ca45f35` -- `CATALOG.md`'s Cost column held to the catalog's chain**
+- **`ca45f35` -- `docs/CATALOG.md`'s Cost column held to the catalog's chain**
   (`tests/cli.rs`, docs' request).
   `the_catalog_document_s_cost_column_is_the_catalog_s_chain` reads every
   family table with a `Metric` and a `Cost` column, expands a grouped row
@@ -92,7 +92,7 @@ Five commits, each with its tests.
   `the_program_s_stderr_goes_to_the_file_the_flag_names` (the file holds the
   program's line, `omn`'s stderr does not, the variable's file is not
   created) and `the_program_s_stderr_flag_without_a_program_is_refused`.
-  The cost-cell test failing on a mutated `CATALOG.md` (`cpu.cycles` set to
+  The cost-cell test failing on a mutated `docs/CATALOG.md` (`cpu.cycles` set to
   `med`, the `mem.cache_*` row to `free`): both lines named, with each
   member's chain. The man page rendered with `groff -man`.
 - **Shown, the denominator, with numbers** (debug build, this shared
@@ -181,7 +181,7 @@ omn's injection library ...` and exit 1.
   `omn` adopts. Proposed with the numbers above: without it a 5 % budget moved
   a 1 % request onto a worse backend in 3 runs of 3; with it, 0 of 3, for
   about 2 ms of the tool's cpu over a 2 s run when an orphan exists and none
-  measurable when none does. `DECISIONS.md`'s row ("the meter's change is to
+  measurable when none does. `docs/DECISIONS.md`'s row ("the meter's change is to
   come") can drop that clause.
 - **`--program-stderr` is refused beside a command that launches nothing**,
   as any flag that cannot mean anything is.
@@ -203,7 +203,7 @@ goes.
 `src/collect/mod.rs` (`run_core`, `Detached`, the recording's documents):
 a mechanical conflict, both sides kept.
 
-### To the coordinator (`DECISIONS.md`)
+### To the coordinator (`docs/DECISIONS.md`)
 
 The adopted-orphan row: the meter change is done (`1c15958`); and the
 decision line on the failure channel above.

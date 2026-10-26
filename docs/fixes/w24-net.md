@@ -1,6 +1,6 @@
 # The twenty-fourth wave, stream net
 
-Branch `feat/w24-net`. `BRIEF.md`, "### net": what the comparison against
+Branch `feat/w24-net`. `docs/dev/BRIEF.md`, "### net": what the comparison against
 `ip`, `nstat`, `ss`, `tcpdump` and the bpftrace tools asked of the family
 (`docs/fixes/w22-net.md`, `w23-net.md`, `w22-bpftrace.md` 3 and 6). Defects
 first, then features. No shared layer touched: the one new eBPF program file
@@ -12,7 +12,7 @@ first, then features. No shared layer touched: the one new eBPF program file
 | Commit | What |
 |---|---|
 | `ea2ce13` | **fix**: `net.bytes` and `net.packets` take their baseline in `start()`, before the program is released; the runner's first tick passes over (as `io.bytes` does since the twenty-first wave). `dir` on `net.packets` (`fs:proc`), one series per direction. |
-| `4ccb642` | **fix**: `net.iface` and `net.backlog` read again in `stop()` on a poll, which put a near-zero point at the end of every polled series -- the defect `dev.rs` had (`DECISIONS.md`, "the runner closes the window"). A poll now reads nothing at `stop`; a count still closes there. Both take their baseline at `start`. |
+| `4ccb642` | **fix**: `net.iface` and `net.backlog` read again in `stop()` on a poll, which put a near-zero point at the end of every polled series -- the defect `dev.rs` had (`docs/DECISIONS.md`, "the runner closes the window"). A poll now reads nothing at `stop`; a count still closes there. Both take their baseline at `start`. |
 | `36b4d20` | `direction`, `saddr`, `sport` as `net.capture` filter fields, and a caveat on `lo`'s two copies. |
 | `bad8fd4` | `mcast` and `missed` on `net.iface`: `/proc/net/dev`'s receive multicast column, and sysfs's `rx_missed_errors` (absent, noted, where sysfs has none). |
 | `128f945` | The rest of `tcp_info` on `net.tcp.rtt` (`netlink`), as `ss -ti` prints it, and the congestion algorithm through `INET_DIAG_CONG`. |
@@ -97,7 +97,7 @@ drops had no `NO_SOCKET` at all while `Udp: NoPorts` moved.
   capture), then the commands in the "Shown" table; `sudo -n bpftrace` and
   `sudo -n tcpdump` are granted.
 
-## Decision lines for `DECISIONS.md`
+## Decision lines for `docs/DECISIONS.md`
 
 - A connection's process is its **owner**, the task current at the first
   transition a process makes on its own socket (`SYN_SENT`, `FIN_WAIT1`,
@@ -127,8 +127,8 @@ drops had no `NO_SOCKET` at all while `Udp: NoPorts` moved.
   serves a launch, so `med` could compose it beside `net.socket` and
   `net.tcp.connect`.
 - **mem** (or the coordinator): `cli::the_catalog_document_s_cost_column_is_the_catalog_s_chain`
-  is red on main's `CATALOG.md:311` (`mem.numa`) and `:315` (`mem.swap`).
-- **coordinator**: `CATALOG.md` and `man/omn.1` rows for `net.snmp`,
+  is red on main's `docs/CATALOG.md:311` (`mem.numa`) and `:315` (`mem.swap`).
+- **coordinator**: `docs/CATALOG.md` and `man/omn.1` rows for `net.snmp`,
   `net.sockets`, `net.tcp.accept`; `net.tcp.lifetime`'s targets (`pid`,
   `launch`); `dir` on `net.packets`; `net.iface`'s `mcast`/`missed`;
   `net.drops`' `stack` emit; `net.capture`'s new filter fields.

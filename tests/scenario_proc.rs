@@ -63,7 +63,7 @@ fn stderr(output: &Output) -> String {
 /// What this machine lacks for `backend` of `source`, as `omn list` probes it
 /// -- the requirements it calls missing -- or `None` when nothing it needs is
 /// missing here. A pinned backend is refused for the machine before
-/// the build (`DECISIONS.md`, "one order for unbuilt and missing"), so which
+/// the build (`docs/DECISIONS.md`, "one order for unbuilt and missing"), so which
 /// refusal a pin earns is this answer's.
 fn lacks_here(source: &str, backend: &str) -> Option<Vec<String>> {
     let listing = omn(&["list", source, "--format", "json"]);
@@ -690,7 +690,7 @@ requests:
 /// is not readable -- this project's own machine -- the walk has always said
 /// "this machine" (exit 1). The pin used to say "this build" (exit 3) for the
 /// same backend, so one request exited by the path that reached it. A pinned
-/// backend is now refused in the chain's order (`DECISIONS.md`, "one order for
+/// backend is now refused in the chain's order (`docs/DECISIONS.md`, "one order for
 /// unbuilt and missing"): the machine's gap first, the build's where the
 /// machine lacks nothing. Ground truth for which this machine is: what
 /// `omn list` probes for the pinned backend.
@@ -1097,7 +1097,7 @@ fn every_request_in_a_session_keeps_the_rate_it_asked_for() {
 
 /// "This machine cannot serve it" exits 1, and not 2.
 ///
-/// `BRIEF.md` defines three answers and three exit codes. Two of the codes used
+/// `docs/dev/BRIEF.md` defines three answers and three exit codes. Two of the codes used
 /// to do the work of three: `src/main.rs` returned `EXIT_REJECTED` when the
 /// resolver found no viable backend, one line after printing a hint saying the
 /// opposite -- "the request is valid; it is this machine that cannot serve it"
@@ -1796,7 +1796,7 @@ fn a_known_number_of_calls_and_an_injected_delay_are_both_reported_as_chosen() {
 /// about the numbers, because `raw_syscalls` fires on everything: a predicate
 /// applied after the fact still pays for every other syscall on the machine. A
 /// filter reported as pushed down and applied in userspace is what
-/// `DECISIONS.md` calls the worst shape a bug takes here, so the claim and the
+/// `docs/DECISIONS.md` calls the worst shape a bug takes here, so the claim and the
 /// run's own account of itself are checked against each other.
 #[test]
 fn the_syscall_filter_the_resolved_file_claims_is_the_one_that_ran() {

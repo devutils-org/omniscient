@@ -348,7 +348,7 @@ and `contention_end`, mainline 6.1 tracepoints, as it carries uprobe-multi
 `sched.runqlat`, `sched.offcpu`, `sched.wakeup`, `sched.switches`' count and
 `cpu.oncpu_time`'s -- beside the tracepoint prototypes they read, which the
 probes already ask by name; the version was the floor's leftover
-(`DECISIONS.md`, "The kernel floor": "they keep 6.1 until a cell says
+(`docs/DECISIONS.md`, "The kernel floor": "they keep 6.1 until a cell says
 otherwise").
 
 **Fix.** The version is gone from the six; the prototypes stay. On

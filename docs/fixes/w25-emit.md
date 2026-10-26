@@ -85,7 +85,7 @@ Branch `feat/w25-emit`. Done sequentially by one agent.
 `--test aggregation --test join_engine --test encoders --test cli --test
 recorder --test catalog_model`; clippy; fmt.
 
-## Decision lines for `DECISIONS.md`
+## Decision lines for `docs/DECISIONS.md`
 
 - Keys read off an attribute are derived keys: a family adds the attribute
   and the key's name to `keys:`, and needs no `KeyValue` variant.

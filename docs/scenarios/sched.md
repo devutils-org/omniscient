@@ -75,7 +75,7 @@ Runtime: 0.26 s.
 
 **This family has no backend comparison to make.** Each of its five collected
 sources has exactly one implemented backend out of twenty-three declared, so
-there is no second road. That is stated rather than faked, as `BRIEF.md` asks.
+there is no second road. That is stated rather than faked, as `docs/dev/BRIEF.md` asks.
 
 What there is instead is two of each other kind of comparison.
 
@@ -598,7 +598,7 @@ running `make check` often enough to notice.
 ### 1. `sched.offcpu --emit hist` renders a distribution that is not one — **half fixed**
 
 Still true as written. What changed in the fifth wave is that the emit layer can
-now be *told*, and the diagnosis `BRIEF.md` carried is ruled out; both are at the
+now be *told*, and the diagnosis `docs/dev/BRIEF.md` carried is ruled out; both are at the
 end of this entry.
 
 The workload performed 19 951 blocks of a few microseconds each. The histogram
@@ -643,7 +643,7 @@ out of the drain. Until then `hist` on this source should carry a degradation
 of its own or be refused, because a reader has no way to tell the two
 histograms apart.
 
-**What landed, and what did not.** `BRIEF.md` routed this to the emit layer with
+**What landed, and what did not.** `docs/dev/BRIEF.md` routed this to the emit layer with
 the guess that the cause is "the one `emit::WEIGHT_ATTR` was added for, in a
 source that does not yet carry it". It is not, and the arithmetic says so:
 `WEIGHT_ATTR` means *this value occurred N times*, which is true of a
@@ -904,7 +904,7 @@ error: `sched.switches` was requested without an emit
 exit 2
 ```
 
-`BRIEF.md`'s table has one meaning for each code: 2 is "the request cannot mean
+`docs/dev/BRIEF.md`'s table has one meaning for each code: 2 is "the request cannot mean
 anything" and 1 is "this machine cannot serve it". A missing `--mode` is the
 first and reports the second, so a script that branches on the exit code sends
 its reader to look at the machine. The missing emit is raised by the validator
@@ -965,14 +965,14 @@ a reader fixing a session learns about its problems one run at a time.
 ```
 $ omn sched.switches --mode count --emit summary -- /bin/true
 error: cannot start collecting `sched.switches`: `count` mode for `pmu:sw` needs
-the perf layer's counting support (see STATE.md); ask for `--mode trace` to get
+the perf layer's counting support (see docs/dev/STATE.md); ask for `--mode trace` to get
 one event per switch
 exit 1
 ```
 
 The message is exactly right and the exit code is exactly wrong: nothing about
 this machine is missing, and exit 3 is the code for "this build does not
-implement it". `STATE.md` already lists this under *the smaller ones* — *"an
+implement it". `docs/dev/STATE.md` already lists this under *the smaller ones* — *"an
 exit code for 'valid, but this mechanism is not built' — it returns 1, like a
 real failure; `NoCollector` returns 3 and this belongs with it"* — and this is
 the `sched` instance of it. The test here checks the message and leaves the
@@ -1213,7 +1213,7 @@ and is filed with stream cpu.
 
 ## What this family contributes to a crossing
 
-One line, as `BRIEF.md` asks:
+One line, as `docs/dev/BRIEF.md` asks:
 
 **`sched` knows where the time went that `cpu` cannot see, and the key that
 carries it is `task`.** A cpu profile accounts for cycles; `sched.offcpu`

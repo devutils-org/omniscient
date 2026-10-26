@@ -1,13 +1,13 @@
 # The twenty-first wave, stream docs
 
 The docs requests of every w20 handoff, and the GPU bench's schedule
-(`BRIEF.md`, "docs -- the documents and the bench's schedule"). Branch
+(`docs/dev/BRIEF.md`, "docs -- the documents and the bench's schedule"). Branch
 `feat/w21-docs`, on `main` at `156f1c5`.
 
 ## What landed
 
 - **`178e17e` docs(catalog): the rows the twentieth wave's handoffs asked
-  for.** `CATALOG.md`:
+  for.** `docs/CATALOG.md`:
   - `cpu.oncpu_time`: the `bpf:raw_tp` backend on `sched_stat_runtime`
     first in the row, poll only, one series per thread; a caveat that says
     so, that `trace` stays on `bpf:tp`, and that the source emits `raw`
@@ -43,7 +43,7 @@ The docs requests of every w20 handoff, and the GPU bench's schedule
 - **`a5b1062` docs(proc): `proc-not-built` exits 3, or 1 where tracefs is
   root-only.** `docs/scenarios/proc.md` lines 36, 161 and the "exit 3 again"
   paragraph (which claimed "3 everywhere"), and `docs/families/proc.md`,
-  now say what `GUIDE.md` says (`w20-docs.md`).
+  now say what `docs/GUIDE.md` says (`w20-docs.md`).
 - **`fb03a7e` fix(examples): the vertical server holds 1024 requests, and
   refuses a longer plan.** `MAX_PLAN` 64 -> 1024, the value
   `tests/view_fixtures/record.sh` seds in; a plan over it now exits 2 with
@@ -91,7 +91,7 @@ carries no `MODEL_BUDGET` or `budget is required` fallback.
   (`src/triage/latency.rs`, `Job`: "they may be more"), so `gcc-shell`'s
   pass is a loosened comparison, not a fix in triage; see "Review".
 - Reasoned: the CATALOG rows against `catalog/*.yaml`, read entry by entry;
-  no test reads `CATALOG.md`'s rows.
+  no test reads `docs/CATALOG.md`'s rows.
 
 ## The cases run
 
@@ -160,9 +160,9 @@ machine):
 
 - **record (`tests/view_fixtures/record.sh`)**: drop the `sed` that raises
   `MAX_PLAN`; `examples/vertical/server.c` holds 1024 now.
-- **coordinator (`docs/open-findings.md`, `STATE.md`)**: the unwind second
+- **coordinator (`docs/open-findings.md`, `docs/dev/STATE.md`)**: the unwind second
   shape is documented as aliasing, off the tally; `cheaper_equivalents`
-  (`STATE.md` line 1247) is gone from `tests/bench_bands.rs`; every w20 docs
+  (`docs/dev/STATE.md` line 1247) is gone from `tests/bench_bands.rs`; every w20 docs
   request above is landed.
 - **triage (`src/triage/latency.rs`, `Job`)**: for `make-sqlite`'s critical
   path the job overshoots by the build's other work (7.1 s against 5.3 s).

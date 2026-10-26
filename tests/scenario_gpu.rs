@@ -715,7 +715,7 @@ fn every_session_in_the_family_validates_against_the_catalog() {
 /// or missing code, and only one of the two is worth waiting for. Where the
 /// machine lacks something the backend needs, the hardware is the first answer
 /// (exit 1), as the walk gives it; where it lacks nothing, the code is (exit 3)
-/// -- the chain's order (`DECISIONS.md`, "one order for unbuilt and missing").
+/// -- the chain's order (`docs/DECISIONS.md`, "one order for unbuilt and missing").
 #[test]
 fn forcing_a_backend_this_build_does_not_implement_names_it_in_the_chains_order() {
     let _together = shared();

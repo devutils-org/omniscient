@@ -344,7 +344,7 @@ Filed in `docs/open-findings.md` under stream U, with signatures:
   now.
 - **the coordinator**: one line in `src/bpf/mod.rs` (`pub mod usdt;`), which no
   stream owns and a new file in `src/bpf/` cannot do without; rows for the seven
-  `runtime-usdt-*.yml` sessions in `examples/README.md` and `GUIDE.md`, which is
+  `runtime-usdt-*.yml` sessions in `examples/README.md` and `docs/GUIDE.md`, which is
   the one red test (`cli::the_session_indexes_hold_exactly_the_sessions_on_disk`)
   on this branch; and `docs/scenarios/runtime.md`, whose "what cannot be
   verified here" section is now out of date.

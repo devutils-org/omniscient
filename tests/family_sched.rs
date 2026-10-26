@@ -1110,7 +1110,7 @@ fn a_machine_wide_run_that_asked_for_no_stacks_does_not_symbolise_the_machine() 
 /// The classic tracepoint path is never the first thing tried for an event a
 /// raw tracepoint reaches just as well.
 ///
-/// `DECISIONS.md` settled the ordering: `bpf:raw_tp` has strictly fewer
+/// `docs/DECISIONS.md` settled the ordering: `bpf:raw_tp` has strictly fewer
 /// requirements than `bpf:tp` and goes ahead of it. What makes that more than a
 /// preference on this machine is finding 15 -- a `bpf:tp` requirement probes as
 /// *available* when only its directory is readable, so a chain that leads with

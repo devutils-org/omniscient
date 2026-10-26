@@ -4,7 +4,7 @@ Branch `feat/w25-power`. Done sequentially by one agent, in the main checkout.
 
 ## Outside the owned files, said first
 
-- `CATALOG.md`: the `power.cstate` and `power.wakeups` rows, a
+- `docs/CATALOG.md`: the `power.cstate` and `power.wakeups` rows, a
   `power.process_energy` row.
 
 ## What landed
@@ -61,7 +61,7 @@ Nothing of the stream's list.
 `--lib collect::power`, `--test family_power --test scenario_power --test
 cli --test catalog_model --test lazy`, clippy, fmt.
 
-## Decision lines for `DECISIONS.md`
+## Decision lines for `docs/DECISIONS.md`
 
 - A per-process energy number is its own source, `power.process_energy`,
   whose every event says it is an estimate; `power.energy` keeps refusing a

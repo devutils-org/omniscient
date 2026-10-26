@@ -1,4 +1,4 @@
-//! The portability matrix: `ROADMAP.md`'s two test-strategy rows nobody had
+//! The portability matrix: `docs/ROADMAP.md`'s two test-strategy rows nobody had
 //! built, *Portability* (a kernel matrix: the floor, an LTS, the host's own)
 //! and *Degradation* (no privileges, no BTF, no tracefs).
 //!
@@ -680,7 +680,7 @@ fn configuration_reasons(sweep: &Sweep) -> Vec<String> {
     out
 }
 
-/// The kernel floor is 6.1 (`DECISIONS.md`): below it, every requirement
+/// The kernel floor is 6.1 (`docs/DECISIONS.md`): below it, every requirement
 /// written `kernel>=6.1` is missing and says which kernel it found.
 fn floor_refused_by_name(sweep: &Sweep) -> Vec<String> {
     let Some(kernel) = sweep.kernel() else {

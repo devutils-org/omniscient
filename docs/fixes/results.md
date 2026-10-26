@@ -294,7 +294,7 @@ An adversarial review of the branch raised seven points. What each came to:
 
 None: this stream added no session.
 
-## For `DECISIONS.md`
+## For `docs/DECISIONS.md`
 
 - **A run's windows close at one instant before the first collector is
   stopped**, and a detached one just before its own stop. Rather than one per

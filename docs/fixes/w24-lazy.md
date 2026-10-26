@@ -1,13 +1,13 @@
 # The twenty-fourth wave, stream lazy
 
-The lazy mode, as `BRIEF.md` decided it: a family name where a source is
+The lazy mode, as `docs/dev/BRIEF.md` decided it: a family name where a source is
 expected composes that family's default, catalog data in the family's own
 file, in the band `--cost low|med|high` picks. Every family has a default or
 says why not, each run on this machine on a workload of that family's shape
 and checked against something independent of `omn`.
 
 Branch `feat/w24-lazy`: `5142aa5` (the mode, the defaults, the loader, the
-tests) and the commit carrying `docs/lazy.md`, the `DECISIONS.md` line and
+tests) and the commit carrying `docs/lazy.md`, the `docs/DECISIONS.md` line and
 this handoff. No shared layer was changed beyond the `default:` block of
 `src/catalog.rs` the brief gives this stream.
 
@@ -68,7 +68,7 @@ this handoff. No shared layer was changed beyond the `default:` block of
   family's with no selection, one family's with `omn list <family>`, nothing
   for a source. No line starts with a source id, so the tests that read the
   table's rows by their first word are untouched.
-- **`docs/lazy.md`**, for a beginner; **`DECISIONS.md`**, "Settled in the
+- **`docs/lazy.md`**, for a beginner; **`docs/DECISIONS.md`**, "Settled in the
   twenty-fourth wave: the lazy mode".
 - **`tests/lazy.rs`**, 12 tests: the composition and its long form; every
   long form printed, typed back, asks for the same requests (cpu, mem, io,
@@ -141,9 +141,9 @@ mem --budget 1% -- python3 mem.py` stopped the run on its first 100 ms poll
    head of its chain, with `fs:proc:statm` free below it) and both gpu
    sources (`vendor:nvml`) declare `med` at `--cost low`. Choosing the
    backend by band would be the resolver's change; the note says it today.
-4. **`man/omn.1` and `CATALOG.md`** do not yet describe the mode or the
+4. **`man/omn.1` and `docs/CATALOG.md`** do not yet describe the mode or the
    `default:` item: the coordinator's at the end of the wave, from
-   `docs/lazy.md` and the `DECISIONS.md` line.
+   `docs/lazy.md` and the `docs/DECISIONS.md` line.
 
 ## Needs from another stream
 
@@ -172,7 +172,7 @@ mem --budget 1% -- python3 mem.py` stopped the run on its first 100 ms poll
 None: every run above needed only the capabilities `make` grants and
 `sudo -n turbostat`.
 
-## Decision lines for `DECISIONS.md`
+## Decision lines for `docs/DECISIONS.md`
 
 Written by this stream, as the brief says: "Settled in the twenty-fourth
 wave: the lazy mode".

@@ -1,4 +1,4 @@
-# Family `io` (block + filesystem) — see CATALOG.md section 4.
+# Family `io` (block + filesystem) — see docs/CATALOG.md section 4.
 # Three layers must never be conflated: syscall latency (what the application
 # suffers), block latency (what the device does), FS latency (journal, locks,
 # allocation). The gap between them is the diagnosis.

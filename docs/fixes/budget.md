@@ -276,7 +276,7 @@ red, and why:
 
 None: this stream added no session.
 
-## For `DECISIONS.md`
+## For `docs/DECISIONS.md`
 
 1. **The cost of a measurement includes what the collector spends inside the
    target**, and a mechanism that runs there without an account is *unknown*,
@@ -303,8 +303,8 @@ None: this stream added no session.
 
 ## For the coordinator
 
-- `CATALOG.md` §12's mode × emit matrix: `count` now accepts `topk`.
-- `CATALOG.md` / `catalog::Cost`: `extreme` is the only band past 20 %, and two
+- `docs/CATALOG.md` §12's mode × emit matrix: `count` now accepts `topk`.
+- `docs/CATALOG.md` / `catalog::Cost`: `extreme` is the only band past 20 %, and two
   measured backends sit between 20 % and 10x.
 - The `no;` prefix in `impl Display for Placed` (`src/resolve.rs`) can go.
 - `docs/bench.md`'s heap and mutex rows predate the ring; the next bench run

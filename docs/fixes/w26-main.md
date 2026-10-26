@@ -1,6 +1,6 @@
 # w26 main — the commands in the library
 
-Phase 0a of the twenty-sixth wave (`BRIEF.md`, "0a · `main`").
+Phase 0a of the twenty-sixth wave (`docs/dev/BRIEF.md`, "0a · `main`").
 
 ## Landed
 

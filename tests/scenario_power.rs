@@ -17,7 +17,7 @@
 //! - Every core spinning is more silicon switching than no core spinning, so a
 //!   loaded window must cost visibly more joules than an idle one.
 //!
-//! Beside those sit the four classes `BRIEF.md` names: the capability sweep
+//! Beside those sit the four classes `docs/dev/BRIEF.md` names: the capability sweep
 //! over every axis the catalog declares, the backend comparison through
 //! `--backend force:`, the loss path, and the three refusals. What this machine
 //! cannot serve is skipped by name, never silently, and
@@ -66,7 +66,7 @@ fn stderr(output: &Output) -> String {
 /// What this machine lacks for `backend` of `source`, as `omn list` probes it
 /// -- the requirements it calls missing -- or `None` when nothing it needs is
 /// missing here. A pinned backend is refused for the machine before the build
-/// (`DECISIONS.md`, "one order for unbuilt and missing"), so which refusal a
+/// (`docs/DECISIONS.md`, "one order for unbuilt and missing"), so which refusal a
 /// pin earns is this answer's.
 fn lacks_here(source: &str, backend: &str) -> Option<Vec<String>> {
     let missing: Vec<String> = missing_here(source, backend)
@@ -1528,7 +1528,7 @@ fn forced_watts(backend: &str) -> Option<f64> {
 /// aperf/mperf route into `power.freq`. A reader who pins one of them is
 /// asking "what would this cost through the other road?", and has to be told
 /// which road is missing rather than handed a failure. Which absence is named
-/// first is the chain's order (`DECISIONS.md`, "one order for unbuilt and
+/// first is the chain's order (`docs/DECISIONS.md`, "one order for unbuilt and
 /// missing"): the machine's where it lacks something the backend needs
 /// (exit 1, as the walk says it), the build's where it lacks nothing (exit 3).
 #[test]
@@ -1891,7 +1891,7 @@ fn a_request_that_cannot_mean_anything_names_what_it_cannot_mean() {
 ///
 /// The build's refusal is reached through a pinned backend this build has no
 /// collector for and this machine lacks nothing for: a pinned backend that
-/// lacks something here is the machine's first (`DECISIONS.md`, "one order for
+/// lacks something here is the machine's first (`docs/DECISIONS.md`, "one order for
 /// unbuilt and missing"), so which one qualifies is asked of `omn list`, not
 /// written down.
 #[test]

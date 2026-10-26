@@ -1,7 +1,7 @@
 # The flight recorder
 
-Stream R of the twelfth wave: `STATE.md`'s "What remains", item 1, as
-`DECISIONS.md` settled it -- *a session whose duration is until a predicate
+Stream R of the twelfth wave: `docs/dev/STATE.md`'s "What remains", item 1, as
+`docs/DECISIONS.md` settled it -- *a session whose duration is until a predicate
 fires, whose buffers are the bounded rings and maps it already has, and whose
 output is one document per trigger*. A trigger and a retention bound, not a new
 kind of program. Also here: stream E's `collect::Unserved`, stream M's JSON
@@ -93,7 +93,7 @@ where a session is loaded, where a command line is built, after `--duration`
 overrides a file, and after resolution for the fields; `collect::Run::recorder`
 refuses the same shapes for a caller that built its requests itself.
 
-## The mechanism, for `DECISIONS.md`
+## The mechanism, for `docs/DECISIONS.md`
 
 | Decision | Choice | Reason |
 |---|---|---|
@@ -283,7 +283,7 @@ lib tests open theirs in parallel; it passed in the run below. Then one
 
 ## Index rows
 
-For `examples/README.md` and `GUIDE.md` -- the session-index test in
+For `examples/README.md` and `docs/GUIDE.md` -- the session-index test in
 `tests/cli.rs` is red on this branch until they are added:
 
 ```
@@ -291,7 +291,7 @@ For `examples/README.md` and `GUIDE.md` -- the session-index test in
 | `record-until-it-never-fires.yml` | What does a recording whose trigger never fires leave behind? No document, the run ended at its longest, and what it read counted as in none. |
 ```
 
-## For `DECISIONS.md`
+## For `docs/DECISIONS.md`
 
 The table under "The mechanism" above, as "Settled in the twelfth wave: the
 flight recorder". In one paragraph: a recording is a mode of a session -- a

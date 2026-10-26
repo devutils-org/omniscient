@@ -299,14 +299,14 @@ The review round (seven findings) and what became of each:
 5. **"Refused" in the brief.** The code counts another namespace's key
    unmatched or uncredited and labels it, which is right for a `--system` run.
    The decision lines below say "counted unmatched, labelled by namespace",
-   not "refused". `BRIEF.md` is the coordinator's.
+   not "refused". `docs/dev/BRIEF.md` is the coordinator's.
 6. **`examples/join-iface-qdisc.yml` and `docs/families/join.md:39`** still
    describe the identity as the index alone. Neither file is this stream's:
    both are filed below.
 7. **No test that a `count` run's rows carry no `enclosing_ns`.** Added:
    `collect::mem::stall::a_counted_row_carries_no_enclosing_window`.
 
-## For DECISIONS.md
+## For docs/DECISIONS.md
 
 - **The network namespace beside an interface's index** (moves from "Open"
   to the settled table, replacing "What an interface is"):

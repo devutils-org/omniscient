@@ -22,7 +22,7 @@
 //! machine's writes. Everything else the predicate says -- `comm`, `pid` -- is
 //! applied here over the drained rows, and the notes say which ran where,
 //! because a filter reported as pushed down and applied in userspace is the
-//! shape `DECISIONS.md` calls the worst a bug takes in this project.
+//! shape `docs/DECISIONS.md` calls the worst a bug takes in this project.
 
 use std::time::Duration as StdDuration;
 
@@ -345,7 +345,7 @@ impl SyscallCollector {
     ///
     /// Deliberately still a histogram. The other shape `count` could take is
     /// one mean per `(task, syscall)`, and a mean over a distribution this
-    /// skewed is the thing `STATE.md` records as hiding exactly what it was
+    /// skewed is the thing `docs/dev/STATE.md` records as hiding exactly what it was
     /// read to find -- a task whose `futex` calls are mostly instant and
     /// occasionally forty milliseconds has no meaningful average.
     fn counted_events(&mut self, seq: u64) -> Vec<Event> {

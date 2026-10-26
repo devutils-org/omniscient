@@ -1,4 +1,4 @@
-# Family `sched` (scheduling and synchronization) — see CATALOG.md section 6.
+# Family `sched` (scheduling and synchronization) — see docs/CATALOG.md section 6.
 # The most underrated family: it measures the time spent NOT running, which is
 # invisible to every CPU profiler. sched.wakeup is the correlator's WAKEUP join
 # mechanism and a dependency of every other family.
@@ -68,7 +68,7 @@
     # The same two events, attached the way this tool attaches: by name,
     # through BPF_RAW_TRACEPOINT_OPEN, against the kernel's own BTF. The
     # classic path below needs a numeric id out of tracefs and sees exactly
-    # the same events, which is the ordering DECISIONS.md settled.
+    # the same events, which is the ordering docs/DECISIONS.md settled.
     #
     # Both are bucketed in the kernel and drained on a tick, so one event is a
     # `(task, bucket) -> count` row standing for every wait in it: `drained`
@@ -123,7 +123,7 @@
     # Same events as `bpf:tp`, attached the way this tool attaches: through
     # BPF_RAW_TRACEPOINT_OPEN, which needs a name and BTF where the classic
     # path needs a numeric id out of tracefs. Ordered ahead of it for the
-    # reason DECISIONS.md settled: strictly fewer requirements, same events.
+    # reason docs/DECISIONS.md settled: strictly fewer requirements, same events.
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "raw_tracepoint:sched_wakeup(task_struct *)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)"], cost: med, drained: true,
        degraded: "user stacks only: the kernel side of a block is always the scheduler, and what it was waiting for is the task state"}
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "bpf"], cost: med, drained: true,
@@ -210,7 +210,7 @@
     # First for every target it serves, because on the question both answer --
     # how many times a task left the cpu -- an inherited counter is exact and
     # free, and a program costs a run on every switch of the machine
-    # (DECISIONS.md, the fourteenth wave). It follows threads and cpus, and
+    # (docs/DECISIONS.md, the fourteenth wave). It follows threads and cpus, and
     # nothing inside a cgroup.
     - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_CONTEXT_SWITCHES"], cost: free,
        targets: {system: native, pid: native, tid: native, cpu: native, launch: native},

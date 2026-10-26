@@ -158,7 +158,7 @@ gets a different convention in each.
 *Decided, and half applied.* The runner already closes the window: it reads
 every collector and only then asks whether the run is over, so the last round
 of reads lands at the end. `io` and `power` are right, `net/dev.rs` is not, and
-`DECISIONS.md` now says so under "the edges of a run". `Collector::stop` states
+`docs/DECISIONS.md` now says so under "the edges of a run". `Collector::stop` states
 the contract and `the_runner_closes_the_window` measures the leftover the
 convention rests on — 48 µs of a 100 ms tick. The one-line change to
 `net/dev.rs` is asked for below.
@@ -313,7 +313,7 @@ first.
 Bucket 0 holds the values below one and bucket *k* holds `[2^(k-1), 2^k)` —
 what `bpf_log2l` plus an array map computes, one index and one atomic increment
 per event, no record. A prettier layout would have to be abandoned when
-`--budget` moves the aggregation in-kernel (section 5, and `STATE.md`'s item on
+`--budget` moves the aggregation in-kernel (section 5, and `docs/dev/STATE.md`'s item on
 the budget), and two runs of the same source across that change would not be
 comparable. The validator already warns that `trace` with `hist` aggregates in
 userspace without a budget; that warning is now about something real.
@@ -406,7 +406,7 @@ One call per rule in `check_joins`, pushing the error's own text as a
 Found while giving `sched.offcpu` a backend it could reach. The entry declared
 `bpf:tp:stacks` and `bpf:tp`, both of which need a numeric event id out of
 `/sys/kernel/tracing` — which is mounted and unreadable at uid 1000 on this
-machine and, per `DECISIONS.md`, on most. So the source was unreachable *with*
+machine and, per `docs/DECISIONS.md`, on most. So the source was unreachable *with*
 `CAP_BPF`, and the resolver said `tracefs` three times.
 
 That is not one entry's oversight. Across the catalog, **37 sources declare an
@@ -426,7 +426,7 @@ attach with a name and need no tracefs at all:
 | `cpu` | oncpu_time |
 | `gpu` | job — the exception: `drm_run_job` and `drm_sched_process_job` are module tracepoints and are absent from `vmlinux` BTF, so they genuinely need the classic path |
 
-`DECISIONS.md` already settled the rule — "`bpf:raw_tp` has strictly fewer
+`docs/DECISIONS.md` already settled the rule — "`bpf:raw_tp` has strictly fewer
 requirements than `bpf:tp` and is ordered ahead of it" — and one entry,
 `sched.wakeup`, was written to it. The rest were written before it. Adding the
 backend is data, not code: `{id: "bpf:raw_tp", requires: ["bpf", "btf",
@@ -902,7 +902,7 @@ as a second one.
 ### To `src/collect/mem/page_faults.rs` and `src/collect/sched/switches.rs`
 
 `Losses::throttle(reason)` now exists and increments `Losses::throttled`, a
-count kept apart from `dropped` (see `DECISIONS.md`, "the edges of a run").
+count kept apart from `dropped` (see `docs/DECISIONS.md`, "the edges of a run").
 
 - `page_faults.rs:109` has `Record::Throttle { .. } => {}`. A throttled run of
   `mem.faults` reads as complete today. It should call
@@ -966,7 +966,7 @@ pub enum Unit {
 `gpu.power` reports the device's energy counter because there is no unit for an
 instantaneous draw, and `power.energy` has the same shape. Energy is the right
 thing to *collect* -- integrating a sampled draw overstates it by a third at
-20 Hz, which `DECISIONS.md` settles -- but a reader asking "how much power is
+20 Hz, which `docs/DECISIONS.md` settles -- but a reader asking "how much power is
 this drawing" wants watts, and `rate` over joules is exactly that. The unit is
 the missing half.
 
@@ -985,7 +985,7 @@ Two runs are comparable only if they were taken on the same device under the
 same driver, and the text dump is where a reader checks that before trusting a
 comparison.
 
-### To whoever owns `CATALOG.md`
+### To whoever owns `docs/CATALOG.md`
 
 Line 418 of the global options table still reads:
 
@@ -1053,7 +1053,7 @@ Both are additive: the series key is an event's first key, so an existing
 collector that adds a key at the end of its list changes nothing until it
 chooses to lead with it.
 
-### For the coordinator: `STATE.md` items 3 and 4 are done
+### For the coordinator: `docs/dev/STATE.md` items 3 and 4 are done
 
 "What remains, in the order it is worth doing" lists *Per-backend targets and
 filter fields* third and *Keys for a device and a cpu* fourth. Both are closed
@@ -1062,9 +1062,9 @@ and the loader all enforce it. The second is closed as vocabulary only -- the
 variants and the catalog declarations exist, the collectors that produce them do
 not -- so it moves rather than disappears, into the per-family work named above.
 
-### From whoever owns `CATALOG.md`: §1 documents a schema that has grown
+### From whoever owns `docs/CATALOG.md`: §1 documents a schema that has grown
 
-`CATALOG.md` §1 is the written schema for a catalog entry, and its example is
+`docs/CATALOG.md` §1 is the written schema for a catalog entry, and its example is
 `io.latency` -- one of the entries this change touched. It now describes less
 than the loader accepts. Two optional keys are missing from it, and the sentence
 below the example needs one more line. Ready to apply:
@@ -1187,7 +1187,7 @@ cat: .../id: Permission denied
 
 So the probe says **available**, the resolver selects the backend, the run
 launches its target, attaches its other collectors, and only then discovers it
-cannot read the number. That is precisely the trap `BRIEF.md` names for this
+cannot read the number. That is precisely the trap `docs/dev/BRIEF.md` names for this
 stream: *"a `bpf:tp` backend that needs a file this user cannot read must say so
 as a missing requirement, not fail at attach time."*
 
@@ -1496,7 +1496,7 @@ and the emit layer needs no change at all. `power` and `cpu` will want it too:
 per-node uncore and per-node memory bandwidth have the same shape, and
 `mem.bandwidth`'s uncore backend is package-scoped for the same reason.
 
-This is the same gap `power.cstate` has with `state`, named in `STATE.md`: a
+This is the same gap `power.cstate` has with `state`, named in `docs/dev/STATE.md`: a
 source that produces one measurement per member of a set the key model does not
 know about.
 
@@ -1778,7 +1778,7 @@ multiplies by the rate the request asks for, which makes the declaration
 checkable and the prediction possible before the run; or the band keeps its
 present meaning and says out loud which rate it is a band *at*, which is cheaper
 and leaves `--budget` unable to predict anything in advance. **Belongs to
-whoever owns `catalog.rs` and `CATALOG.md`.** Nothing about the enforcement
+whoever owns `catalog.rs` and `docs/CATALOG.md`.** Nothing about the enforcement
 landed here depends on the answer: it compares against a measurement, not
 against the band.
 
@@ -1835,7 +1835,7 @@ collector, four have two:
 
 So the degradation path has one end-to-end customer in this build, and
 `tests/budget.rs` uses it. That is not an argument against the machinery --
-`STATE.md`'s phase 6 item is *"degrading `trace` to an in-kernel `hist` where
+`docs/dev/STATE.md`'s phase 6 item is *"degrading `trace` to an in-kernel `hist` where
 the budget is exceeded"*, which is a mode degradation rather than a backend one
 and has no producer until stream A's `bpf:tp` lands. It is an argument for
 knowing that the first eBPF chain with a userspace fallback underneath it is
@@ -1936,7 +1936,7 @@ to is the fix; stream C did the same to `cpu.topdown` and did not touch `io`.
 
 `mem.cache_l1`, `mem.cache_llc` and `mem.cache_tlb` are collected, and **not
 from your directory**. They are rows in `src/collect/cpu/counters.rs`'s `SPECS`,
-as `BRIEF.md` says they should be: the mechanism decides who writes a source. If
+as `docs/dev/BRIEF.md` says they should be: the mechanism decides who writes a source. If
 `mem`'s `factories()` grows a line for any of the three there will be two
 factories for one `(source, backend)` pair. Their catalog entries in
 `catalog/mem.yaml` were edited by stream C -- requirements, emits and caveats --
@@ -2086,7 +2086,7 @@ with the emit skipping events that do not carry it and the count of skipped ones
 reaching the output, the way `Filtered` already does for a predicate. An
 aggregate over three of forty events looks exactly like an aggregate over three.
 
-### To whoever owns `CATALOG.md`: the `net.hwts` row
+### To whoever owns `docs/CATALOG.md`: the `net.hwts` row
 
 The prose table says
 
@@ -2254,11 +2254,11 @@ fn write_artifacts(/* ... */ encoded: &[u8]) -> anyhow::Result<()> {
 speedscope file is `.speedscope.json`, because that is what the tools that read
 them open by, and `results.chrome` opens in nothing.
 
-### To whoever owns `README.md` and `DECISIONS.md`
+### To whoever owns `README.md` and `docs/DECISIONS.md`
 
 Both say result formats "report that their encoder is not written". Every
 declared format has one now. `README.md:163` and the "Output formats" row of
-`DECISIONS.md` need the sentence about *why* the mechanism exists -- a format is
+`docs/DECISIONS.md` need the sentence about *why* the mechanism exists -- a format is
 declared before it is written, and the listing says which -- without the claim
 that any format is currently in that state.
 
@@ -2340,12 +2340,12 @@ somewhere to read it from, and `main.rs` would stop printing it separately.
 
 ### To the coordinator
 
-- `ROADMAP.md` phase 6 item 3 and phase 8 are done and unticked. Phase 8's
+- `docs/ROADMAP.md` phase 6 item 3 and phase 8 are done and unticked. Phase 8's
   "self-benchmark" is a session naming one source several times with
   `--backend force:`, not a subcommand.
-- `CATALOG.md`'s flag table says `--budget 2%  overhead budget; the resolver
+- `docs/CATALOG.md`'s flag table says `--budget 2%  overhead budget; the resolver
   degrades and says so`. The resolver does not; the runner does.
-- `STATE.md` item 5, "`--budget` is parsed, explained, and not enforced", is
+- `docs/dev/STATE.md` item 5, "`--budget` is parsed, explained, and not enforced", is
   closed. Findings 15 and 17 are what replaces it.
 
 ### Declared: two edits outside stream E's paths
@@ -2383,7 +2383,7 @@ is sched 9 and three of mem D5's sixteen. One line each:
 // src/collect/sched/switches.rs, in `start`
 other => return Err(collect::not_built(format!(
     "`count` mode for `pmu:sw` needs the perf layer's counting support \
-     (see STATE.md); ask for `--mode trace` to get one event per switch"
+     (see docs/dev/STATE.md); ask for `--mode trace` to get one event per switch"
 ))),
 
 // src/collect/mem/page_faults.rs, in `start`
@@ -2426,7 +2426,7 @@ which is the half this stream could reach; the resolver should not have selected
 it. Every source with a sampling backend it has not implemented and a polling
 fallback it has will do the same thing, so this is not `mem`'s.
 
-### To the coordinator, who owns `man/omn.1` and `GUIDE.md`
+### To the coordinator, who owns `man/omn.1` and `docs/GUIDE.md`
 
 The exit codes changed, and both documents carry the old table. A documented
 contract that has quietly stopped being true is the same kind of lie as a wrong
@@ -2446,13 +2446,13 @@ The request was refused: it cannot mean what it asks for.
 The request is valid and nothing in this build collects it yet.
 ```
 
-`GUIDE.md`, "The refusal — *is the reason the right reason?*": the four-row
+`docs/GUIDE.md`, "The refusal — *is the reason the right reason?*": the four-row
 table now reads 2, **1**, 3, **3**, the fourth row is "a collector was chosen
 and refused a shape this build has not written", and the two paragraphs below it
 that explain which two codes are wrong come out. `docs/fixes/runner.md` has the
 table as it now stands.
 
-Also: `STATE.md` §"What remains", item 1, opens with the two recurring defects —
+Also: `docs/dev/STATE.md` §"What remains", item 1, opens with the two recurring defects —
 "A refusal's exit code does not match its message" and "A poll that cannot keep
 its cadence" — and both are closed.
 
@@ -2683,7 +2683,7 @@ the emit"*: a log2 bucket in the aggregation key, so the kernel counts
 `sched.runqlat` does. When that lands, the row carries `WEIGHT_ATTR` instead and
 `TOTAL_OF_ATTR` comes off; the emit layer needs no further change either way.
 
-**Do not reach for `WEIGHT_ATTR` here**, which is what `BRIEF.md` suggests.
+**Do not reach for `WEIGHT_ATTR` here**, which is what `docs/dev/BRIEF.md` suggests.
 `WEIGHT_ATTR` means *this value occurred N times*, which is true of a `runqlat`
 row and false of this one: weighting a drain of four hundred blocks by four
 hundred reports four hundred measurements at the value of their *sum*, in a
@@ -2855,7 +2855,7 @@ the same collision rather than an active one.
 `cpu.profile` and `sched.switches` do, and the kernel will not inherit it: the
 faults of any thread or child the target starts afterwards are in no number the
 run reports. The other two now say so (`cpu` 1 in `docs/scenarios/cpu.md`);
-this one does not, and `STATE.md` claims it does.
+this one does not, and `docs/dev/STATE.md` claims it does.
 
 The disclosure already exists and needs one caller. Read it at `start`, because
 `stop` closes the event and the notes are gathered after it:
@@ -2902,7 +2902,7 @@ fn a_profile_renders_in_every_format_that_carries_stacks() {
 ```
 
 Stream D of wave five did not make the change: the scenario does not name a
-defect that stream fixed, and the seam in `BRIEF.md` is narrower than that.
+defect that stream fixed, and the seam in `docs/dev/BRIEF.md` is narrower than that.
 
 ---
 
@@ -3184,7 +3184,7 @@ interval 3600 s, slack 360 s, uptime 3483 s
 
 Two unit tests of `mem.heap.live` assert that a second sample an hour apart
 publishes nothing, and they **pass on a machine that has been up for more than
-an hour and fail on one that has not**. That is the shape `STATE.md` warns about
+an hour and fail on one that has not**. That is the shape `docs/dev/STATE.md` warns about
 in the other direction: a test asserting what the machine was doing. Here the
 test was right and the code was wrong, and the machine decided which of them was
 visible.
@@ -3262,7 +3262,7 @@ and names the catalog change that would settle it.
 `scenario_power` failed differently and is the most interesting of the six. Its
 sweep classifies every answer by exit code, and its constant for exit 1 was
 still documented as *"usage, or a failure while running"*, with a note that
-`BRIEF.md` asks for "cannot mean anything" and "this machine cannot serve it" to
+`docs/dev/BRIEF.md` asks for "cannot mean anything" and "this machine cannot serve it" to
 be told apart and *"today they are not"*. They were told apart — stream A of the
 fifth wave did exactly that, and "no viable backend" moved from 2 to 1. The
 scenario never noticed, because every `power` source resolved on this machine
@@ -3275,7 +3275,7 @@ as an assertion, something that was true of this machine on the day it was
 written: that tracefs could be probed loosely, that a chain would reach its
 expensive backend, that exit 1 had one sentence. None of them is a test of the
 tool that failed; every one is a test of the machine that succeeded for a while.
-`STATE.md` already records the rule that catches this — *assert the separation
+`docs/dev/STATE.md` already records the rule that catches this — *assert the separation
 rather than a calibrated threshold* — and the six extend it: **where a tool has
 several honest answers, a test must either assert all of them or state which
 machine it is asserting.**
@@ -3388,7 +3388,7 @@ error: [net.tcp.rtt #1] mode `poll` cannot produce `hist`
 ```
 
 That closes the largest opening there was, and it was closed for a different
-reason: `CATALOG.md` §12 refuses it because *a histogram of a polled gauge is a
+reason: `docs/CATALOG.md` §12 refuses it because *a histogram of a polled gauge is a
 histogram of when the poller happened to look*, which is a property of the tick
 and not of the program. The same sentence is the coordinated-omission argument,
 written before anyone here used the term. A late tick in a `timeline` is
@@ -3402,7 +3402,7 @@ Both produce `hist`, and both lose events in the way that biases:
 - **A sampler that is throttled** loses samples while the kernel declines to
   deliver, and `kernel.perf_event_max_sample_rate` is reached exactly when the
   event rate is highest. `Losses::throttled` counts the throttles, and
-  `DECISIONS.md` already states the honest half of this -- *"how many events
+  `docs/DECISIONS.md` already states the honest half of this -- *"how many events
   happened inside that while is not recorded anywhere"*, so a throttled run says
   it cannot tell how much it lost.
 - **A traced source that drops** loses ring-buffer events under pressure, which
@@ -3428,7 +3428,7 @@ the fact:
   missing events are the ones from the busiest moments, so **every percentile is
   a lower bound**, never an estimate.
 - Where the count of missing events is unknown -- the throttled case -- it says
-  that instead of a fraction, which is the answer `DECISIONS.md` already chose
+  that instead of a fraction, which is the answer `docs/DECISIONS.md` already chose
   for the loss line.
 
 **Belongs to whoever owns `src/emit.rs` and `src/render.rs`.** It is a defect of
@@ -3522,7 +3522,7 @@ Finding 37 is closed. `src/emit.rs` computes a `Shortfall` and carries it on
 no encoder change at all. `docs/families/emit.md` is the write-up.
 
 **The one thing outside the stream's file set.** The finding says the defect
-"belongs to whoever owns `src/emit.rs` and `src/render.rs`", and `BRIEF.md`
+"belongs to whoever owns `src/emit.rs` and `src/render.rs`", and `docs/dev/BRIEF.md`
 gave stream F those two files. `src/render.rs` renders requests, listings and
 refusals; it does not render results. `src/encode.rs` does, and `hist_text` is
 in it. So the file list names the wrong second file, and the text rendering of
@@ -3542,7 +3542,7 @@ declared rather than hidden.
 A run that dropped events understates its `rate`, its `topk` totals and its
 `stack` weights by exactly the same one-sided amount, and for the same reason:
 the records a ring drops are the ones from the busiest moment. Finding 37,
-`BRIEF.md` and `STATE.md` all scope themselves to `hist`, `summary` and
+`docs/dev/BRIEF.md` and `docs/dev/STATE.md` all scope themselves to `hist`, `summary` and
 percentiles, so stream F marked those three and left the others alone rather
 than widening a scope three documents had agreed.
 
@@ -3654,7 +3654,7 @@ at all and which grows every release.
 
 ### 4. In `catalog/io.yaml`: the glob that `io.readahead` requires
 
-`BRIEF.md` gives stream A the decision and the catalog to stream nobody, so the
+`docs/dev/BRIEF.md` gives stream A the decision and the catalog to stream nobody, so the
 decision is here and the edit is the coordinator's. `io.readahead`'s first
 backend is
 
@@ -4005,7 +4005,7 @@ Measured on the development machine, one second, every process:
 ```
 
 The same second through a streaming program is 31 451 ring records. The cost of
-the measurement would grow with the workload, which is the shape `STATE.md`
+the measurement would grow with the workload, which is the shape `docs/dev/STATE.md`
 warns about, and the numbers would begin describing a machine running `omn`.
 `src/bpf/runqlat.rs`'s `(key, bucket) -> count` with an unrolled log2 is what
 makes it 5 015 rows instead, and `emit::WEIGHT_ATTR` is what makes them count
@@ -4462,7 +4462,7 @@ closely at it.
 The suggestion was LIKWID's model — a small setuid daemon holding the
 privileges, rather than the whole tool running as root.
 
-`DECISIONS.md` settled this and the reason still holds: `CAP_BPF` +
+`docs/DECISIONS.md` settled this and the reason still holds: `CAP_BPF` +
 `CAP_PERFMON` on the binary, *"an unprivileged run is refused rather than served
 by a backend that answers a different question. This keeps one chain shape to
 reason about and to test."* A daemon is a third privilege shape, not a second,
@@ -4510,7 +4510,7 @@ settings are not comparable and nothing would have said why.
 Dynamic binary instrumentation. `Cost::Extreme` is documented as *"replay or
 dynamic binary instrumentation"* while the accepted boundaries call DBI
 *"outside the kernel-level core"* — a band reserved for a mechanism the
-boundaries exclude. `DECISIONS.md` now carries it as an open line with the three
+boundaries exclude. `docs/DECISIONS.md` now carries it as an open line with the three
 things that make it unlike any other backend: it is exclusive with the machine,
 its clock is a different domain rather than an uncertain one, and it would need
 a `Determinism` the enum refuses to have.
@@ -4688,7 +4688,7 @@ with `two collectors disagree about OMN_HEAP_FD` and **exit 2**.
 
 - `CollectError::ConflictingEnvironment` is classed `Whose::Request`. The
   request validates and means something; the build cannot serve it. Per
-  `DECISIONS.md` ("Valid, and not built is exit 3") it should be
+  `docs/DECISIONS.md` ("Valid, and not built is exit 3") it should be
   `Whose::Build`, whichever collectors disagree.
 - The real fix is for every preload collector of one launch to share one pipe:
   a `HeapPrepared` for a launch that already has one reuses its `write_fd` and
@@ -4696,10 +4696,10 @@ with `two collectors disagree about OMN_HEAP_FD` and **exit 2**.
   session and not two, and the decomposition can be joined to the ranges it
   decomposes.
 
-### To stream E for `src/encode.rs`, stream S for `catalog/mem.yaml`, and the coordinator for `DECISIONS.md`: the mTHP explanation is contradicted by measurement (D4)
+### To stream E for `src/encode.rs`, stream S for `catalog/mem.yaml`, and the coordinator for `docs/DECISIONS.md`: the mTHP explanation is contradicted by measurement (D4)
 
 The note under every interval join (`src/encode.rs:231`), the `mem.faults`
-caveat, `DECISIONS.md` "What the measurement taught" and
+caveat, `docs/DECISIONS.md` "What the measurement taught" and
 `docs/scenarios/mem.md` all explain flat fault counts with *multi-size* THP, as
 in "the kernel picks larger folios for larger regions". On the development
 machine every multi-size size is `never`, and the counts are predicted exactly,
@@ -4868,7 +4868,7 @@ And in `outcome`: `(Outcome::StillOpen, MatchKind::Wakeup)` renders
 the kernel's own figure in every run, always by a multiple of the tick: the cpu
 spent after the last poll is in no reading. For a launched program the reap has
 the exact answer, `wait4`'s `rusage`, and a closing reading from it would make
-the row exact at the end. This is the open question `STATE.md` calls *the
+the row exact at the end. This is the open question `docs/dev/STATE.md` calls *the
 closing read of a polled counter*, met a third time.
 
 ### To whoever owns `catalog/cpu.yaml`: what a `cpu-clock` sample counts — finding 2
@@ -5100,7 +5100,7 @@ impl Target {
 
 `cpu.instructions` and `cpu.cycles` offer `count`, which is one number for the
 window, and `sample`, which is refused until sampling lands with stacks. So no
-verdict can say *when*. `BRIEF.md` asks for "throttled for 1.2 s of 5 s, and the
+verdict can say *when*. `docs/dev/BRIEF.md` asks for "throttled for 1.2 s of 5 s, and the
 instruction rate over that interval is not comparable to the rest", and the
 tool has a frequency timeline and no instruction timeline to split it with.
 The counter is already open and already read at the end, so what is wanted is
@@ -5265,7 +5265,7 @@ Comments that explain a design by that rule, and now mislead:
   each explains a split or a system-wide target by it. The frequency crossing's
   second `omn` can become one session: `cpu.instructions` on the launch beside
   `power.freq` and `cpu.cycles` on the core.
-- `DECISIONS.md`'s session-versus-daemon line is untouched: a run is still one
+- `docs/DECISIONS.md`'s session-versus-daemon line is untouched: a run is still one
   window and one document, and `docs/families/runner.md` says which two
   extensions would not be.
 
@@ -5365,7 +5365,7 @@ until a descriptor carried one.
 new file under `src/bpf/` cannot do without. Seven sessions were added,
 `examples/runtime-usdt-{probes,libc,gc,alloc,threads,flood,absent}.yml`, and
 `examples/runtime-not-built.yml` was rewritten; `examples/README.md` and
-`GUIDE.md` need their rows, which is the one red test on `feat/usdt`
+`docs/GUIDE.md` need their rows, which is the one red test on `feat/usdt`
 (`cli::the_session_indexes_hold_exactly_the_sessions_on_disk`).
 `docs/scenarios/runtime.md` says USDT cannot be verified here; it now is.
 
@@ -5660,13 +5660,13 @@ three it is not. Not blocking: `trace` serves both.
 
 - Rows for `examples/io-three-layers.yml`, `examples/io-syncs.yml`,
   `examples/net-fentry-sweep.yml` and `examples/net-handshake-to-close.yml` in
-  `examples/README.md` and `GUIDE.md`; the index test is red on this branch
+  `examples/README.md` and `docs/GUIDE.md`; the index test is red on this branch
   until then.
 - `docs/bpf-layer.md` lists fentry under "What is not here yet". It is here:
   `src/bpf/fentry.rs`, attached through `BPF_RAW_TRACEPOINT_OPEN` with no name,
   and the requirement class is `fentry:<function>`, answered from BTF and a
-  load. `CATALOG.md` may want the class named too.
-- `STATE.md`'s table of what waits for fentry: `io.syscall`, `io.fs`,
+  load. `docs/CATALOG.md` may want the class named too.
+- `docs/dev/STATE.md`'s table of what waits for fentry: `io.syscall`, `io.fs`,
   `io.fsync`, `net.tcp.connect` and `net.socket` collect through it.
 
 ---
@@ -5750,7 +5750,7 @@ Six requests, none blocking: everything the brief gave stream J works with its
 scenarios, and `docs/families/join.md` is the record. Each is a place where
 what the engine can now say is limited by something outside it.
 
-### To the coordinator, for `examples/README.md` and `GUIDE.md`: three rows
+### To the coordinator, for `examples/README.md` and `docs/GUIDE.md`: three rows
 
 `the_session_indexes_hold_exactly_the_sessions_on_disk` is red on
 `feat/join-engine` for exactly these three sessions, as the brief anticipates.
@@ -5766,7 +5766,7 @@ The scenario documents also still describe as open what this stream closed:
 `docs/scenarios/cross-memory.md` D1, `cross-compute.md` findings 5 and 6 (and
 the `never ran` wording), `cross-io.md` defects 3 and 4.
 
-### To whoever owns `CATALOG.md`: the `drained` backend field
+### To whoever owns `docs/CATALOG.md`: the `drained` backend field
 
 `Backend::drained` is new in `src/catalog.rs`, beside `equivalent`:
 
@@ -5776,7 +5776,7 @@ the `never ran` wording), `cross-io.md` defects 3 and 4.
 
 It means one event stands for many occurrences, added up in the kernel and
 drained on a tick, and it is what lets the validator refuse a `wakeup` join onto
-such a source before the run. §1 of `CATALOG.md` should list it with that
+such a source before the run. §1 of `docs/CATALOG.md` should list it with that
 sentence.
 
 ### To whoever owns each family's catalog: `drained: true` on the rest
@@ -5938,7 +5938,7 @@ program per site as it does today, and hand back `(tid, mutex, ts)` per hit.
 
 ### To the coordinator
 
-- **Seven sessions** to add to `examples/README.md` and `GUIDE.md`; the rows
+- **Seven sessions** to add to `examples/README.md` and `docs/GUIDE.md`; the rows
   are at the end of `docs/families/sched.md` (four) and `docs/families/gpu.md`
   (three). `examples/sched-not-implemented.yml` was rewritten, not added.
 - **`OMN_HEAP_FD` is `OMN_SHIM_FD`**, and a new `OMN_SHIM_REPORT` names the
@@ -5947,7 +5947,7 @@ program per site as it does today, and hand back `(tid, mutex, ts)` per hit.
   still true of when they were written; nothing tests either name.
 - **The shim record is 40 bytes**, not 32, with an `extra` field and a `flags`
   byte. Both sides assert the layout, as before.
-- `STATE.md`'s "132 ns per event" for the shim is the heap's wave-two figure.
+- `docs/dev/STATE.md`'s "132 ns per event" for the shim is the heap's wave-two figure.
   For a mutex record it is about 415 ns in a release build, nearly all of it
   the one `write(2)` per record; `docs/families/sched.md` has the table.
 ---
@@ -6132,7 +6132,7 @@ stream V's list: `src/bpf/mod.rs` gained `mod request;` and its `pub use`, and
 `src/collect/net/mod.rs` gained `mod request;` and the `net.request` factory.
 No other stream of the ninth wave owns either file. Two sessions were added,
 `examples/vertical-one-request.yml` and `examples/vertical-abandoned.yml`;
-their rows for `examples/README.md` and `GUIDE.md` are at the end of
+their rows for `examples/README.md` and `docs/GUIDE.md` are at the end of
 `docs/scenarios/vertical.md`.
 
 ---
@@ -6174,7 +6174,7 @@ The exit-status section still says exit 2 is "it cannot mean what it asks for,
 **or this machine cannot serve it**" and exit 1 "usage, parsing, or a failure
 while running". Since the fifth wave, a machine that cannot serve a valid
 request exits **1** and a request that cannot mean anything exits **2**;
-`GUIDE.md` under "The refusal" has the four-row table that is true. And `=~`
+`docs/GUIDE.md` under "The refusal" has the four-row table that is true. And `=~`
 is listed among the filter operators without saying what it does:
 `docs/fixes/emit.md` has the line wanted.
 
@@ -6222,14 +6222,14 @@ Still open from the same entry: the drain racing the program's increment in
 
 ### To stream N, for `src/collect/net/`: two lines the tenth wave's decisions leave you
 
-- **`net/dev.rs::stop` takes a closing read**, and `DECISIONS.md` ("the runner
+- **`net/dev.rs::stop` takes a closing read**, and `docs/DECISIONS.md` ("the runner
   closes the window") settled that it should not: the runner's last round is
   the closing read, and the extra one covers tens of microseconds and emits a
   zero-delta point at the previous offset. `io` and `power` already refuse to
   read there. Wanted: `stop` returns what is buffered and reads nothing, and a
   scenario that no series ends in two points at one offset.
 - **`net/capture.rs`'s refusal** names `CAP_NET_RAW`. Since the tenth wave
-  `make CAPTURE=1` is what grants it (`DECISIONS.md`, "`CAP_NET_RAW` is
+  `make CAPTURE=1` is what grants it (`docs/DECISIONS.md`, "`CAP_NET_RAW` is
   opt-in"); the refusal should name that command beside the capability.
 
 ## Needs from another stream — the tenth wave, stream X (the bench)
@@ -6487,7 +6487,7 @@ None`, because the build does not compile without it; nothing else in those
 files changed. Stream T's new `src/triage/` builds requests and will need the
 same line in each literal it adds.
 
-### To the coordinator: `DECISIONS.md`'s concurrent-requests line, and the indexes
+### To the coordinator: `docs/DECISIONS.md`'s concurrent-requests line, and the indexes
 
 The line *"One request per run, for now -- a session with several is refused
 ... concurrent attach is the honest fix, and it lands with hot attach"* has not
@@ -6581,7 +6581,7 @@ without the other turns the suite red, so both go in one commit at the merge:
 the troff text is in that request above (search "the remaining half of runtime
 2"), and the assertion to drop is the last one of that test.
 
-### To the coordinator: `DECISIONS.md`
+### To the coordinator: `docs/DECISIONS.md`
 
 Two lines worth recording as settled, both enforced by `src/triage/objective.rs`
 and its tests: a triage request without an objective is refused with the list,
@@ -6792,7 +6792,7 @@ scenarios parse the monotonic stamps out of the note. `Results::window`, copied
 from `Collection::window`, would make that a field; the notes stay, since they
 carry the *why*.
 
-### To the coordinator: `DECISIONS.md`, the escalation's mechanism
+### To the coordinator: `docs/DECISIONS.md`, the escalation's mechanism
 
 Worth recording as settled, and enforced by `src/collect/mod.rs`'s tests:
 
@@ -7583,7 +7583,7 @@ would make an LTS kernel serve a source it now refuses by name:
   `block_rq_complete(request *, int, unsigned int)` and `mm_compaction_begin`
   (four integers), are each one slot moved from the shape the program reads.
 
-### To the coordinator: `CATALOG.md` §1, four requirement notations
+### To the coordinator: `docs/CATALOG.md` §1, four requirement notations
 
 - `raw_tracepoint:<name>(<arg>, ...)[|(<arg>, ...)]` -- existence and
   prototype, spelled as `Btf::tracepoint_signature` spells it (no `struct`, no
@@ -7854,7 +7854,7 @@ subject is something else skips with it.
   validator, exit 2, *"`mem.faults` cannot be measured per container: a
   container has to be resolved to its cgroup first"*.
   The two other `tests/cli.rs` failures of the CI run are paranoid 4.
-- `CATALOG.md` §1: two notations. `writable:<path>` (with `[pid]`), a file this
+- `docs/CATALOG.md` §1: two notations. `writable:<path>` (with `[pid]`), a file this
   process may write; and a qualified `pmu:<unit>/<event>/` answers *missing*,
   naming the unit or the event, when the machine does not publish it.
 - `docs/families/cpu.md`: the counting sources, `cpu.topdown`, `cpu.profile`
@@ -7993,7 +7993,7 @@ assert!(
 );
 ```
 
-### To the coordinator (`examples/README.md`, `GUIDE.md`): one index row
+### To the coordinator (`examples/README.md`, `docs/GUIDE.md`): one index row
 
 `| \`sched-cgroup.yml\` | A cgroup and everything below it: its blocked time, its run queue waits, and who woke it. |`
 
@@ -8115,7 +8115,7 @@ let mut entry = catalog().get(&"mem.rss".parse().unwrap()).unwrap().clone();
 
 This is the one test red on `feat/devices` for a reason outside its paths.
 
-### To stream P (`catalog/mem.yaml`, `mem.faults`) and the coordinator (`DECISIONS.md`): the multi-size THP explanation (open-requests 4699)
+### To stream P (`catalog/mem.yaml`, `mem.faults`) and the coordinator (`docs/DECISIONS.md`): the multi-size THP explanation (open-requests 4699)
 
 `mem.faults`' second caveat still says "the kernel picks larger folios for
 larger regions", which `docs/scenarios/cross-memory.md` measured to be wrong on
@@ -8773,7 +8773,7 @@ found in a file this stream does not own.
 
 ### To whoever owns `src/event.rs` and `src/join.rs`: `iface` is compared by its name alone
 
-**Closed in the sixteenth wave** (streams mem and engine): `net.bytes` and `net.iface` fill the index at the read, and `join::identity` compares `iface#<index>`. The third bullet, the counter kind out of the name, is no longer in a join's way and stays with `docs/open-requests.md`; the network namespace beside the index is open (`DECISIONS.md`).
+**Closed in the sixteenth wave** (streams mem and engine): `net.bytes` and `net.iface` fill the index at the read, and `join::identity` compares `iface#<index>`. The third bullet, the counter kind out of the name, is no longer in a join's way and stays with `docs/open-requests.md`; the network namespace beside the index is open (`docs/DECISIONS.md`).
 
 `join::identity` compares a key's `Display`, and `KeyValue::Iface` displays
 `iface:<name>`. So the index takes no part in a match, and the doc comment on
@@ -8797,7 +8797,7 @@ other's events on `lo`, whose index is 1 on every Linux machine.
 
 ### To whoever owns `src/request.rs` and `src/event.rs`: `proc` has no producer
 
-**Answered in the sixteenth wave** (stream engine): `proc` stays as vocabulary and a join on it is refused by name (`DECISIONS.md`); the producers are filed again under the sixteenth wave, stream engine.
+**Answered in the sixteenth wave** (stream engine): `proc` stays as vocabulary and a join on it is refused by name (`docs/DECISIONS.md`); the producers are filed again under the sixteenth wave, stream engine.
 
 `KeyKind::Proc` and `KeyValue::Proc { pidns, pid }` exist, and no collector
 writes one. No catalog entry lists `proc` among its keys either. Processes are
@@ -8807,32 +8807,32 @@ key. Either a producer (the procfs sources know their pid namespace from
 `/proc/<pid>/ns/pid`), or the kind goes, and `docs/keys.md` changes in the same
 commit.
 
-### To the coordinator (`STATE.md`), and whoever owns `docs/install.md` and `docs/families/sched.md`: the floor is per backend
+### To the coordinator (`docs/dev/STATE.md`), and whoever owns `docs/install.md` and `docs/families/sched.md`: the floor is per backend
 
-**Closed in the sixteenth wave**: `docs/install.md` (stream docs) and `docs/families/sched.md:57` (stream mem); `STATE.md`'s phase 0 row at the fifteenth wave's merge.
+**Closed in the sixteenth wave**: `docs/install.md` (stream docs) and `docs/families/sched.md:57` (stream mem); `docs/dev/STATE.md`'s phase 0 row at the fifteenth wave's merge.
 
-`DECISIONS.md` now says there is no single kernel floor: each backend carries
+`docs/DECISIONS.md` now says there is no single kernel floor: each backend carries
 its own `kernel>=`, and 5.15 is served ("Settled in the fifteenth wave").
 Three places still say 6.1 is the floor:
 
-- `STATE.md`, "Where each roadmap phase stands", phase 0: *"kernel floor 6.1"*.
+- `docs/dev/STATE.md`, "Where each roadmap phase stands", phase 0: *"kernel floor 6.1"*.
   Phase 1's *"`Span`-equivalent attributions"* can point to "No `Span`
   struct" there too.
-- `docs/install.md`, "The kernel": *"Linux 6.1 is the floor (`DECISIONS.md`,
+- `docs/install.md`, "The kernel": *"Linux 6.1 is the floor (`docs/DECISIONS.md`,
   "Kernel floor")"*.
-- `docs/families/sched.md:57`: *"`DECISIONS.md` chose that floor"*. This one
+- `docs/families/sched.md:57`: *"`docs/DECISIONS.md` chose that floor"*. This one
   is still true of `sched.lock`, which needs `lock:contention_*`; it wants
   "that backend's `kernel>=6.1`".
 
-### To the probes stream: the power guardrail is yours to decide, and `DECISIONS.md` is mine
+### To the probes stream: the power guardrail is yours to decide, and `docs/DECISIONS.md` is mine
 
-**Closed in the sixteenth wave**: the harness's own `thermal_throttle` read, on purpose (stream runner; `DECISIONS.md`, `ROADMAP.md` phase 9).
+**Closed in the sixteenth wave**: the harness's own `thermal_throttle` read, on purpose (stream runner; `docs/DECISIONS.md`, `docs/ROADMAP.md` phase 9).
 
-`ROADMAP.md` phase 9 now says `power` is not collected as a guardrail: the
+`docs/ROADMAP.md` phase 9 now says `power` is not collected as a guardrail: the
 bench reads `thermal_throttle` around each repetition
 (`examples/bench/harness.rs`, `throttle_count`) and says on AMD that it cannot
 tell. The sentence ends *"pending that stream"*. Whatever you decide, put it
-under "For DECISIONS.md" in your handoff. The coordinator lands it, and the
+under "For docs/DECISIONS.md" in your handoff. The coordinator lands it, and the
 phase 9 sentence changes to point at it.
 
 ## Needs from another stream — the fifteenth wave, stream engine
@@ -8895,7 +8895,7 @@ nothing else calls it, `Session::check_paired_parts` with its test in
 `src/request.rs` (around lines 1678 and 2213). A session with a `paired` part
 then runs instead of being refused.
 
-### To the coordinator (`ROADMAP.md`): the exit criteria this stream's tests now hold
+### To the coordinator (`docs/ROADMAP.md`): the exit criteria this stream's tests now hold
 
 **Closed at the fifteenth wave's merge**, except the hour, ticked in the sixteenth wave after its full 3600 s run.
 
@@ -8995,13 +8995,13 @@ was not given"); wanted there, one arm:
 `resolve::ResolveError::NoBackendDeclares { .. } => Whose::Request`.
 `engine.rs:177` already answers it as the request's.
 
-### To the coordinator (`CATALOG.md`, `DECISIONS.md`): the unwind table moved
+### To the coordinator (`docs/CATALOG.md`, `docs/DECISIONS.md`): the unwind table moved
 
 **Closed at the fifteenth wave's merge** (`65577bf`).
 
 `src/unwind.yaml` is `catalog/unwind.yaml` now (`git mv`), and
-`Catalog::load_dir` passes over it. `CATALOG.md:198` and `DECISIONS.md:443`
-still name `src/unwind.yaml`; the `DECISIONS.md` row "Where the table lives"
+`Catalog::load_dir` passes over it. `docs/CATALOG.md:198` and `docs/DECISIONS.md:443`
+still name `src/unwind.yaml`; the `docs/DECISIONS.md` row "Where the table lives"
 becomes: **`catalog/unwind.yaml`, compiled in, and read from a `--catalog`
 directory when it has one** -- because `load_dir` skips `catalog::UNWIND_TABLE`
 and `stack::unwind::use_table_in` reads it.
@@ -9078,7 +9078,7 @@ resolve::ResolveError::KeyNotCarried { elsewhere: Some(elsewhere), .. } => elsew
 resolve::ResolveError::StackRefused { whose, .. } => *whose,
 ```
 
-**`STATE.md:348` (the coordinator's): the mode table is `catalog/unwind.yaml`.**
+**`docs/dev/STATE.md:348` (the coordinator's): the mode table is `catalog/unwind.yaml`.**
 The line still says "chain (`src/unwind.yaml`)"; the file moved in this
 stream's first commit.
 
@@ -9147,16 +9147,16 @@ does not mark the result pinned (P's `resolve.rs`). Seen in every run of
 
 ### To whoever owns `src/main.rs` and `catalog/*.yaml`: phase 6's trace -> hist -> sample ladder
 
-**Closed in the sixteenth wave**: decided (`DECISIONS.md`) and built by stream runner; the `trace` -> `sample` rung is taken on weighed samples since the merge (`8d80fd1`), and the in-kernel histogram is taken at the start, not stepped onto.
+**Closed in the sixteenth wave**: decided (`docs/DECISIONS.md`) and built by stream runner; the `trace` -> `sample` rung is taken on weighed samples since the merge (`8d80fd1`), and the in-kernel histogram is taken at the start, not stepped onto.
 
-`ROADMAP.md` phase 6 task 3 names the degradation `trace` -> in-kernel `hist`
+`docs/ROADMAP.md` phase 6 task 3 names the degradation `trace` -> in-kernel `hist`
 -> `sample`. What is built is a ladder over **backends** of one request's
 mode: `Ladder::candidates` walks the chain below the serving backend by cost
 band, and no entry in `catalog/` has three backends that trace, aggregate in the
 kernel and sample -- the audit's item (b) has no source to be exercised on.
 The runner's half is ready: `collect::Cheaper::next` returns a whole
 `ResolvedRequest`, and `Spending::degrade` prepares whatever it is handed, mode
-included. Wanted, in order: a decision (`DECISIONS.md`, filed in this
+included. Wanted, in order: a decision (`docs/DECISIONS.md`, filed in this
 stream's handoff) on what one series made of two modes means to an emit; then
 `Ladder::next` offering the same backend under a cheaper mode of the entry's
 `modes` before the next backend; then an entry that has the three.
@@ -9243,9 +9243,9 @@ if let Some(withheld) = crate::capabilities::withheld_file_capabilities() {
 
 ### To the runner stream (`examples/bench/harness.rs`): the guardrail through the source it claims
 
-**Answered in the sixteenth wave** (stream runner): the direct read stays, on purpose; `ROADMAP.md` phase 9 says so.
+**Answered in the sixteenth wave** (stream runner): the direct read stays, on purpose; `docs/ROADMAP.md` phase 9 says so.
 
-`ROADMAP.md` phase 9 says `power` has been "collected unconditionally since
+`docs/ROADMAP.md` phase 9 says `power` has been "collected unconditionally since
 phase 8 as a guardrail". The harness reads `thermal_throttle/*_throttle_count`
 itself (`throttle_count()`, line ~559), which are the files `power.throttle`'s
 `fs:sys` backend reads, and nothing else of `power.*`. Wanted, in the runner's
@@ -9264,7 +9264,7 @@ names the file) rather than by `None`, and a `power.freq` or `power.energy`
 guardrail can be added the same way. If the runner keeps the direct read (a
 polled source costs a sysfs read per cpu per tick inside the window it guards),
 the phase 9 sentence should say "`power.throttle`'s counters, read directly",
-which is the coordinator's line in `ROADMAP.md`. `docs/portability.md`, "The
+which is the coordinator's line in `docs/ROADMAP.md`. `docs/portability.md`, "The
 fifteenth wave", item 4, has both halves.
 
 ### To stream R (`src/catalog.rs`): what `extreme` means (stream J's, the fourteenth wave, again)
@@ -9277,9 +9277,9 @@ fourteenth wave, but `src/catalog.rs` is R's.
 
 ### To the coordinator: four lines in documents nobody owns
 
-**Closed at the fifteenth wave's merge** for `CATALOG.md:510`, `CLAUDE.md`'s counts and `DECISIONS.md`'s line; the `docs/scenarios/cpu.md` row closed in the sixteenth wave (stream cpu).
+**Closed at the fifteenth wave's merge** for `docs/CATALOG.md:510`, `CLAUDE.md`'s counts and `docs/DECISIONS.md`'s line; the `docs/scenarios/cpu.md` row closed in the sixteenth wave (stream cpu).
 
-- `CATALOG.md:510`: *"same as cgroup, and every entry that says `container:
+- `docs/CATALOG.md:510`: *"same as cgroup, and every entry that says `container:
   no`"* -- no entry that serves a cgroup says it now, and the loader refuses
   one that would (`validate::container_complaints`). Wanted: *"same as
   cgroup"*.
@@ -9293,7 +9293,7 @@ fourteenth wave, but `src/catalog.rs` is R's.
 - `CLAUDE.md`'s *"86 usable sources and 51"*: 92 and 56 on this branch
   (`omn list --format json`, `here.availability == ready`, with and without
   `setpriv --no-new-privs`).
-- `DECISIONS.md`'s open line on `pmu:sw` for `cpu.cycles` is closed; the
+- `docs/DECISIONS.md`'s open line on `pmu:sw` for `cpu.cycles` is closed; the
   handoff has the line.
 
 ### For the flaky tally
@@ -9349,9 +9349,9 @@ This stream fixed ten in its own files; five remain, found with
 `src/perf.rs:3457`, `src/collect/cpu/counters.rs:1354` and `:1401`,
 `src/collect/mod.rs:2637` (a user-facing refusal), `tests/scenario_runtime.rs:240`.
 
-### To the coordinator (`docs/scenarios/net.md`, `docs/scenarios/sched.md`, `ROADMAP.md`, the flaky tally)
+### To the coordinator (`docs/scenarios/net.md`, `docs/scenarios/sched.md`, `docs/ROADMAP.md`, the flaky tally)
 
-**Closed in the sixteenth wave**: `net.md` and `sched.md` and flaky #3 by stream mem; `ROADMAP.md` at the fifteenth wave's merge.
+**Closed in the sixteenth wave**: `net.md` and `sched.md` and flaky #3 by stream mem; `docs/ROADMAP.md` at the fifteenth wave's merge.
 
 - `net.md`, defect 7: `net.hwts -m trace` of an interface is now refused at
   resolution (`netlink:ethtool` declares `poll, snapshot`), exit 1 until P's
@@ -9359,7 +9359,7 @@ This stream fixed ten in its own files; five remain, found with
   still exit 3.
 - `sched.md`, the loss path: the test fills the ring with a futex burst (C
   fixture `wakers`), not the Python session, and checks one run.
-- `ROADMAP.md` phase 3, *"The loss rate is displayed, and it is zero under
+- `docs/ROADMAP.md` phase 3, *"The loss rate is displayed, and it is zero under
   moderate load"*: proven by `scenario_sched::a_moderate_wakeup_rate_loses_nothing_and_says_so`
   (6 000 wakeups/s against a 468 100/s drain) and the overflow test that no
   longer skips. Phase 6, *"`io.latency --emit=hist` at 2 M IOPS"*: the
@@ -9653,20 +9653,20 @@ counted 61892 faults against the task's 1537069..1539117. With it landed, add
 `budget::a_traced_series_over_its_ceiling_counts_what_the_task_did_and_moves_only_onto_weighed_samples`
 holds the weighed series to the task's own count across the move.
 
-### To the coordinator (`DECISIONS.md`, `ROADMAP.md`, `STATE.md`)
+### To the coordinator (`docs/DECISIONS.md`, `docs/ROADMAP.md`, `docs/dev/STATE.md`)
 
 **Landed with the sixteenth wave's closing documents**, corrected for the merge: the mode rung is taken, and the denominator is in effect.
 
-- `DECISIONS.md` "Open": the two runner proposals and the bench's guardrail
+- `docs/DECISIONS.md` "Open": the two runner proposals and the bench's guardrail
   are settled; the lines are in `docs/fixes/w16-runner.md`, "For
-  DECISIONS.md".
-- `ROADMAP.md` phase 6, task 3 and the second criterion: *"the ladder steps
+  docs/DECISIONS.md".
+- `docs/ROADMAP.md` phase 6, task 3 and the second criterion: *"the ladder steps
   backends of one mode, then `trace` -> `sample` on the same backends, held to
   a task's own fault count across the move, once the sampled collector weighs
   its events; the in-kernel histogram is taken at the start, not stepped
   onto"*. Exit criterion still open: no run changes mode yet. Phase 9: *"`power.throttle`'s counters,
   read directly by the harness, on purpose"* (`docs/bench.md`).
-- `STATE.md` "What remains" item 2: the mode rule and the ladder are built,
+- `docs/dev/STATE.md` "What remains" item 2: the mode rule and the ladder are built,
   and the ladder passes over its only mode rung until `page_faults.rs` weighs
   its samples, so no run changes mode yet; phase 6's hist rung is not built.
   The denominator is **not** in effect: the nanosecond readers are landed and
@@ -9704,14 +9704,14 @@ Then `#[ignore]` comes off
 (`~2950`, a decomposition's row) reads the entry's and would want the same
 call if a decomposition over `cpu.cycles` through `pmu:sw` is ever written.
 
-### To the coordinator (`CATALOG.md`): the backend key `unit`
+### To the coordinator (`docs/CATALOG.md`): the backend key `unit`
 
 **Landed at the sixteenth wave's merge** (`8d80fd1`).
 
 A backend may declare `unit:` when its values are in another unit than the
 entry's. The loader refuses it on the head of the chain, on a backend declared
 `equivalent`, when it repeats the entry's, and when it does not add up where
-the entry's does (`check_backend_units`). Wanted, a line where `CATALOG.md`
+the entry's does (`check_backend_units`). Wanted, a line where `docs/CATALOG.md`
 lists the per-backend keys (`targets`, `modes`, `keys`, `filter_fields`).
 
 ### To whoever owns `src/collect/mod.rs`: a late attach primes the kernel's symbols for a user-only profile too
@@ -9891,7 +9891,7 @@ Four other lines of that cell's gate failure go away with this stream's fix
 
 ### To the owner of `tests/cross_memory.rs` and the coordinator: `cross-memory-which-allocation.yml` will run on `defaults`
 
-**Landed in the seventeenth wave** (stream core, `c4985ae`, `af14f63`): a served run is never a skip, and the fault test branches on the user-mode-only note. Not yet run at paranoid 2 (`STATE.md`, "Needs privilege").
+**Landed in the seventeenth wave** (stream core, `c4985ae`, `af14f63`): a served run is never a skip, and the fault test branches on the user-mode-only note. Not yet run at paranoid 2 (`docs/dev/STATE.md`, "Needs privilege").
 
 It skipped there because `mem.faults` refused every launched program (D14).
 It now samples in user mode only, so
@@ -9902,7 +9902,7 @@ kernel's share is not in the samples there; the result's `notes` carries
 *"page faults in user mode only"* to branch on, as
 `scenario_mem::sampled_in_user_mode_only` does.
 
-### To the resolver stream (`src/resolve.rs`), for `DECISIONS.md`: a backend that is both unbuilt and unservable here
+### To the resolver stream (`src/resolve.rs`), for `docs/DECISIONS.md`: a backend that is both unbuilt and unservable here
 
 **Decided before the seventeenth wave (the chain's order), not landed**: `1aa114f` is reverted (`4c13181`) until it lands with the eleven tests it changes; re-filed under "the seventeenth wave, stream core".
 
@@ -9924,9 +9924,9 @@ Stream symbols' handoff is `docs/fixes/w17-symbols.md`. Nothing here blocks it.
 **Answered at the merge**: the fix round wired it into both `stop`s itself;
 checked once each (`profile.rs:502`, `ibs.rs:654`), not added twice.
 
-### To the coordinator (`docs/unwind.md`, `CATALOG.md`'s `--symbols` lines): the perf map under `--symbols local`
+### To the coordinator (`docs/unwind.md`, `docs/CATALOG.md`'s `--symbols` lines): the perf map under `--symbols local`
 
-**Half landed in the eighteenth wave**: `CATALOG.md` says it (stream engine, `81f78c1`); `docs/unwind.md` does not yet, re-filed for its owner (the eighteenth wave, stream engine).
+**Half landed in the eighteenth wave**: `docs/CATALOG.md` says it (stream engine, `81f78c1`); `docs/unwind.md` does not yet, re-filed for its owner (the eighteenth wave, stream engine).
 
 `--symbols local` (and so `debuginfod`) now reads `/tmp/perf-<pid>.map` for
 addresses in anonymous executable mappings no file names. Neither document
@@ -9995,7 +9995,7 @@ as one. Check: `the-sentence-claims-nothing-false`.
 
 ### To the coordinator (`mcp/src/server.rs:427`, `src/main.rs`): a waiting program exceeds every budget
 
-**Answered in the eighteenth wave, in part**: `run_session`'s budget is optional (stream mcp) and a launched program's denominator is its process tree (stream launcher). No wall-clock denominator; the check passes because no budget is asked, not because one holds, and is now `unchecked` (stream cases). What stops a budgeted run of a waiting program is a one-time cost on the first check (`DECISIONS.md`, "Open").
+**Answered in the eighteenth wave, in part**: `run_session`'s budget is optional (stream mcp) and a launched program's denominator is its process tree (stream launcher). No wall-clock denominator; the check passes because no budget is asked, not because one holds, and is now `unchecked` (stream cases). What stops a budgeted run of a waiting program is a one-time cost on the first check (`docs/DECISIONS.md`, "Open").
 
 `run_session` requires a budget over the target's cpu; a target that burns
 0.6 ms in 1.5 s is stopped at 254.7 ms by `--budget 100%` (146 %). Wanted:
@@ -10082,7 +10082,7 @@ Stream core's handoff is `docs/fixes/w17-core.md`.
 
 ### To the coordinator: cherry-pick `1aa114f` with the eleven tests it changes
 
-**Landed in the eighteenth wave** (stream resolver, `e04ef9a` and `267842a`; `DECISIONS.md`'s exit-3 line re-worded).
+**Landed in the eighteenth wave** (stream resolver, `e04ef9a` and `267842a`; `docs/DECISIONS.md`'s exit-3 line re-worded).
 
 One order for "unbuilt" and "missing" (decided: the chain's). `1aa114f`
 changes `src/resolve.rs`; eleven tests pin a backend nothing collects to reach
@@ -10092,7 +10092,7 @@ now answers exit 1. The table in the handoff's section 2 gives each test and
 what it becomes, with the patch for `src/collect/mod.rs` shown passing.
 Then, in the same merge: the two `tests/scenario_io.rs` rows (io's file) and
 the pinned twin of the `net.hwts` refusal in `tests/scenario_net.rs`. Also
-`DECISIONS.md`'s *"Valid, and not built" is exit 3* gains *"on a machine that
+`docs/DECISIONS.md`'s *"Valid, and not built" is exit 3* gains *"on a machine that
 lacks nothing it needs"*.
 
 ### To stream io (`tests/scenario_io.rs`), optional: the kernel histogram's `sum`
@@ -10160,7 +10160,7 @@ largest row is a block during which others ran; then a way to decompose a
 named thread. Checks: `the-first-suspect-is-the-known-cause`,
 `every-cited-number-agrees-with-the-reference`, `the-sentence-claims-nothing-false`
 (`http-server-stdlib`). The same question as stream build's "a program is its
-main thread" (`DECISIONS.md`, "Open").
+main thread" (`docs/DECISIONS.md`, "Open").
 
 ### To the coordinator (`src/triage/latency.rs:181`): the triage's mutex source doubles a threaded interpreter's time
 
@@ -10284,12 +10284,12 @@ Stream io's handoff is `docs/fixes/w17-io.md`.
 
 ### To the coordinator: the cost run, alone
 
-**Not run yet**; stream io made the statistics read the programs that ran, and the commands are `STATE.md` "Needs privilege" item 2.
+**Not run yet**; stream io made the statistics read the programs that ran, and the commands are `docs/dev/STATE.md` "Needs privilege" item 2.
 
 The two `null_blk` runs of the handoff (without, then with
 `kernel.bpf_stats_enabled`), now on `main`; their result into
-`docs/scenarios/io.md` defect 19, `STATE.md` and phase 6's criterion
-(`DECISIONS.md`, "Open").
+`docs/scenarios/io.md` defect 19, `docs/dev/STATE.md` and phase 6's criterion
+(`docs/DECISIONS.md`, "Open").
 
 ### To whoever owns `src/bpf/syscall.rs` (conditional on the run): `BPF_PROG_TYPE_TRACING` with `BPF_TRACE_RAW_TP`
 
@@ -10344,7 +10344,7 @@ unless said otherwise:
 
 ## The seventeenth wave, coordinator, after the merge
 
-Run alone at `718cae1`, 2026-10-03, with the sudoers grants (`STATE.md`,
+Run alone at `718cae1`, 2026-10-03, with the sudoers grants (`docs/dev/STATE.md`,
 "Needs privilege").
 
 ### To the owner of `Makefile`, `scripts/release.sh` and `docs/install.md`, and the triage's owner: `omn-mcp` carries no capabilities
@@ -10366,7 +10366,7 @@ privileges.
 
 ### To the owner of `cpu.profile` (`src/collect/cpu/profile.rs`, `src/unwind.rs`): a user-mode-only profile costs 280 % of the target
 
-**Answered in the eighteenth wave** (stream profile): not the mode, but the budget's first check weighing a one-time debuginfod symbol load, and a per-tick maps re-read now done only for the processes a drain holds. The one-time load is filed (`DECISIONS.md`, "Open").
+**Answered in the eighteenth wave** (stream profile): not the mode, but the budget's first check weighing a one-time debuginfod symbol load, and a per-tick maps re-read now done only for the processes a drain holds. The one-time load is filed (`docs/DECISIONS.md`, "Open").
 
 The finding above, from the other side: at paranoid 2 without `CAP_PERFMON`,
 `cpu.profile` over `sqlite3`'s commit loop spends 266 % of the target's cpu.
@@ -10385,11 +10385,11 @@ that machine.
 run"* while the histogram counted all 26 838 511 requests: the program
 statistics are read from programs other than the ones that ran, or after they
 were closed. The cost is to be found before phase 6's criterion is argued
-either way (`DECISIONS.md`, "Open").
+either way (`docs/DECISIONS.md`, "Open").
 
-### To the owner of `tests/scenario_io.rs`'s doc comment and `STATE.md`: `chmod` races udev
+### To the owner of `tests/scenario_io.rs`'s doc comment and `docs/dev/STATE.md`: `chmod` races udev
 
-**Landed in the eighteenth wave**: `udevadm settle` in the test's doc comment and panic (stream io) and in `STATE.md`'s commands.
+**Landed in the eighteenth wave**: `udevadm settle` in the test's doc comment and panic (stream io) and in `docs/dev/STATE.md`'s commands.
 
 `modprobe null_blk` returns before udev has applied its rule, which leaves
 `/dev/nullb0` at 0600 after a `chmod a+r` made at once; the test then panics
@@ -10497,7 +10497,7 @@ thread's largest row is a `wait4` or a block another task ran in, the child's
 or the busiest thread's table, not the heaviest. `docs/cases.md`, "The
 agent's reading", is the rule the cases hold it to.
 
-### To the coordinator (`GUIDE.md`): the latency session
+### To the coordinator (`docs/GUIDE.md`): the latency session
 
 It may still list five sources or quote the old sleep sentence.
 
@@ -10579,7 +10579,7 @@ Stream profile's handoff is `docs/fixes/w18-profile.md`.
 
 ### To launcher (`src/collect/mod.rs`): a first check that stops a run on a one-time cost
 
-The open decision (`DECISIONS.md`, "Open"): the first check, 0.1 s in, stops
+The open decision (`docs/DECISIONS.md`, "Open"): the first check, 0.1 s in, stops
 `cpu.profile` at 116 to 179 % on the first debuginfod symbol load (about
 25 ms) against 13 to 21 ms of target. Bench's filing is the same shape: the
 `bpf:fentry` attach (about 55 ms) reported apart from the run's rate.
@@ -10617,7 +10617,7 @@ the refusal (`983ea32`), the cases' two lines (`53df56f`).
 `current_and_filter`; the same map lookup as `push_followed_filter` would
 follow the target's children.
 
-### To engine (`CATALOG.md`, `examples/**`): children followed, and the kernel's wait
+### To engine (`docs/CATALOG.md`, `examples/**`): children followed, and the kernel's wait
 
 The sched section can say a process target is followed into its children and
 a wait is `sched_info`'s account. `examples/sched-round-trips.yml`'s header
@@ -10648,7 +10648,7 @@ all. If it does not land: a `detach()` per program type, as
 
 `/usr/bin/modprobe null_blk queue_mode=2 irqmode=2 completion_nsec=3000000 nr_devices=1 gb=1 bs=4096`
 in `/etc/sudoers.d/omniscient-privileged`, or the test run on the granted
-`completion_nsec=6000` load (`STATE.md`, "Needs privilege" item 4).
+`completion_nsec=6000` load (`docs/dev/STATE.md`, "Needs privilege" item 4).
 
 ### Still open
 
@@ -10671,7 +10671,7 @@ rule with `join::apply_stored`; and `tier:` in the man page's join rule.
 
 ### To profile (`docs/unwind.md`): the perf map under `--symbols local`
 
-`CATALOG.md` says it; `docs/unwind.md` does not.
+`docs/CATALOG.md` says it; `docs/unwind.md` does not.
 
 ### To whoever owns `src/bpf/net_qdisc.rs` next: the `net` pointer through `member_offset`
 
@@ -10694,7 +10694,7 @@ If "an `equivalent` backend declares no cheaper band than a backend above it
 serving a target it serves" belongs with the chain invariants, move
 `cheaper_equivalents` from `tests/bench_bands.rs` into the loader.
 
-### To engine (`CATALOG.md`): the cost column
+### To engine (`docs/CATALOG.md`): the cost column
 
 The rows whose bands moved, listed in the handoff (the `count`-mode counters
 `free` to `low`, `io.size` to `high`, `net.tcp.rtt` to `med`, `power.cstate`
@@ -10716,7 +10716,7 @@ the build's refusal named all five (`docs/scenarios/sched.md` defect 8).
 
 ### To the coordinator: `proc-not-built.yml` exits 1 or 3
 
-`docs/scenarios/proc.md:161,182`, `GUIDE.md:362` and `examples/README.md:191`
+`docs/scenarios/proc.md:161,182`, `docs/GUIDE.md:362` and `examples/README.md:191`
 say it exits 3; it is 1 on a machine whose tracefs this uid cannot read and 3
 elsewhere. The prose around the renamed tests in `docs/scenarios/io.md` and
 `gpu.md` still says "exits 3".
@@ -10775,7 +10775,7 @@ the fetch from sqlite.org.
 ### At the merges
 
 Phase A (`f95fef0` to `988f008`, then `983ea32`, `53df56f`, `cc3adc1`) and
-phase B (`4bcddda`, `e54c622`, then `f51189d`); `STATE.md`, "The eighteenth
+phase B (`4bcddda`, `e54c622`, then `f51189d`); `docs/dev/STATE.md`, "The eighteenth
 wave is merged". `make check` is red on one test at both, the ring-loss test
 above. The w17 filings each stream landed are marked in their sections.
 
@@ -10820,7 +10820,7 @@ named after it.
 
 ## The eighteenth wave, coordinator, after the merge
 
-Run alone at `29b1705`, 2026-10-04, with the sudoers grants (`STATE.md`,
+Run alone at `29b1705`, 2026-10-04, with the sudoers grants (`docs/dev/STATE.md`,
 "Needs privilege", where every number is).
 
 ### To the owner of `tests/scenario_sched.rs` (and the resolver's): a test of exit 3 that a capability-less machine answers with 1
@@ -10893,7 +10893,7 @@ stream". Landed at the merges: `mod kernel;` and its factory in
 
 ### To the coordinator (`src/validate.rs`): a refused target's reason
 
-**Answered in the twentieth wave, in part** (stream gpu): reviewed; the `targets: {pid: "no: <reason>"}` form is the better one and is settled (`DECISIONS.md`, "Settled in the twentieth wave"). The loader's change is refiled under the twentieth wave, stream gpu.
+**Answered in the twentieth wave, in part** (stream gpu): reviewed; the `targets: {pid: "no: <reason>"}` form is the better one and is settled (`docs/DECISIONS.md`, "Settled in the twentieth wave"). The loader's change is refiled under the twentieth wave, stream gpu.
 
 The nine lines in `target_rejection_reason` quote the entry's caveat that
 names the flag and says "refused", before the generic "declares no support".
@@ -10924,13 +10924,13 @@ facts.
 Until then the clock state is in each GPU source's facts and not in the
 resolved file.
 
-### To the bench's owner and `CATALOG.md`: NVML's cost cells
+### To the bench's owner and `docs/CATALOG.md`: NVML's cost cells
 
-**Answered in the twentieth wave, in part** (stream docs): `CATALOG.md`'s Cost column is now the YAML's chain, the NVML rows included. Checking the bands against the per-call table is the bench's, still to do.
+**Answered in the twentieth wave, in part** (stream docs): `docs/CATALOG.md`'s Cost column is now the YAML's chain, the NVML rows included. Checking the bands against the per-call table is the bench's, still to do.
 
 The per-call table (`docs/scenarios/gpu.md`, "What can a poll get from the
 driver?") is what `gpu.freq` and `gpu.power`'s bands can be checked against;
-`CATALOG.md`'s NVML cost cells are stale since the eighteenth wave. A bench
+`docs/CATALOG.md`'s NVML cost cells are stale since the eighteenth wave. A bench
 measuring GPU energy must not run beside anything polling NVML.
 
 ### Cross-cutting: another NVML poller skews every energy figure
@@ -10947,13 +10947,13 @@ process's poll.
 
 Stream core's handoff is `docs/fixes/w19-core.md`, "Needs from another
 stream". Landed: `make check` and the CI's clippy over `--workspace`
-(`91a0cef`); the root `Cargo.toml`'s members merged; this wave's `STATE.md`.
+(`91a0cef`); the root `Cargo.toml`'s members merged; this wave's `docs/dev/STATE.md`.
 `Gated`'s drop in `src/collect/launch.rs` (an unreleased child killed at its
 gate, not released first) went through both merges' full runs.
 
-### To the coordinator (`man/omn.1`, `GUIDE.md`): `omn top`
+### To the coordinator (`man/omn.1`, `docs/GUIDE.md`): `omn top`
 
-**Answered in the twentieth wave** (stream view): `omn top` in the synopsis and the commands, a section THE VIEW, and `GUIDE.md`'s "`omn top`: the views".
+**Answered in the twentieth wave** (stream view): `omn top` in the synopsis and the commands, a section THE VIEW, and `docs/GUIDE.md`'s "`omn top`: the views".
 
 Neither the manual page nor the guide has `omn top` or its flags.
 
@@ -10977,7 +10977,7 @@ ledger a GPU to draw; lanes' and heatmap's sections below say which workload.
 ## Needs from another stream — the nineteenth wave, stream profiler
 
 Stream profiler's handoff is `docs/fixes/w19-profiler.md`, "Needs from
-another stream". Landed at the merge: its edits to `CATALOG.md` section 8,
+another stream". Landed at the merge: its edits to `docs/CATALOG.md` section 8,
 `cupti/src/{lib,api,channel,wire}.rs`, `src/collect/gpu/{kernel,mod}.rs` and
 `tests/{family,scenario}_gpu.rs`.
 
@@ -11003,7 +11003,7 @@ the `cpu` family's samplers.
 
 ### To device's files (`docs/scenarios/gpu.md`) and bench's (`docs/bench.md`): `vendor:ncu`
 
-**Answered in the twentieth wave, in part** (stream gpu): `docs/scenarios/gpu.md`'s two passages. `docs/bench.md` line 620 still names it (`STATE.md`, "What remains").
+**Answered in the twentieth wave, in part** (stream gpu): `docs/scenarios/gpu.md`'s two passages. `docs/bench.md` line 620 still names it (`docs/dev/STATE.md`, "What remains").
 
 `docs/scenarios/gpu.md` lines 425-428 and 517-522 still say `gpu.counters`
 has no collector and name `vendor:ncu`; `docs/bench.md` lines 617-618 too.
@@ -11011,10 +11011,10 @@ has no collector and name `vendor:ncu`; `docs/bench.md` lines 617-618 too.
 
 ### To bench: `gpu.counters` and `gpu.profile` unmeasured
 
-**Twentieth wave**: `gpu.counters` was measured after the nineteenth wave's merge; `gpu.profile` is measurable now that its double free is fixed (stream gpu). The GPU bench is `STATE.md`, "Needs privilege", item 3.
+**Twentieth wave**: `gpu.counters` was measured after the nineteenth wave's merge; `gpu.profile` is measurable now that its double free is fixed (stream gpu). The GPU bench is `docs/dev/STATE.md`, "Needs privilege", item 3.
 
 Their `cost:` lines (`extreme`, `med`) are placeholders, `pending` in the GPU
-record until the quiet run (`STATE.md`, "Needs privilege", item 3).
+record until the quiet run (`docs/dev/STATE.md`, "Needs privilege", item 3).
 
 ## Needs from another stream — the nineteenth wave, stream bench
 
@@ -11024,7 +11024,7 @@ sequence after `backends` (`c6bd2b8`).
 
 ### To cupti's owner (`src/collect/gpu/kernel.rs`): the read path
 
-**Answered in the twentieth wave** (stream gpu): profiled, 1.4 to 1.8 us a record, most of it the event model's copies and allocations, not CUPTI's decoding; no lighter activity kind is a fallback (`DECISIONS.md`).
+**Answered in the twentieth wave** (stream gpu): profiled, 1.4 to 1.8 us a record, most of it the event model's copies and allocations, not CUPTI's decoding; no lighter activity kind is a fallback (`docs/DECISIONS.md`).
 
 `omn` spends about 1.3 us decoding a record in a release build (67 ms for
 53 000 records), as much as CUPTI spends on a launch inside the program:
@@ -11034,9 +11034,9 @@ degraded fallback in the chain.
 
 ### To the coordinator (the catalog's schema): a cost per regime
 
-**Proposed with numbers in the twentieth wave** (stream gpu); still open (`DECISIONS.md`, "Open").
+**Proposed with numbers in the twentieth wave** (stream gpu); still open (`docs/DECISIONS.md`, "Open").
 
-Open in `DECISIONS.md`: a band is the worst regime, so `--budget` under 20 %
+Open in `docs/DECISIONS.md`: a band is the worst regime, so `--budget` under 20 %
 refuses `gpu.kernel` on a program of long kernels, where it costs 1 %.
 
 ## Needs from another stream — the nineteenth wave, stream system
@@ -11057,7 +11057,7 @@ meaning what it meant), or offsets from `window.run_opened_ns`.
 
 ### To core (`docs/view/README.md`, fixtures): `raw` on three needs
 
-**Not answered in the twentieth wave**: the sources accept `raw` now, the system view's needs do not ask it (`STATE.md`, "What remains", item 5).
+**Not answered in the twentieth wave**: the sources accept `raw` now, the system view's needs do not ask it (`docs/dev/STATE.md`, "What remains", item 5).
 
 `raw` added to the system view's `cpu.util`, `io.bytes` and `gpu.mem`, with
 the README rows `raw,timeline,summary`, then the fixtures re-recorded: about
@@ -11172,7 +11172,7 @@ which core now owns.
 
 ### To core (`tests/view_fixtures/record.sh`): `sqlite-latency` with its events
 
-**Not answered in the twentieth wave**: `sqlite-latency` is re-recorded from the dumped latency session as before (`STATE.md`, "What remains", item 5).
+**Not answered in the twentieth wave**: `sqlite-latency` is re-recorded from the dumped latency session as before (`docs/dev/STATE.md`, "What remains", item 5).
 
 `raw` appended to the `blocked` request of the dumped session before `omn
 top -f`, so the timebar splits `blocked` as `omn latency` does live, and
@@ -11201,7 +11201,7 @@ stream". Landed: the header's cell (`c6bd2b8`).
 
 ### To the coordinator (the drain loops, `src/main.rs`): losses placed in time
 
-**Answered in the twentieth wave** (stream view): `Results.drains`, `[{ts_ns, dropped}]`. The heatmap does not shade them yet (`STATE.md`, "What remains", item 5).
+**Answered in the twentieth wave** (stream view): `Results.drains`, `[{ts_ns, dropped}]`. The heatmap does not shade them yet (`docs/dev/STATE.md`, "What remains", item 5).
 
 Each drain round's drop count with its timestamp, kept beside the result (a
 short `(ts_ns, dropped)` series in `losses`), so a loss is shaded where it
@@ -11263,7 +11263,7 @@ the dimming tells no lane from another. To decide.
 
 ### To the sched family's owner (`catalog/sched.yaml`): `sched.offcpu`'s stamp
 
-**Answered in the twentieth wave** (stream sched): the caveat says the drain, as the code stamps (`DECISIONS.md`).
+**Answered in the twentieth wave** (stream sched): the caveat says the drain, as the code stamps (`docs/DECISIONS.md`).
 
 The caveat says a row is stamped at its window's first wait; the `bpf:raw_tp`
 collector stamps it at the drain (`ts_ns: closed_ns`), and the recordings
@@ -11313,7 +11313,7 @@ row above lands.
 
 ### To the net and io owners: the edges flows cannot draw
 
-**Answered in the twentieth wave, in part** (streams net and io): `net.socket` keys its route's interface, `io.fs` carries `blk_devs`; the direction split is open (`DECISIONS.md`), and the view does not draw the edges yet.
+**Answered in the twentieth wave, in part** (streams net and io): `net.socket` keys its route's interface, `io.fs` carries `blk_devs`; the direction split is open (`docs/DECISIONS.md`), and the view does not draw the edges yet.
 
 `net.socket` carrying the interface index of its route; a filesystem's
 superblock device mapped to the block devices under it, so `io.fs` and
@@ -11324,7 +11324,7 @@ superblock device mapped to the block devices under it, so `io.fs` and
 ### At the merges
 
 Phase A (`6c62e14`, `95170e8`, `1f88f1f`, then `91a0cef`) and phase B
-(`b1e8f6f` to `3efe46f`, then `c6bd2b8`); `STATE.md`, "The nineteenth wave is
+(`b1e8f6f` to `3efe46f`, then `c6bd2b8`); `docs/dev/STATE.md`, "The nineteenth wave is
 merged". One regression, clippy on the device stream's NVML code on the
 merged tree, fixed in `91a0cef`. `make check` is red on the ring-loss gap at
 both merges and, after the second, on
@@ -11378,7 +11378,7 @@ Each seen at the merges or in a handoff, passing when rerun alone once:
   `/tmp/omn-*` test directories, 24 to 26 GB, among them
   `/tmp/omn-cli-<pid>-no-shim` directories of 154 MB each that `tests/cli.rs`
   leaves behind. Streams pointed `TMPDIR` under their worktree's `target/`.
-  The leak is filed in `STATE.md`'s "What remains", item 9.
+  The leak is filed in `docs/dev/STATE.md`'s "What remains", item 9.
 - **The home filesystem filled too**: doc tests failed with "Disk quota
   exceeded" in one stream's run; the merges removed the worktrees' `target/`
   directories (121 to 168 GB free).
@@ -11396,12 +11396,12 @@ Each seen at the merges or in a handoff, passing when rerun alone once:
 - **The GPU was shared** by the four GPU streams and the bench: profiler saw
   another worktree's kernels in its counters (the witness's reason), and the
   bench's record was taken at a load falling from 13 to 1. The quiet reruns
-  are in `STATE.md`, "Needs privilege".
+  are in `docs/dev/STATE.md`, "Needs privilege".
 
 ## The nineteenth wave, coordinator, after the merge
 
 Run on 2026-10-04 at `a71d9cf`, alone on the machine and the device
-(`STATE.md`, "Needs privilege", "Ran after the nineteenth wave's merge").
+(`docs/dev/STATE.md`, "Needs privilege", "Ran after the nineteenth wave's merge").
 
 ### `gpu.profile` aborts a native CUDA program at its exit: a double free in `libomn_cupti.so`
 
@@ -11435,7 +11435,7 @@ asserts the program's own exit status, would have caught it.
 
 ### `gpu.temp` through `vendor:nvml` over `low` on the compute-bound regime
 
-**Twentieth wave**: left `low` by stream gpu until the next GPU bench pastes its table (`STATE.md`, "Needs privilege", item 3).
+**Twentieth wave**: left `low` by stream gpu until the next GPU bench pastes its table (`docs/dev/STATE.md`, "Needs privilege", item 3).
 
 The second GPU table (`docs/bench.md`, "The second GPU table, after the
 nineteenth wave") measures +1.11 % on `compute` (gate 0.56 %) where the first
@@ -11451,7 +11451,7 @@ above fixed, the next GPU bench pastes its table in.
 `gpu.counters` replays each kernel, +282 934 % on the launch-bound regime
 (2 830 times its time, over 20 repetitions after 2 warmups): `launch` alone
 took 108 of the run's 117 minutes. The band is right (`extreme`); the
-schedule is not. `STATE.md` and `docs/bench.md` said 15 minutes. A launch
+schedule is not. `docs/dev/STATE.md` and `docs/bench.md` said 15 minutes. A launch
 count per arm, or fewer launches for a replaying arm, would bring it back;
 until then the bench's step wants two hours alone.
 
@@ -11598,13 +11598,13 @@ Option<String>` on `Collector`, carried on `Collection`, read by `measure` to
 exit 1), so "the tool killed the program it measured" is not exit 0. The GPU
 collectors answer it from `counters::died_in_exit`'s condition.
 
-**Landed in the twenty-first wave** (stream run, `9f65296`, and `ce5cde2` for `omn top`): `Collector::failure()`, exit 1 with the sentence after the results are written. The GPU's own case is reasoned, not run (`STATE.md`, "Needs privilege").
+**Landed in the twenty-first wave** (stream run, `9f65296`, and `ce5cde2` for `omn top`): `Collector::failure()`, exit 1 with the sentence after the results are written. The GPU's own case is reasoned, not run (`docs/dev/STATE.md`, "Needs privilege").
 
 ### To the catalog loader (`src/catalog.rs`): a refused target's reason in `targets:`
 
 `targets: {pid: "no: <reason>"}`, the loader refusing a `no` without a
 reason, and `validate.rs`'s `target_rejection_reason` reading it rather than
-searching caveats (`DECISIONS.md`, settled in the twentieth wave).
+searching caveats (`docs/DECISIONS.md`, settled in the twentieth wave).
 
 **Landed in the twenty-first wave** (stream data, `1b7773c`); the caveat search is gone.
 
@@ -11616,9 +11616,9 @@ minutes.
 
 **Landed in the twenty-first wave** (stream docs, `63309b7`): a replaying arm runs 2000 launches against a bare run and a control of that size. The fifteen minutes are reasoned; the GPU bench has not run since.
 
-### To `docs/bench.md` and `CATALOG.md`: `vendor:ncu`, `raw`
+### To `docs/bench.md` and `docs/CATALOG.md`: `vendor:ncu`, `raw`
 
-`docs/bench.md` line 620 still names `vendor:ncu`; `CATALOG.md`'s
+`docs/bench.md` line 620 still names `vendor:ncu`; `docs/CATALOG.md`'s
 `gpu.engine_busy` row gains `raw`.
 
 **Landed in the twenty-first wave** (stream docs, `178e17e`).
@@ -11647,7 +11647,7 @@ the merge: the two cases' limit-spelling finding closed (`96b4741`).
 profile saw is `child`, not `unplaced` (the triage reads it already); and a
 child found a tick late loses up to 14 % of its on-cpu row (43 ms of 300).
 
-Not taken in the twenty-first wave (no stream's row); still open (`STATE.md`, "What remains").
+Not taken in the twenty-first wave (no stream's row); still open (`docs/dev/STATE.md`, "What remains").
 
 ### To the sched sources (`src/collect/sched/**`, `src/bpf/sched_*`): `ppid`
 
@@ -11695,10 +11695,10 @@ If the mirror holds `Lifetime` field by field.
 
 ### To `src/collect/task.rs`: the adopted orphans in the denominator
 
-Decided (`DECISIONS.md`, settled in the twentieth wave): a launched program's
+Decided (`docs/DECISIONS.md`, settled in the twentieth wave): a launched program's
 denominator takes in `omn`'s adopted children while they live.
 
-**Landed in the twenty-first wave** (stream run, `1c15958`), with numbers (`DECISIONS.md`).
+**Landed in the twenty-first wave** (stream run, `1c15958`), with numbers (`docs/DECISIONS.md`).
 
 ## Needs from another stream — the twentieth wave, stream sched
 
@@ -11713,7 +11713,7 @@ scenarios file's line too.
 
 Not taken in the twenty-first wave (neither file was in a row); still open.
 
-### To `CATALOG.md`: the sched section's new fields
+### To `docs/CATALOG.md`: the sched section's new fields
 
 `sched.wakeup`'s `wakee_comm`, `waker_comm`, `served_in_tid`,
 `served_in_comm`, `irq` and `softirq`; `sched.lock` launchable; lock and
@@ -11734,14 +11734,14 @@ Storage `S_RX_BYTES`, `S_TX_BYTES` and `S_HOLDER_SINCE`, record `rx_bytes`,
 `request_net.rs`, two attributes in `collect/net/request.rs`'s `event()`,
 and `with_socket`'s length. The io stream did not take it.
 
-**Landed in the twenty-first wave** (stream collectors, `f847a6d`), exact against the client and the worker (`a8a3577`); `rx_bytes` counted from the first byte's arrival (`DECISIONS.md`).
+**Landed in the twenty-first wave** (stream collectors, `f847a6d`), exact against the client and the worker (`a8a3577`); `rx_bytes` counted from the first byte's arrival (`docs/DECISIONS.md`).
 
 ### To `src/collect/mod.rs` and `src/emit.rs`: a collector's counts as fields
 
 `Collector::fields(&self) -> BTreeMap<String, u64>` (default empty), copied
 into `Results::fields` (skipped when empty); `net.request` returns
 `undrawn()`'s four counts, and the view's `Undrawn::of` reads them in place
-of the sentences (`DECISIONS.md`).
+of the sentences (`docs/DECISIONS.md`).
 
 **Landed in the twenty-first wave** (data `ec2b229`, collectors `f847a6d`, views `7253f34`).
 
@@ -11753,13 +11753,13 @@ sources" drops `net.bytes`.
 
 **Landed in the twenty-first wave** (stream views, `90e4689`), with `io.bytes`.
 
-### To `CATALOG.md`: `net.socket`'s interface, `net.bytes`' `raw`, and a `net.request` row
+### To `docs/CATALOG.md`: `net.socket`'s interface, `net.bytes`' `raw`, and a `net.request` row
 
 **Landed in the twenty-first wave** (stream docs, `178e17e`). The twenty-first wave's new `net.request` fields are re-filed (the twenty-first wave, stream collectors).
 
 ## Needs from another stream — the twentieth wave, stream cpu
 
-### To `CATALOG.md`: `cpu.oncpu_time`'s row
+### To `docs/CATALOG.md`: `cpu.oncpu_time`'s row
 
 The `bpf:raw_tp` backend on `sched_stat_runtime`, poll only, per thread (the
 row still names `bpf:tp sched_switch`); `raw` on `cpu.oncpu_time` and
@@ -11778,11 +11778,11 @@ Not taken in the twenty-first wave; still open.
 
 ### To `src/request.rs`: a direction key
 
-Open (`DECISIONS.md`): `KeyKind::Dir`, or an emit over an attribute. Once a
+Open (`docs/DECISIONS.md`): `KeyKind::Dir`, or an emit over an attribute. Once a
 key exists, `diskstats.rs` emits two events per device per poll and
 `catalog/io.yaml` declares `dir`.
 
-**Landed in the twenty-first wave**: `KeyKind::Dir` (data, `2439ba8`), produced by `diskstats.rs` and `/proc/net/dev` (collectors, `c7adc61`); the open decision is settled (`DECISIONS.md`).
+**Landed in the twenty-first wave**: `KeyKind::Dir` (data, `2439ba8`), produced by `diskstats.rs` and `/proc/net/dev` (collectors, `c7adc61`); the open decision is settled (`docs/DECISIONS.md`).
 
 ### To the system and flows views: `io.bytes` as `raw`, and the file to device edge
 
@@ -11906,7 +11906,7 @@ program's bar (the process workload's 0.25 s on a lock reads as sleep).
 
 Stream docs' handoff is `docs/fixes/w20-docs.md`.
 
-### To `tests/cli.rs`: `CATALOG.md`'s Cost column held to the catalog
+### To `tests/cli.rs`: `docs/CATALOG.md`'s Cost column held to the catalog
 
 A test reading each family table's Cost cell against the chain's tiers
 (`mem.cache_l1`/`.llc`/`.tlb` the one grouped row whose ids share no prefix).
@@ -12021,7 +12021,7 @@ break its program.
 
 ### To `src/triage/**`: `--program-stderr` and `--runs`
 
-**Answered in the twenty-fourth wave** (stream triage, `9f3124b`): each launch's stderr kept as `FILE.<n>`, `FILE` the last launch's (`DECISIONS.md`).
+**Answered in the twenty-fourth wave** (stream triage, `9f3124b`): each launch's stderr kept as `FILE.<n>`, `FILE` the last launch's (`docs/DECISIONS.md`).
 
 `omn latency --runs N --program-stderr FILE` keeps the last run's stderr:
 whether to write `FILE.<n>` per run, or append.
@@ -12051,15 +12051,15 @@ A `dir` key falls to `Key::Other` and prints as JSON; the system view could
 then ask `--keys dev,dir` and `--keys iface,dir` for series per direction
 (collectors' line, below).
 
-### To `CATALOG.md` and `docs/contributing.md`: `targets: {pid: "no: <reason>"}`, and `dir`
+### To `docs/CATALOG.md` and `docs/contributing.md`: `targets: {pid: "no: <reason>"}`, and `dir`
 
-**Answered in part in the twenty-fourth wave** (the wave's documentation commit): `CATALOG.md` §0 lists `dir` among the keys, with every source that carries it. **Still open**: the `targets:` form in `docs/contributing.md`.
+**Answered in part in the twenty-fourth wave** (the wave's documentation commit): `docs/CATALOG.md` §0 lists `dir` among the keys, with every source that carries it. **Still open**: the `targets:` form in `docs/contributing.md`.
 
 The form where the `targets:` line is described, and `dir` among the keys.
 
 ### To `src/triage/**`: the provenance from the results
 
-**Answered in the twenty-fourth wave** (stream triage, `f49d539`): `PerfMapNames::of_run` reads `named_by` and `perf_maps`; a map is read back only for stacks without provenance, by the path and `(dev, ino)` recorded (`DECISIONS.md`).
+**Answered in the twenty-fourth wave** (stream triage, `f49d539`): `PerfMapNames::of_run` reads `named_by` and `perf_maps`; a map is read back only for stacks without provenance, by the path and `(dev, ino)` recorded (`docs/DECISIONS.md`).
 
 Read `named_by` and `perf_maps` from the results rather than reading
 `/tmp/perf-<pid>.map` back after the run.
@@ -12101,7 +12101,7 @@ Taken in `start()` as `io.bytes`' now is: the same two lines.
 `net.request`'s `rx_bytes`, `tx_bytes` and `holder_since_ns` on the request
 page; the system view's disk and network rows split by `dir`.
 
-### To `CATALOG.md`: `dir` and `net.request`'s new fields
+### To `docs/CATALOG.md`: `dir` and `net.request`'s new fields
 
 **Answered in the twenty-fourth wave** (the wave's documentation commit): `dir` in §0 with every source that carries it, and a `net` caveat naming `net.request`'s `rx_bytes`, `tx_bytes` and `holder_since_ns`.
 
@@ -12273,11 +12273,11 @@ repeatedly, so it belongs on the flaky tally once its cause is read.
 ### The earlier waves' filings
 
 None answered in the twenty-second wave: nothing under `src/`, `view/`,
-`CATALOG.md` or `docs/contributing.md` changed (`git diff --stat
+`docs/CATALOG.md` or `docs/contributing.md` changed (`git diff --stat
 f68c656..705a75d`: `catalog/references/`, `tests/reference*`,
 `docs/replaces*`, the handoffs, and three test files' guard on
 `catalog/references/`). Every section of the twenty-first wave above stands
-open as written; `STATE.md`'s "What remains", item 1, lists them under
+open as written; `docs/dev/STATE.md`'s "What remains", item 1, lists them under
 "Still open from the twenty-first wave".
 
 ## Needs from another stream — the twenty-second wave, stream reference
@@ -12303,7 +12303,7 @@ is giving (an exit code of its own, or a line the runner can match).
 
 ### To `tests/reference/runner.rs`: one run with the tool wrapping `omn`, and a computed value
 
-**Answered in the twenty-third wave** (stream runner): `run: tool_wraps_omn`, `setup:` as an argv, `compare.omn_parse` (`DECISIONS.md`); `setup: spin_pid` is `run: attach`, and `setup: cgroup_spin` is not offered -- perfstat makes its cgroup in `setup` instead and asks for a `teardown:` (below, the twenty-third wave).
+**Answered in the twenty-third wave** (stream runner): `run: tool_wraps_omn`, `setup:` as an argv, `compare.omn_parse` (`docs/DECISIONS.md`); `setup: spin_pid` is `run: attach`, and `setup: cgroup_spin` is not offered -- perfstat makes its cgroup in `setup` instead and asks for a `teardown:` (below, the twenty-third wave).
 
 `same_run: tool_wraps_omn` (run `reference.command` with `omn`'s argv
 appended and no workload; the same field as power's, one implementation for
@@ -12311,7 +12311,7 @@ both), `setup: cgroup_spin` (a user-owned child cgroup with a spinning
 `spin.py`, `{cgroup}` and `{cgroup_abs}` substituted, removed after) and
 `setup: spin_pid` (`{pid}` of a background `spin.py`); and a value `omn`
 computes -- a summary's series summed, two fields divided -- which every
-pair carries as `compare.omn_jq` (`DECISIONS.md`, "Open"). Until then
+pair carries as `compare.omn_jq` (`docs/DECISIONS.md`, "Open"). Until then
 `tests/reference/workloads/perfstat/run_pairs.py` is the reading.
 
 ### To `catalog/cpu.yaml`, `catalog/mem.yaml` and their collectors
@@ -12696,7 +12696,7 @@ mount's source undercounts it.
 
 **Answered in the twenty-fourth wave**: the ten pairs held in the twenty-fourth wave's quiet run, `runqlat` with `--system` beside the program, its gap of scope gone.
 
-The ten pairs have never compared a tool's number; `STATE.md`, "What
+The ten pairs have never compared a tool's number; `docs/dev/STATE.md`, "What
 remains", item 2. If a median misses by one bucket, the pair goes `alongside`
 (one run), not wider.
 
@@ -12788,7 +12788,7 @@ attach pairs settle 2 s. Attaching faster, or saying when it is attached.
 
 **Answered in the twenty-fourth wave** (stream reference): all nine held through the runner with `perf` granted; not moved to `alongside`, since their counts are exact on separate runs and `perf-lock-contention` is already one run. `perf-trace-count` is filed again (the twenty-fourth wave, coordinator).
 
-Verified only once root is granted (`STATE.md`, "What remains", item 2); then
+Verified only once root is granted (`docs/dev/STATE.md`, "What remains", item 2); then
 `perf-lock-contention` is worth moving to `alongside`, where `rel: 0.3` (a
 band for two separate churns) would become a same-run band.
 
@@ -12834,8 +12834,8 @@ leading event is fixed, drop the skip in `raw_means` and
 
 ## Needs from another stream — the twenty-third wave, stream top
 
-**Landed in this pass**: the `onpid.py` request closed (above), `DECISIONS.md`
-and `STATE.md` say what replaced it.
+**Landed in this pass**: the `onpid.py` request closed (above), `docs/DECISIONS.md`
+and `docs/dev/STATE.md` say what replaced it.
 
 ### To stream top: `top-cpus`
 
@@ -12907,7 +12907,7 @@ a 10 ms sleep), the same losses pairing an enter with the wrong exit.
 **Answered in part in the twenty-fourth wave**: `runqlat` runs with `--system` beside the program (stream run's bounded window, stream reference's pair) and held. `memleak-outstanding` stays a gap.
 
 `runqlat.bt` is the machine over a program's run; `omn` cannot watch the
-machine for as long as a program runs (`--system` beside `-- prog`, `STATE.md`
+machine for as long as a program runs (`--system` beside `-- prog`, `docs/dev/STATE.md`
 item 1), so its histogram is the program's: 2.1 ms median for the workload
 against 128 us for the machine on a quiet run. It held during the wave only
 because the load made the workload's waits the machine's. libbpf-tools'
@@ -12942,7 +12942,7 @@ both families whole, then each pair alone three times, all held
 
 ### The runs carried since the nineteenth wave, alone after the reboot (2026-10-05)
 
-`STATE.md` "Still to run", items 2 to 5, one after another on a quiet
+`docs/dev/STATE.md` "Still to run", items 2 to 5, one after another on a quiet
 machine (load about 1 on 24 cpus), the GPU free:
 
 - **GPU tests** (item 2): `gpu_counters`, `gpu_kernel`, `family_gpu`,
@@ -12974,7 +12974,7 @@ machine (load about 1 on 24 cpus), the GPU free:
 - **`examples/proc-not-built.yml` exits 1, not 3.** The service now mounts
   tracefs at 755, but the event `id` files stay `0440 root`, so the pinned
   `bpf:tp` is refused by the machine (1) before the build (3). The
-  expectation in `STATE.md` assumed a readable `id`; making the files
+  expectation in `docs/dev/STATE.md` assumed a readable `id`; making the files
   readable is a chmod of every `events/*/*/id` at boot, outside the
   project's privilege model -- the example's comment already names 1 as the
   answer on such a machine.
@@ -12987,7 +12987,7 @@ machine (load about 1 on 24 cpus), the GPU free:
   `lo`. As expected.
 - **The device's clocks**: under `nvidia-smi -lgc 1500,1500` the
   performance levels still read up to 2205 MHz, and `omn` says "not shown
-  locked". Settled in `DECISIONS.md` ("Settled after the twenty-third wave"):
+  locked". Settled in `docs/DECISIONS.md` ("Settled after the twenty-third wave"):
   a range is never "unlocked"; a lock needs another source (`shader_lock`).
   Persistence mode read back on, then off. A snapshot's cost line reads
   2856 % and 4349 % against `true`'s 0.6 ms of cpu: a percentage of a target
@@ -13029,7 +13029,7 @@ the start. `make check` red in the lib tests (1694 passed, 2 failed); the
 `--no-fail-fast` run 3048 passed, 13 failed, 15 ignored; the reference pairs
 alone, one family after another (`--test-threads=1`), 168 passed, 3 failed.
 Three merge regressions fixed on main, all documents and data:
-`a2ce567` (`CATALOG.md`'s Cost column for `mem.numa` and `mem.swap`,
+`a2ce567` (`docs/CATALOG.md`'s Cost column for `mem.numa` and `mem.swap`,
 stream mem's new backends), `6f3c25a` (`docs/view/README.md`'s table of
 needs and the system workload's session, stream top's `system` view asking
 `proc.tasks` and keying disk and network by `dir`), `367ad20` (`pidstat-w`'s
@@ -13120,7 +13120,7 @@ stream". **Landed in the wave**: the lazy mode's dispatch over
 `TraceArgs::source` as a list (stream lazy); the runner reading exit 1's last
 line (stream reference); `runqlat` written as `--system` beside its program
 (stream reference). **Landed in the wave's documentation commit**:
-`man/omn.1` and `CATALOG.md` for `-r`, a program beside a target, `launch:`,
+`man/omn.1` and `docs/CATALOG.md` for `-r`, a program beside a target, `launch:`,
 several sources, `--pid` ending at its exit, exit 1's three lines and
 `lifetime.exit_code`/`signal`.
 
@@ -13276,7 +13276,7 @@ forked-fio pair; the `%util` row can cite `io.util`.
 
 Stream mem's handoff is `docs/fixes/w24-mem.md`. **Landed in the wave's
 documentation commit**: the IBS finding marked answered by stating it (above,
-the twenty-third wave); `CATALOG.md` and `man/omn.1` for `mem.system`,
+the twenty-third wave); `docs/CATALOG.md` and `man/omn.1` for `mem.system`,
 `mem.oom`, `mem.numa --system` and `mem.swap`'s `perf:kprobe`.
 
 ### To `src/event.rs` and `src/request.rs`: `level`, `mapping`, `user`
@@ -13295,7 +13295,7 @@ perf counts cycles between tags.
 ## Needs from another stream — the twenty-fourth wave, stream net
 
 Stream net's handoff is `docs/fixes/w24-net.md`. **Landed at the merge**:
-`CATALOG.md`'s `mem.numa` and `mem.swap` rows (`a2ce567`), which net found
+`docs/CATALOG.md`'s `mem.numa` and `mem.swap` rows (`a2ce567`), which net found
 red.
 
 ### To `src/request.rs`, `src/event.rs` and `src/format.rs`: a counter key and pcap
@@ -13408,7 +13408,7 @@ timebar would subtract `sched.futex`'s waits from the task's `sleeping`.
 
 Stream reference's handoff is `docs/fixes/w24-reference.md`. **Landed at the
 merge**: `pidstat-w`'s marker removed (`367ad20`); in this commit, the
-`cpu.util` first-poll explanation of `top-cpus` (above), and `STATE.md`
+`cpu.util` first-poll explanation of `top-cpus` (above), and `docs/dev/STATE.md`
 saying no pair skips on `sudo -n`.
 
 ### Filed for the runner's owner: the tools' own losses
@@ -13476,7 +13476,7 @@ events and `sched.switches` 375 260. The same machine sources alone recorded
 25 `cpu.util` events in 6 s. A poll round that never runs is counted nowhere.
 One way out: without a target, the per-target trace sources are not asked by
 default, or are asked with a sample period. Under the wave's load; rerun
-alone first (`STATE.md`, "Still to run", item 13).
+alone first (`docs/dev/STATE.md`, "Still to run", item 13).
 
 ### To `src/collect/io/` (`io.bytes` on `fs:proc`): bytes from before the window
 
@@ -13499,7 +13499,7 @@ flame's hottest function.
 ## Needs from another stream — the twenty-fourth wave, stream lazy
 
 Stream lazy's handoff is `docs/fixes/w24-lazy.md`. **Landed in the wave's
-documentation commit**: `man/omn.1` and `CATALOG.md` describe the mode and
+documentation commit**: `man/omn.1` and `docs/CATALOG.md` describe the mode and
 the `default:` item.
 
 ### To `src/bpf/fentry.rs`: `io.syscall` on a launched script
@@ -13571,7 +13571,7 @@ now that `ppid` is on the raw events; `read_mcp`'s job can read it the way
 
 ## The runs after the twenty-fourth wave, one at a time (2026-10-05)
 
-`STATE.md`'s "Still to run" items 11 to 14, at `f04e6cf`, with the user
+`docs/dev/STATE.md`'s "Still to run" items 11 to 14, at `f04e6cf`, with the user
 typing what needs a password. The user was working on the machine for item
 12, so its timing pairs ran beside a light interactive load.
 
@@ -13637,7 +13637,7 @@ application clocks. Limit put back to 300 W by the user.
 
 ## The runs after the twenty-fourth wave, alone on an idle machine (2026-10-06)
 
-`STATE.md`'s items 1 and 3 at `e1f9de9`, nothing else running (the user away;
+`docs/dev/STATE.md`'s items 1 and 3 at `e1f9de9`, nothing else running (the user away;
 an editor held a GPU context through the GPU bench).
 
 ### The backends bench (`target/bench/backends-1791242370`)
@@ -14098,7 +14098,7 @@ Eight tests fail on this machine on `main` and after the wave alike, for want
 of CAP_BPF, CAP_PERFMON or a quiet disk: they expect a served or a
 build-refused answer (exit 3) where an unprivileged machine answers exit 1,
 or a device that moved every fsynced byte. They are not regressions; each is
-listed in `STATE.md`, "The twenty-fifth wave, merged". They are worth a
+listed in `docs/dev/STATE.md`, "The twenty-fifth wave, merged". They are worth a
 privileged rerun, where they are expected to pass:
 `family_sched::a_counted_switch_rate_is_per_second_of_the_run`,
 `scenario_net::a_net_source_this_build_does_not_collect_exits_three_and_names_the_backend`,
@@ -14538,7 +14538,7 @@ the previous run (2097152 against 256000 ns). One miss in three runs: watched.
 
 `claude/w26` rebased on `main`, one `cargo test --workspace --no-fail-fast`
 under `systemd-run`: 3234 passed, 5 failed. Three were the wave's own tests
-not following its counter-file fallbacks (`CATALOG.md`'s cost column for
+not following its counter-file fallbacks (`docs/CATALOG.md`'s cost column for
 `mem.page_alloc`, `net.tcp.retransmit` and `sched.irq`; `io.latency`'s budget
 note, whose `/proc/diskstats` backend now serves only a count; and
 `mem.page_alloc`'s implemented backends), fixed in the tests and the table.

@@ -6,7 +6,7 @@
 //! count of datagrams a loop sent, a link whose far end was never brought up --
 //! and the question each test asks is whether the tool found it.
 //!
-//! The four classes of `BRIEF.md` are marked in the section headers below. What
+//! The four classes of `docs/dev/BRIEF.md` are marked in the section headers below. What
 //! this family cannot check, and why, is in `docs/scenarios/net.md`, together
 //! with the defects these scenarios found.
 //!
@@ -755,7 +755,7 @@ fn forcing_a_net_backend_nothing_implements_names_it_and_exits_three() {
         let outcome = omn(&args);
         let complaint = stderr(&outcome);
         // Unwritten and missing something here is answered in the chain's
-        // order, the machine first (`DECISIONS.md`, "one order for unbuilt
+        // order, the machine first (`docs/DECISIONS.md`, "one order for unbuilt
         // and missing"): `net.hwts` with no readable PTP clock exits 1.
         if code(&outcome) == 1 && complaint.contains("missing:") {
             eprintln!(
@@ -2077,7 +2077,7 @@ fn the_trace_leg_of_the_sweep_answers_or_names_the_backend_it_would_need() {
     // Its pinned twin: the same request with the per-packet backend forced
     // exits the same way the walk does, on either branch below. The walk said
     // "the machine" and the pin "the build" on a runner with no readable PTP
-    // clock until the eighteenth wave (`DECISIONS.md`, "one order for unbuilt
+    // clock until the eighteenth wave (`docs/DECISIONS.md`, "one order for unbuilt
     // and missing").
     let pinned = omn(&[
         "net.hwts",
@@ -2130,7 +2130,7 @@ fn the_trace_leg_of_the_sweep_answers_or_names_the_backend_it_would_need() {
         complaint.contains("so_timestamping") && complaint.contains("no collector is written"),
         "the refusal should name the backend a per-packet answer needs: {complaint}"
     );
-    // `DECISIONS.md` settled that "valid, and not built is exit 3, wherever it
+    // `docs/DECISIONS.md` settled that "valid, and not built is exit 3, wherever it
     // is discovered" (defect 7 of docs/scenarios/net.md).
     assert_eq!(
         code(&outcome),

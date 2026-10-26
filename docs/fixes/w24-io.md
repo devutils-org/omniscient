@@ -1,7 +1,7 @@
 # The twenty-fourth wave, stream io
 
 Branch `feat/w24-io`. Defects first, then the additions the comparison
-asked for (`docs/fixes/w22-io.md`, `docs/fixes/w23-io.md`, `STATE.md` "After
+asked for (`docs/fixes/w22-io.md`, `docs/fixes/w23-io.md`, `docs/dev/STATE.md` "After
 the twenty-third wave" item 1). `docs/scenarios/io.md`, "The twenty-fourth
 wave", has each item as a numbered entry (25 to 29).
 
@@ -133,7 +133,7 @@ All three findings were right; each is fixed.
 None beyond what ran. `sudo -n perf record` (a granted witness) was used once
 to profile `io.fsync`.
 
-## Decision lines for `DECISIONS.md`
+## Decision lines for `docs/DECISIONS.md`
 
 - **A process target follows the processes it starts, in every io program**
   (block, fsync, page cache, VFS calls), through `sched_common::Descendants`,
@@ -169,5 +169,5 @@ to profile `io.fsync`.
   unlink (stream net's `src/collect/net/connect.rs`).
 - **reference**: the three pairs in "Not done" 4; the iostat `%util` row in
   `docs/replaces/io.md` can now cite `io.util`.
-- **coordinator** (`CATALOG.md`, `man/omn.1`): `io.util` and `io.vfs` rows;
+- **coordinator** (`docs/CATALOG.md`, `man/omn.1`): `io.util` and `io.vfs` rows;
   `dir` among `io.latency`'s keys.

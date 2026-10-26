@@ -135,7 +135,7 @@ pub struct DrainDrop {
 /// A series keyed by that key is short by this and by nothing else, which is
 /// the point: a profile keyed by `task` whose one thread overflowed its ring
 /// used to mark every thread's series with the run's whole drop count, and a
-/// reader could not tell which thread was missing samples (`STATE.md`, the
+/// reader could not tell which thread was missing samples (`docs/dev/STATE.md`, the
 /// note on `cross_compute`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RingLoss {

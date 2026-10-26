@@ -112,7 +112,7 @@ filed exactly: one body, one call in `triage/engine.rs`, and two
   exactly. The shim sees every call, so the workload's resolution is one
   allocation. Both runs resolved the same request onto the same backend.
 
-`ROADMAP.md` is not this stream's file. Both criteria can move to `[x]`,
+`docs/ROADMAP.md` is not this stream's file. Both criteria can move to `[x]`,
 citing the two tests below.
 
 ### 6. Filed items, and more filed against these files
@@ -239,7 +239,7 @@ Nothing. The tests above ran with the capabilities `make` grants, at
 `perf_event_paranoid` -1. Without the capabilities, the phase 2 test skips
 (`io.latency --pid` needs eBPF) with the resolver's refusal. The others run.
 
-## For DECISIONS.md
+## For docs/DECISIONS.md
 
 - **`--symbols debuginfod` on a source whose collector would not ask is
   refused with exit 3**, the build's gap. It is not accepted and ignored,
@@ -285,8 +285,8 @@ Under "Needs from another stream — the fifteenth wave, stream resolver" in
   and `KeyNotCarried` / `StackRefused` to the `whose` they carry;
 - `tests/scenario_cpu.rs` with `src/unwind.rs`: a forced `--stack` mode this
   machine cannot serve moves from exit 3 to exit 1, in one commit;
-- the coordinator: `STATE.md:348` still says `src/unwind.yaml`;
-- the coordinator: `CATALOG.md:198` and `DECISIONS.md:443` should name
+- the coordinator: `docs/dev/STATE.md:348` still says `src/unwind.yaml`;
+- the coordinator: `docs/CATALOG.md:198` and `docs/DECISIONS.md:443` should name
   `catalog/unwind.yaml`;
 - `src/collect/cpu/mod.rs` (optional): the factory could take
   `resolved.stack`;
@@ -313,7 +313,7 @@ a test run, not a defect.
    omn --dump-resolved cpu.profile ... --symbols debuginfod -- true` is
    refused with exit 1 and prints nothing to stdout. The same goes for a forced
    `--stack lbr` or `sframe` this machine cannot serve (exit 3, held; see For
-   DECISIONS.md).
+   docs/DECISIONS.md).
 3. **`serves` took `cannot_serve_target`'s doc comment.** Real. `serves`
    now sits above that doc block.
 4. **"Eleven" `symbols: None,` lines.** Real: thirteen (seven in
@@ -321,9 +321,9 @@ a test run, not a defect.
    `docs/open-findings.md`. The only other edits outside the owned list are
    the ones in `src/collect/cpu/profile.rs`, which is owned.
 5. **`docs/unwind.md` said things this stream made false.** Real. Lines 284,
-   424, 431, 437 and the "For DECISIONS.md" line now say that each item closed
+   424, 431, 437 and the "For docs/DECISIONS.md" line now say that each item closed
    in the fifteenth wave, and point to its section. That section gains the
-   refusal of item 2. `STATE.md:348` is not this stream's, so it is filed.
+   refusal of item 2. `docs/dev/STATE.md:348` is not this stream's, so it is filed.
 6. **The reviewer's test run.** Not a defect. It confirmed that the new tests
    take their full paths with the capabilities present.
 

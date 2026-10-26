@@ -149,7 +149,7 @@ target/debug/omn top -f /tmp/s.yml            # then 5: the reading live, the de
 target/debug/omn top -- python3 -m http.server --bind 127.0.0.1 8000   # 5, while a client lists a directory
 ```
 
-## Decision lines for DECISIONS.md
+## Decision lines for docs/DECISIONS.md
 
 | Decision | Why |
 |---|---|

@@ -1,9 +1,9 @@
 # The twenty-second wave, stream top
 
 Branch `feat/w22-top`, from `main` at `05ecaa0` (the brief, no stream merged
-yet). `BRIEF.md`, the streams table's **top** row: `top`, `htop`, `btop`
+yet). `docs/dev/BRIEF.md`, the streams table's **top** row: `top`, `htop`, `btop`
 against `omn top` and `cpu.util`/`mem.*` per process; `pmap`, `smem` (RSS,
-PSS, USS). `STATE.md`, "What remains", item 8. Measured on the development
+PSS, USS). `docs/dev/STATE.md`, "What remains", item 8. Measured on the development
 machine with the other eleven streams loading it (load average up to 67).
 
 ## What landed

@@ -1,6 +1,6 @@
 # Stream A — exit codes and the runner
 
-What became of the twenty-seven defects `BRIEF.md` gave this stream, in three
+What became of the twenty-seven defects `docs/dev/BRIEF.md` gave this stream, in three
 groups. The files are `src/main.rs`, `src/cli.rs`, `src/collect/mod.rs` and
 `src/error.rs`, plus the scenario assertions that named each defect.
 
@@ -316,12 +316,12 @@ is not a `sched` defect — no collector anywhere reads the request's keys". It 
 reach it. Silently substituting one of the five axes the tool advertises is
 worse than refusing the request, and it is worth someone's wave.
 
-### `man/omn.1` and `GUIDE.md` now document exit codes that have changed
+### `man/omn.1` and `docs/GUIDE.md` now document exit codes that have changed
 
 Both carry the table this stream rewrote and neither is in this stream's paths.
 `man/omn.1` documents exit 2 as *"it cannot mean what it asks for, or this
 machine cannot serve it"* and exit 1 as *"usage, parsing, or a failure while
-running"*; `GUIDE.md` §"The refusal" has the four-row table with the two wrong
+running"*; `docs/GUIDE.md` §"The refusal" has the four-row table with the two wrong
 codes in it, and a paragraph below explaining that two of them are wrong. All
 three want the coordinator. The exact replacement text is in
 `docs/open-findings.md`.

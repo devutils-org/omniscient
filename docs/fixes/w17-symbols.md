@@ -121,7 +121,7 @@ machine at 2 for another reason:
 cargo test --test stack_capture -- perf_map python
 ```
 
-## Decision lines for `DECISIONS.md`
+## Decision lines for `docs/DECISIONS.md`
 
 - **A perf map is read under `--symbols local`** (settled, 2026-10-03, stream
   symbols): `/tmp/perf-<pid>.map` is a file the target wrote on this machine
@@ -145,7 +145,7 @@ cargo test --test stack_capture -- perf_map python
   in the stack table, and the facts line carries `perf-<pid>.map: perf-map`.
   A verdict can say how it knows the name from that line, or from
   `Frame::named_by` where it holds `Stack`s rather than labels.
-- **Coordinator (`docs/unwind.md`, `CATALOG.md`'s `--symbols` lines)**: add
+- **Coordinator (`docs/unwind.md`, `docs/CATALOG.md`'s `--symbols` lines)**: add
   the perf map to what `--symbols local` reads.
 
 ## The suite

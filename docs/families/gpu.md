@@ -1,7 +1,7 @@
 # Family `gpu`
 
 What is written, what it was checked against, and what the numbers do not mean.
-The vocabulary is in `CATALOG.md` section 8 and in `catalog/gpu.yaml`; this file
+The vocabulary is in `docs/CATALOG.md` section 8 and in `catalog/gpu.yaml`; this file
 is the measurement log.
 
 ## The asymmetry is the design
@@ -450,7 +450,7 @@ scenario skips with that.
   a correlation key, so `summary`, `hist` and `topk` group by thread. A
   breakdown by call is `--filter "api == 'cuCtxSynchronize'"`, one call at a
   time, or `raw`. This is the same gap as "`topk` ranks a series, not an
-  attribute" in `STATE.md`, and needs surface syntax nobody owns.
+  attribute" in `docs/dev/STATE.md`, and needs surface syntax nobody owns.
 - **Which device.** No `gpu` key, for the reason above.
 - **A program with no driver behind the shim** gets the API's own "not
   initialized" code (`CUDA_ERROR_NOT_INITIALIZED`,
@@ -466,7 +466,7 @@ scenario skips with that.
 
 ## Index rows for the coordinator
 
-For `examples/README.md` and `GUIDE.md`, `gpu` table:
+For `examples/README.md` and `docs/GUIDE.md`, `gpu` table:
 
 ```
 | `gpu-api-cuda.yml` | How long the host spends inside the CUDA driver API, call by call. |

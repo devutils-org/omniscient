@@ -1,6 +1,6 @@
 # The eighteenth wave, stream bench
 
-Branch `feat/w18-bench`, from `main` at `9cd5409`. One item: `STATE.md`
+Branch `feat/w18-bench`, from `main` at `9cd5409`. One item: `docs/dev/STATE.md`
 "After the seventeenth wave" item 9, the bench's bands corrected to the table
 that ran before the wave (`target/bench/backends-1791030430/` in the main
 checkout, read there, not copied).
@@ -77,8 +77,8 @@ The fix round answers the adversarial review of `6672a46`.
   `within`, `corrected` or `stands ...: <reason>`, anything else fails.
   Shown: deleting `io.size`'s row fails `the_record_is_whole_and_reads_one_way`;
   putting `io.size`'s `bpf:tp` back to `low` fails the equivalence test.
-- **Nit: the resolution floor and `CATALOG.md`** are engine's files; the
-  requests below stand, with the seven new lines added to the `CATALOG.md`
+- **Nit: the resolution floor and `docs/CATALOG.md`** are engine's files; the
+  requests below stand, with the seven new lines added to the `docs/CATALOG.md`
   one.
 - **Nit: count-mode `pmu` left `free`.** `mem.cache_llc` through `pmu` is
   now `low`, beside its measured `pmu:generic` (the same counters).
@@ -116,7 +116,7 @@ The fix round answers the adversarial review of `6672a46`.
   file. Filed below. Until it lands, the next table will flag `mem.swap`
   through `fs:cgroup` again where `bench_bands` does not.
 - **Re-measure**: `scripts/bench.sh` is not a stream's to run. Wanted below.
-- **Correct `CATALOG.md`'s cost column**: stream engine's file. Filed below.
+- **Correct `docs/CATALOG.md`'s cost column**: stream engine's file. Filed below.
 
 ## Privileged runs wanted
 
@@ -134,7 +134,7 @@ column, the band declared, the verdict) and run
 outside, and every `stands` whose reason is gone. `cpu.profile` is the row
 most likely to move back down, `io.latency` the most likely to move up.
 
-## Decision lines for DECISIONS.md
+## Decision lines for docs/DECISIONS.md
 
 - **The cost bands follow the bench's table, and a test holds them to it**
   (wave 18): 43 bands corrected to the second table; `tests/bench_bands.rs`
@@ -174,7 +174,7 @@ most likely to move back down, `io.latency` the most likely to move up.
   serving a target it serves" belongs with the other chain invariants,
   move `cheaper_equivalents` from `tests/bench_bands.rs` into the loader's
   validation. The catalog satisfies it today.
-- **engine (`CATALOG.md`)**: the cost column for the rows whose bands moved,
+- **engine (`docs/CATALOG.md`)**: the cost column for the rows whose bands moved,
   including the fix round's (`io.size`, `io.queue`, `io.latency` through
   `bpf:tp`; `proc.exec`, `proc.exit` through `bpf:tp`; `power.freq` through
   `pmu`; `net.tcp.rtt` through `bpf:fentry`, `med`; `mem.cache_llc` through

@@ -2,7 +2,7 @@
 
 Stream docs owned `examples/gpu-draw-in-watts.yml`, `examples/power-energy.yml`,
 `docs/scenarios/power.md`, `docs/install.md`, `docs/open-requests.md`,
-`docs/contributing.md`, `README.md` and `DEMO.md`. No file under `src/` or
+`docs/contributing.md`, `README.md` and `docs/DEMO.md`. No file under `src/` or
 `tests/` changed, so no `make check` was run (the brief's rule for a
 documents-only stream). Every output pasted below was run on the development
 machine (3900X, 24 cpus, Linux 7.2.7, paranoid -1, `CAP_BPF` and
@@ -88,7 +88,7 @@ against, plus `cargo test --test cli` (26 passed).
      - The snapshot's rows: 69 landed, 4 superseded, 16 partly done and 16
        open.
      - Later filings: 31 landed, 1 superseded, 1 partly done and 1 open.
-4. **`README.md` and `DEMO.md`.**
+4. **`README.md` and `docs/DEMO.md`.**
    - The licence section was already in the README at 37f17c8:
      `LICENSE-MIT`, `LICENSE-APACHE`, and `src/bpf` under `MIT OR GPL-2.0`
      with `Dual MIT/GPL` declared to the kernel. It was checked against
@@ -101,7 +101,7 @@ against, plus `cargo test --test cli` (26 passed).
        reach.
      - The `omn list mem` excerpt was re-run, including the misaligned
        `extreme` row (filed).
-   - `DEMO.md`: every command was re-run and the outputs refreshed (all
+   - `docs/DEMO.md`: every command was re-run and the outputs refreshed (all
      five sections and `omn list`).
      - Section 1: the program's own 146.44 ms of lock wait against `omn`'s
        146.34 ms.
@@ -144,7 +144,7 @@ the comments of the two sessions changed.
 
 None.
 
-## For DECISIONS.md
+## For docs/DECISIONS.md
 
 - **A quoted output that cannot be regenerated keeps its numbers and says
   so.** When a document quotes the output of a defect that has since been

@@ -2251,7 +2251,7 @@ fn is_child() -> bool {
     std::env::var_os("OMN_JOIN_LOAD_CHILD").is_some()
 }
 
-/// ROADMAP.md phase 5: no open-state leak, under load.
+/// docs/ROADMAP.md phase 5: no open-state leak, under load.
 ///
 /// A million and a half synthetic block-request events of recycled pointers, through a
 /// `scoped_eq` rule with a window and a map smaller than what is in flight:
@@ -2442,7 +2442,7 @@ fn online_set() -> Option<std::collections::BTreeSet<u64>> {
     Some(set)
 }
 
-/// ROADMAP.md phase 5: adding a boundary means adding a rule, zero lines of
+/// docs/ROADMAP.md phase 5: adding a boundary means adding a rule, zero lines of
 /// engine.
 ///
 /// Both halves. The engine names no source: not one catalog id is a string
@@ -2568,7 +2568,7 @@ fn a_new_boundary_is_a_rule_in_a_session_and_no_line_of_engine() {
     assert!(balances(&states), "{states:?}");
 }
 
-/// ROADMAP.md phase 5: evictions appear in the user-visible output.
+/// docs/ROADMAP.md phase 5: evictions appear in the user-visible output.
 ///
 /// The same boundary, with a map of two states and a window of five
 /// milliseconds, over a machine with more cpus than that: each poll reads

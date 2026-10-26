@@ -1,6 +1,6 @@
 # The nineteenth wave, stream core
 
-Branch `feat/w19-core`, from `main` at `4aef377`. `BRIEF.md`, "core -- the
+Branch `feat/w19-core`, from `main` at `4aef377`. `docs/dev/BRIEF.md`, "core -- the
 frame every view draws in": `omn top` live, `--replay` and `--gallery`; the
 data layer; the trust style; the registry with the nine views as stubs; the
 fixture recordings and the snapshot harness; and which sources each view
@@ -308,7 +308,7 @@ stream's `tests/gpu_workload.py` has a launch-bound workload by then, that one
 gives the lanes more kernels to draw. Better still: add it to
 `tests/view_fixtures/record.sh` as `record_gpu_kernels`.)
 
-## Decision lines for DECISIONS.md
+## Decision lines for docs/DECISIONS.md
 
 - **The view is a crate `omn` links, and it depends on nothing of `omn`**
   (wave 19): `view/` reads runs through a field-for-field mirror of
@@ -362,7 +362,7 @@ gives the lanes more kernels to draw. Better still: add it to
 - **Coordinator, the root `Cargo.toml`**: this branch adds `"view"` to
   `members` and `omn-view = { path = "view" }` to `[dependencies]`; cupti adds
   its member to the same line -- a one-line merge.
-- **Coordinator, `man/omn.1`, `GUIDE.md`, `STATE.md`**: `omn top` and its
+- **Coordinator, `man/omn.1`, `docs/GUIDE.md`, `docs/dev/STATE.md`**: `omn top` and its
   flags are not in the manual page or the guide yet.
 - **Coordinator, `docs/open-findings.md`**: a session of 17 requests (`omn top
   --dump-session`'s) makes every 10 ms-tick source late in about one round of

@@ -1,6 +1,6 @@
 # w26 fallbacks — eBPF sources served from the kernel's own counters
 
-Phase 1 of the twenty-sixth wave (`BRIEF.md`, "Decided before this wave":
+Phase 1 of the twenty-sixth wave (`docs/dev/BRIEF.md`, "Decided before this wave":
 no backend for a source that has no honest one).
 
 ## Landed

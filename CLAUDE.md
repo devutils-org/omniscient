@@ -13,20 +13,20 @@
 
 | Path | What it is |
 |---|---|
-| `CATALOG.md` | the vocabulary: families, axes, backend notation, caveats |
+| `docs/CATALOG.md` | the vocabulary: families, axes, backend notation, caveats |
 | `catalog/*.yaml` | the same vocabulary as data, compiled into the binary |
-| `ROADMAP.md` | milestones and their exit criteria, in order |
-| `DECISIONS.md` | what is settled, what is still open, and why |
-| `STATE.md` | what works today, measured, and what remains |
+| `docs/ROADMAP.md` | milestones and their exit criteria, in order |
+| `docs/DECISIONS.md` | what is settled, what is still open, and why |
+| `docs/dev/STATE.md` | what works today, measured, and what remains |
 | `docs/contributing.md` | what a family owns, and what ground truth means |
-| `GUIDE.md` | how to run the demonstrations, and what each session shows |
+| `docs/GUIDE.md` | how to run the demonstrations, and what each session shows |
 | `docs/how-to-use/` | the user's guide, per family: which source, target, mode and cost for which question |
 | `bench/apps/` | the application suite: one manifest per archetype, run by `scripts/apps.py` (`make apps`) |
 | `docs/scenarios/*.md` | per family: what is worth measuring, and the defects the scenarios found |
-| `BRIEF.md` | the current wave of work, one section per stream; the only brief -- what comes after it is `STATE.md`'s "What remains" |
-| `docs/briefs/` | every earlier wave's brief, because `BRIEF.md` is overwritten each time and dozens of documents cite it |
+| `docs/dev/BRIEF.md` | the current wave of work, one section per stream; the only brief -- what comes after it is `docs/dev/STATE.md`'s "What remains" |
+| `docs/dev/briefs/` | every earlier wave's brief, because `docs/dev/BRIEF.md` is overwritten each time and dozens of documents cite it |
 | `docs/open-findings.md` | findings that cut across families |
-| `docs/distroproof.md` | every distribution, run with distroproof: the matrix, its findings, and their fixes (`ROADMAP.md` phase 13) |
+| `docs/distroproof.md` | every distribution, run with distroproof: the matrix, its findings, and their fixes (`docs/ROADMAP.md` phase 13) |
 | `man/omn.1` | the manual page |
 
 The catalog is **data, not documentation**. The CLI, `omn list`, the validator
@@ -125,7 +125,7 @@ the checkout and its per-stream worktrees and nothing else:
 
 The capabilities go on `omn` alone, debug and release builds: `omn-mcp`
 collects through the `omn` beside it and needs no line of its own
-(`DECISIONS.md`, "one privilege model").
+(`docs/DECISIONS.md`, "one privilege model").
 
 The comma is escaped and the path absolute on purpose (`docs/open-findings.md`
 finding 10); `make` tries that spelling first.

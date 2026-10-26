@@ -3,7 +3,7 @@
 Branch `feat/w24-reference`, merged with `main` three times: at stream
 run's merge, at power's and lazy's, then at cpu's, gpu's and emit's.
 Nothing outside the row's files changed, and no shared layer. Every item of
-`BRIEF.md`'s "reference" section landed. Item 4 is half done: stream cpu's
+`docs/dev/BRIEF.md`'s "reference" section landed. Item 4 is half done: stream cpu's
 fix retired the leading-event hold, and `pidstat-w`'s marker waits on
 stream sched (below).
 
@@ -290,7 +290,7 @@ cargo test --test reference -- --test-threads=1 --nocapture
   - the tools' own losses under load (bpftrace, perf trace);
   - `cpu.ipc`'s separate-run spread under load.
 
-  For `STATE.md`: no pair skips on this machine any more.
+  For `docs/dev/STATE.md`: no pair skips on this machine any more.
 
 ## Review
 

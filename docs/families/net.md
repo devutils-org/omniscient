@@ -412,14 +412,14 @@ on the socket, which is the check that the send path is the right one.
 - `examples/net-not-built.yml` -- rewritten to pin the unbuilt `bpf:kprobe`
   backends.
 
-The first two need rows in `examples/README.md` and `GUIDE.md`, which are the
+The first two need rows in `examples/README.md` and `docs/GUIDE.md`, which are the
 coordinator's.
 
 ---
 
 ## The request's two network rows — tenth wave, stream N
 
-`net.request` gained `net_rx` and `net_tx`, the two rows of `ROADMAP.md`'s
+`net.request` gained `net_rx` and `net_tx`, the two rows of `docs/ROADMAP.md`'s
 vertical tree the tool did not draw. `docs/scenarios/vertical.md` is the
 deliverable and has the design and the ground truth at length; what is here is
 what the family learned doing it.

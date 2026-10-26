@@ -177,7 +177,7 @@ How it works:
 `CollectError::ConflictingEnvironment` is **`Whose::Build`, exit 3**, whatever
 is left of it. Every heap collector shares, so nothing in this build produces it
 today; the next preload collector (`sched.mutex`, `gpu.api` are the candidates in
-`STATE.md`) that does not answer `share_launch` will, and exit 3 is the right
+`docs/dev/STATE.md`) that does not answer `share_launch` will, and exit 3 is the right
 answer for it: each collector asked for something real, and the build cannot put
 two values in one variable.
 
@@ -245,7 +245,7 @@ And `tests/scenario_io.rs`'s `pressure_is_a_share_of_its_own_window_and_full_nev
 failed once in the full suite (`the window that held it reports 0.002 against
 0.016 for an idle one`) and passed three times of three alone. It runs on a
 `--system` target, which this stream's changes leave as it was, and it is the
-`scenario_io` flapping `BRIEF.md` warns about: an "idle" window on a machine
+`scenario_io` flapping `docs/dev/BRIEF.md` warns about: an "idle" window on a machine
 the rest of the suite is loading.
 
 And `tests/scenario_cpu.rs`'s `a_known_number_of_retired_instructions_is_counted_as_that_number`

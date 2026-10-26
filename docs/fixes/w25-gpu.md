@@ -65,7 +65,7 @@ and module load (45 calls). `a_target_that_exits_before_the_duration_ends_
 the_run_and_names_it` went red once in the full file and passed twice alone
 (a window bound under load).
 
-## Decision lines for `DECISIONS.md`
+## Decision lines for `docs/DECISIONS.md`
 
 - `bytes_per_second` is a level, like `watts`: no sum over readings.
 - Whose stacks a source carries is the entry's `stacks:` (`device`), not a

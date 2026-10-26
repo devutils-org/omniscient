@@ -62,9 +62,10 @@ those sources explicitly. See [installation](docs/install.md).
 
 ## Documentation
 
-[Concepts and limits](REFERENCE.md) · [Quick tour](DEMO.md) ·
-[Session guide](GUIDE.md) · [Catalog](CATALOG.md) ·
-[Per-family guides](docs/how-to-use/) · [Current state](STATE.md)
+[Concepts and limits](REFERENCE.md) · [Quick tour](docs/DEMO.md) ·
+[Session guide](docs/GUIDE.md) · [Catalog](docs/CATALOG.md) ·
+[Per-family guides](docs/how-to-use/) · [Design decisions](docs/DECISIONS.md) ·
+[Roadmap](docs/ROADMAP.md) · [Current state](docs/dev/STATE.md)
 
 ## Development
 
@@ -75,6 +76,12 @@ make check     # tests, Clippy and formatting
 
 Use `make` rather than `cargo build`; see [build notes](REFERENCE.md#building-for-development)
 and [Contributing](docs/contributing.md).
+
+Omniscient is developed with coding agents, in waves of parallel work. Their
+working notes are kept rather than cleaned away, because the other documents
+cite them: [`docs/dev/`](docs/dev/) holds the measured state of the tool
+(`STATE.md`), the current wave's brief (`BRIEF.md`) and every earlier one
+(`briefs/`), and [`CLAUDE.md`](CLAUDE.md) is what an agent reads first.
 
 ## License
 

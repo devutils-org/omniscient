@@ -280,7 +280,7 @@ the capabilities from `make`, nine other streams running):
   and the `named` lines, and `verdict.task` for whose they are. The
   `agrees:` checks of `http-server-stdlib` (the serving thread's figures) and
   `gcc-shell` (cc1's) then compare like with like.
-- **coordinator**: `GUIDE.md`'s latency session, if it lists five sources or
+- **coordinator**: `docs/GUIDE.md`'s latency session, if it lists five sources or
   quotes the old sleep sentence.
 
 ## 8. Privileged runs wanted
@@ -289,7 +289,7 @@ None for this stream's own claims: everything above ran with the capabilities
 `make` grants. One run belongs with phase B rather than here: the three cases
 at `perf_event_paranoid` 2, which the coordinator already lists.
 
-## 9. Decision lines for `DECISIONS.md`
+## 9. Decision lines for `docs/DECISIONS.md`
 
 - **Which task the triage decomposes** (moves from "Open" to settled): the
   main thread, and then the task that ran in its largest row when that row is

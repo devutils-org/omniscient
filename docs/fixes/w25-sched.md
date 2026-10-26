@@ -9,7 +9,7 @@ Branch `feat/w25-sched`. Done sequentially by one agent, in the main checkout.
 - `src/bpf/map.rs` (shared): `Counters::read_per_cpu`.
 - `src/bpf/syscall.rs` (shared): `BPF_PROG_TYPE_PERF_EVENT`.
 - `src/bpf/mod.rs`: `mod sched_runqlen` and its exports.
-- `CATALOG.md`: a `sched.runqlen` row.
+- `docs/CATALOG.md`: a `sched.runqlen` row.
 
 All three shared changes are additions; nothing that was there changed.
 
@@ -86,7 +86,7 @@ lazy`, clippy, fmt. On this machine, as on `main`:
 fail for want of CAP_PERFMON and CAP_BPF. The shared layers changed by
 addition only; the coordinator's full run covers them.
 
-## Decision lines for `DECISIONS.md`
+## Decision lines for `docs/DECISIONS.md`
 
 - A kernel address that names an object for its lifetime only (a lock) is an
   attribute, never a key.

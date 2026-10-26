@@ -54,7 +54,7 @@ Branch `feat/w25-lazy`. Done sequentially by one agent.
 `--test lazy` (2 new), `-p omn-mcp` (1 new), `--test cli --test triage`,
 `--lib lazy catalog`, clippy, fmt.
 
-## Decision lines for `DECISIONS.md`
+## Decision lines for `docs/DECISIONS.md`
 
 - A composed default's band chooses the backend where its chain has a later
   one that keeps the band; the move is said with what it degrades. A pinned

@@ -1244,7 +1244,7 @@ fn a_container_no_runtime_knows_is_refused_with_what_it_said() {
 /// Both session indexes hold exactly the sessions on disk — no more and no
 /// fewer.
 ///
-/// `examples/README.md` and `GUIDE.md` belong to nobody, which is how they came
+/// `examples/README.md` and `docs/GUIDE.md` belong to nobody, which is how they came
 /// to be twenty-eight sessions short after the sixth wave: every stream wrote
 /// sessions and no stream owned the list. The commit that fixed the count said
 /// both were "checked to hold exactly the sessions on disk", and no test
@@ -1266,7 +1266,7 @@ fn the_session_indexes_hold_exactly_the_sessions_on_disk() {
         .collect();
     assert!(on_disk.len() > 100, "only {} sessions found", on_disk.len());
 
-    for index in ["examples/README.md", "GUIDE.md"] {
+    for index in ["examples/README.md", "docs/GUIDE.md"] {
         let text = std::fs::read_to_string(index).expect("the index ships");
         // A row is `| `<file>` | what it answers |`, which is the convention
         // both files already followed.
@@ -1741,7 +1741,7 @@ fn a_request_keyed_on_what_its_backend_does_not_attach_is_refused_with_the_backe
     if stderr(&undeclared).contains("does not attach") {
         let message = stderr(&undeclared);
         // The hint and the pin give one answer for the backend they name
-        // (`DECISIONS.md`, "one order for unbuilt and missing"): the machine's
+        // (`docs/DECISIONS.md`, "one order for unbuilt and missing"): the machine's
         // where that carrier lacks something here -- the capabilities, on a
         // binary that does not carry them -- and the build's where it lacks
         // nothing. Which carrier is named is the probes' to say (an unwritten
@@ -2084,7 +2084,7 @@ fn row_sources(cell: &str, catalog: &omn::Catalog) -> Vec<String> {
 }
 
 /// The tiers a chain declares, in chain order and without repeats, written as
-/// `CATALOG.md`'s Cost column writes them.
+/// `docs/CATALOG.md`'s Cost column writes them.
 fn chain_tiers<'a>(entries: impl IntoIterator<Item = &'a omn::catalog::Entry>) -> String {
     let mut tiers: Vec<String> = Vec::new();
     for entry in entries {
@@ -2098,7 +2098,7 @@ fn chain_tiers<'a>(entries: impl IntoIterator<Item = &'a omn::catalog::Entry>) -
     tiers.join(" / ")
 }
 
-/// Each family table's Cost cell in `CATALOG.md` is the catalog's chain
+/// Each family table's Cost cell in `docs/CATALOG.md` is the catalog's chain
 /// written out: the tiers its backends declare, in order and without repeats.
 /// A row naming several sources holds each one's chain to it, or their chains
 /// end to end. A row naming a source the catalog does not hold is named too:
@@ -2106,7 +2106,7 @@ fn chain_tiers<'a>(entries: impl IntoIterator<Item = &'a omn::catalog::Entry>) -
 #[test]
 fn the_catalog_document_s_cost_column_is_the_catalog_s_chain() {
     let catalog = omn::Catalog::embedded().expect("the embedded catalog loads");
-    let document = std::fs::read_to_string("CATALOG.md").expect("CATALOG.md ships");
+    let document = std::fs::read_to_string("docs/CATALOG.md").expect("docs/CATALOG.md ships");
     // The Cost column of the table being read; the Metric column is first.
     let mut cost_column: Option<usize> = None;
     let mut checked = 0;
@@ -2148,7 +2148,7 @@ fn the_catalog_document_s_cost_column_is_the_catalog_s_chain() {
             {
                 Some(entry) => entries.push(entry),
                 None => wrong.push(format!(
-                    "CATALOG.md:{}: `{id}` is in no catalog file",
+                    "docs/CATALOG.md:{}: `{id}` is in no catalog file",
                     number + 1
                 )),
             }
@@ -2165,7 +2165,7 @@ fn the_catalog_document_s_cost_column_is_the_catalog_s_chain() {
                 .map(|entry| format!("{}: {}", entry.id, chain_tiers([*entry])))
                 .collect();
             wrong.push(format!(
-                "CATALOG.md:{}: Cost is `{cell}`, and the chain declares {}",
+                "docs/CATALOG.md:{}: Cost is `{cell}`, and the chain declares {}",
                 number + 1,
                 declared.join("; ")
             ));

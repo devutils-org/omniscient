@@ -1,4 +1,4 @@
-//! The backend comparison: `ROADMAP.md` phase 8, task 4, and its first two
+//! The backend comparison: `docs/ROADMAP.md` phase 8, task 4, and its first two
 //! exit criteria -- a cost, resolution and loss table for every (source,
 //! backend) this machine serves, and the resolver's choices confirmed by it or
 //! corrected.

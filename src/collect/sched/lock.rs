@@ -7,7 +7,7 @@
 //! contended mutex burns none and looks absent.
 //!
 //! `lock:contention_begin` and `lock:contention_end` are the kernel's own
-//! account of it, and they are why `DECISIONS.md` set the floor at 6.1: below
+//! account of it, and they are why `docs/DECISIONS.md` set the floor at 6.1: below
 //! that there is no such account, and the alternative is a kprobe on every
 //! lock primitive, covering a different set on every kernel.
 //!

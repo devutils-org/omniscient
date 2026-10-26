@@ -166,7 +166,7 @@ its eBPF backend with no capability on `omn-mcp` at all
 A grant on `omn-mcp` would change nothing, and is never made.
 
 Root has both, so `sudo omn ...` works too; the capabilities are the narrower
-way of saying the same thing (`DECISIONS.md`, "Privileges"). They do not
+way of saying the same thing (`docs/DECISIONS.md`, "Privileges"). They do not
 include `CAP_SYS_ADMIN`, so a few paths stay out of reach and say so, among
 them tracefs, which is root-only on every machine measured here.
 
@@ -252,7 +252,7 @@ binary.
 ## The kernel
 
 **There is no single kernel floor: each backend states the kernel it needs**
-(`DECISIONS.md`, "Kernel floor", amended in the fifteenth wave), and the
+(`docs/DECISIONS.md`, "Kernel floor", amended in the fifteenth wave), and the
 resolver probes it like any other requirement. Below a backend's version that
 backend is refused by name with the version
 (`kernel>=5.8: missing: kernel 5.4 is older than 5.8`), and the chain moves to
@@ -334,7 +334,7 @@ A first real result, needing no capability:
 $ omn mem.rss --mode poll@100ms --emit summary -- python3 -c "import time; b = b'x' * (64 << 20); time.sleep(1)"
 ```
 
-`GUIDE.md` in the source tree has more than a hundred sessions of what to ask
+`docs/GUIDE.md` in the source tree has more than a hundred sessions of what to ask
 next.
 
 ---
@@ -400,9 +400,9 @@ Stream D's handoff for the fourteenth wave.
    capabilities and three ways to lose them (a reinstall, `nosuid`, a
    container), `perf_event_paranoid` with the CI's two runs as its measured
    table, the one-line checks, and the release check.
-3. **`README.md` and `DEMO.md` for a stranger.** The README's first screen is
+3. **`README.md` and `docs/DEMO.md` for a stranger.** The README's first screen is
    what the tool is, how to install it, and one command to try; the long
-   material is below it. `DEMO.md` gains an install paragraph at its top; its
+   material is below it. `docs/DEMO.md` gains an install paragraph at its top; its
    outputs are left for the coordinator to regenerate.
 
 4. **Three findings of the adversarial review, fixed.**
@@ -439,7 +439,7 @@ Stream D's handoff for the fourteenth wave.
 **`docs/open-requests.md`, the row for 2257** (README says formats are "not
 written"): `README.md`'s output-formats paragraph now says every format has
 its encoder and no longer describes one "whose encoder has not landed".
-`DECISIONS.md:20` is the coordinator's.
+`docs/DECISIONS.md:20` is the coordinator's.
 
 ### How it was tested
 
@@ -451,7 +451,7 @@ is in the stream's summary). No Rust source changed, so no module test applies.
 
 None: this stream added no session.
 
-### For `DECISIONS.md`
+### For `docs/DECISIONS.md`
 
 - **The installed layout is flat: `bin/omn`, `bin/omn-mcp`, `bin/libomn_preload.so`.**
   `omn` finds the shim beside its own executable and `omn-mcp` finds `omn`

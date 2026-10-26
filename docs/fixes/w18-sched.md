@@ -1,6 +1,6 @@
 # Stream sched, eighteenth wave: the sched collectors follow the target
 
-`STATE.md` item 5 ("After the seventeenth wave") and `scenario_sched`'s fixed
+`docs/dev/STATE.md` item 5 ("After the seventeenth wave") and `scenario_sched`'s fixed
 probe name (item 8). Branch `feat/w18-sched`, four commits on `9cd5409`:
 
 - `67c4067` test(sched): the lock workload's name is the run's own
@@ -218,7 +218,7 @@ Read the `cost:` line's *"inside the target"* figure for both sources. The
 first is the run that says whether `sched_entry_tp` on every `__schedule`
 is worth its 0.65 us a block.
 
-## 6. Decision lines for `DECISIONS.md`
+## 6. Decision lines for `docs/DECISIONS.md`
 
 - **A sched wait is the kernel's own account** (eighteenth wave, stream
   sched): `sched.runqlat`'s waits and `sched.offcpu`'s `queued_ns` are read
@@ -288,7 +288,7 @@ These `filed:` lines should now pass, and come out when they do:
   `__schedule` (`sched_entry_tp`). The switch programs read four more
   fields per switch of a followed task. Their measured bands may move.
 
-### To stream engine (`CATALOG.md`, `examples/**`)
+### To stream engine (`docs/CATALOG.md`, `examples/**`)
 
 - The sched section can say that a process target is followed into its
   children, and that a wait is `sched_info`'s account (the catalog caveats
@@ -311,7 +311,7 @@ These `filed:` lines should now pass, and come out when they do:
 
 - `docs/scenarios/sched.md`: the per-wait bias and the descendants (from the
   seventeenth wave, stream build) are fixed; the numbers are in section 2.
-- `STATE.md` items 5 and 8 (the probe name): landed.
+- `docs/dev/STATE.md` items 5 and 8 (the probe name): landed.
 - The flaky tally (`docs/flaky.md`, stream green's file): #6 and #1 each
   failed once under load average 50 and passed when rerun, as section 3
   says.

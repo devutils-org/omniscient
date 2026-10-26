@@ -27,12 +27,12 @@ unchanged.
 | Not delivered | the kernel tier (no match kind has a program); the run skipping a query-tier rule and cloning only what `sources_read` names (`src/main.rs`, filed with the diff, applied, tested and reverted); an `omn` command that applies a rule to a stored run (`src/cli.rs`, filed) |
 | Refused, new | a rule at the kernel tier (`JoinError::KernelTier`); a query-tier rule over a side the session does not collect, or collects without `raw` (`JoinError::NotStored`), at validation; a stored run without one side's `raw` events, at the query |
 | Tests | `src/join.rs` 5 new; `src/bpf/btf.rs` 5 new; `shim/src/lib.rs` 1 new; `tests/join_engine.rs` 3 new; `tests/cross_machine.rs` 1 assertion |
-| Files | `src/join.rs`, `src/bpf/btf.rs`, `shim/src/lib.rs`, `tests/{join_engine,cross_machine}.rs`, `examples/cross-machine-reclaim-io.yml`, `CATALOG.md`, this document |
+| Files | `src/join.rs`, `src/bpf/btf.rs`, `shim/src/lib.rs`, `tests/{join_engine,cross_machine}.rs`, `examples/cross-machine-reclaim-io.yml`, `docs/CATALOG.md`, this document |
 | Machine | 24 cpus, kernel 7.2.7, nine other streams building and testing, `CAP_BPF` and `CAP_PERFMON` on the binary after `make` |
 
 ## 1. A rule chooses its tier
 
-`ROADMAP.md` phase 5 decided join placement per rule, not globally, and the
+`docs/ROADMAP.md` phase 5 decided join placement per rule, not globally, and the
 model has to let a join move between tiers without rewriting the collector.
 It now does, for two of the three:
 
@@ -176,7 +176,7 @@ Two tests, because there are two ways a producer names an interface:
 The brief said give `proc` a producer or remove it. It has neither: no
 collector emits a `proc` key, and no catalog entry declares one, so a join
 `via: proc` is refused before the run by name ("join `by-proc` matches on
-`proc`, which `proc.threads` does not carry", with what it does carry). Kept by alignment with `CATALOG.md`'s
+`proc`, which `proc.threads` does not carry", with what it does carry). Kept by alignment with `docs/CATALOG.md`'s
 container trap, which names it as the answer to a pid that two containers
 share, and with the catalog's practice for a source with no collector: it
 resolves, it validates, and it says plainly that nothing carries it yet.
@@ -187,7 +187,7 @@ should call it are another stream's files, and filed.
 
 ## 3. `overlap`'s `enclosing`
 
-`DECISIONS.md` left open how a drained row of several episodes is credited.
+`docs/DECISIONS.md` left open how a drained row of several episodes is credited.
 The rule now says it: `enclosing: <attr>` names the attribute holding the
 length of a window, from the row's stamp, that encloses every occurrence. A
 row whose window lies in one interval is credited whole (exactly: every
@@ -537,7 +537,7 @@ Checked against the CI logs' text (exit status 256, the messages quoted in
 
 - **Done, with scenarios**: the walk-through (items 1 and 2), `overlap` with no
   key (item 3), the `extreme` band (item 3), the paranoid-4 failures (item 4).
-- **The index rows** (`examples/README.md`, `GUIDE.md`):
+- **The index rows** (`examples/README.md`, `docs/GUIDE.md`):
 
   | Session | What it shows |
   |---|---|
@@ -545,12 +545,12 @@ Checked against the CI logs' text (exit status 256, the messages quoted in
 
   `examples/mcp/approved/*.yml` are not read by the index test (it reads
   `examples/*.yml`); `docs/mcp.md`'s walk-through is their index. A row for
-  `GUIDE.md` pointing at it, if wanted: *"`docs/mcp.md` -- an agent
+  `docs/GUIDE.md` pointing at it, if wanted: *"`docs/mcp.md` -- an agent
   benchmarks a program through `omn-mcp`, and says what dominates its time."*
-- **For `CATALOG.md`** (the join notation): `via` is optional for `overlap`
+- **For `docs/CATALOG.md`** (the join notation): `via` is optional for `overlap`
   only, and an `overlap` without it reads its `from` source as one series,
   keyed `machine`.
-- **For `DECISIONS.md`**:
+- **For `docs/DECISIONS.md`**:
   - *A join with no key is `overlap`'s alone, and reads one series.* A
     keyless rule of any other kind is refused before the run; a keyless
     `overlap` over a source with several series is refused by name at apply
@@ -951,10 +951,10 @@ refused. `docs/mcp.md` has the flag, the rewritten section and the test row.
   | `join-interrupt-or-task.yml` | Who released a thread, a timer or another thread: the interrupt named as the interrupt, at either end of a chain. |
   | `join-overlap-waits.yml` | Waits split across the 100 ms intervals of a poll by their overlap with each, at TEMPORAL. |
 
-- **For `CATALOG.md`** (the join notation): match kinds `woke` and
+- **For `docs/CATALOG.md`** (the join notation): match kinds `woke` and
   `overlap`; rule fields `woken`, `span` and `stamped: end|start`; the
   decomposition value `paired`; `states.scope_collapsed`.
-- **For `DECISIONS.md`**:
+- **For `docs/DECISIONS.md`**:
   - *It amends the twelfth wave's "whether a model may run a session" row*:
     yes with `--allow-run`, and a session that launches a program only when it
     is a file of the directory the person starting the server passed with
@@ -1615,7 +1615,7 @@ the list, and why:
 | `examples/cross-io-stale-pointer.yml` | the comment's `evidence KEY` for the bare join, and the paragraph saying the engine calls both KEY | it said what the engine no longer does |
 
 Not edited, though `make check` wants them: **`examples/README.md` and
-`GUIDE.md`**. The brief gives both to the coordinator by name, and says the
+`docs/GUIDE.md`**. The brief gives both to the coordinator by name, and says the
 index test is theirs to satisfy at the merge.
 `the_session_indexes_hold_exactly_the_sessions_on_disk` is therefore red on
 this branch, for the three new sessions and nothing else. The rows, ready to
@@ -1668,7 +1668,7 @@ the next crossing's.
 ## Needs from another stream
 
 Written out with signatures under the eighth wave's stream J heading in
-`docs/open-findings.md`: the index rows above; `drained` in `CATALOG.md` §1;
+`docs/open-findings.md`: the index rows above; `drained` in `docs/CATALOG.md` §1;
 `drained: true` on the other drained sources; a free that carries its size;
 `Span::Lifetime` once stream R's lifetime lands; and the manual page.
 

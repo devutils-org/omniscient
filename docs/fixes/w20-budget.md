@@ -1,7 +1,7 @@
 # The twentieth wave, stream budget
 
-Branch `feat/w20-budget`, from `main` at `444900b`. `BRIEF.md`, "budget --
-the budget and the run's account": every bullet of `STATE.md` item 7, the
+Branch `feat/w20-budget`, from `main` at `444900b`. `docs/dev/BRIEF.md`, "budget --
+the budget and the run's account": every bullet of `docs/dev/STATE.md` item 7, the
 first-check decision proposed with numbers, and `docs/mcp.md` following what
 `mcp/` does now (item 10).
 
@@ -73,7 +73,7 @@ Six commits, each with its tests.
   review round (below): `Gated::end_orphans` ends them at the end of every
   run, not at a stop only.
 - **`980190d` -- `docs/mcp.md`**: the budget optional (the walk-through, the
-  decision's item 2 and the `DECISIONS.md` row); `program_stdout`,
+  decision's item 2 and the `docs/DECISIONS.md` row); `program_stdout`,
   `program_stderr`, `bounds`, `budget_against`, `stopped_by_budget` in the
   answer's table; `said_by_omn` as `omn`'s alone; the protocol table with
   `a_launched_programs_stdout_comes_back_apart_from_omns_document` and the
@@ -206,7 +206,7 @@ for i in range(40):
 sudo -n /usr/bin/sysctl kernel.perf_event_paranoid=-1
 ```
 
-## Decision lines for DECISIONS.md
+## Decision lines for docs/DECISIONS.md
 
 - **What the budget's first check may stop a run on (proposed; half
   landed).** (1) *Landed*: a one-time cost the tool can name -- a symbol
@@ -301,7 +301,7 @@ One finding, a gap, fixed (`src/collect/launch.rs`, `src/collect/mod.rs`,
   - Not changed: the `left_running` warning still says "the stop left", and
     after a natural end its count can include an orphan `end_adopted` could
     not signal (setuid). Rare, and `src/main.rs`'s wording only.
-  - Decision this makes, for `DECISIONS.md`: a daemon a launched program
+  - Decision this makes, for `docs/DECISIONS.md`: a daemon a launched program
     starts is ended with the run even when the program exits on its own.
     `omn` measures a program and leaves nothing it started behind; a user
     who wants the daemon to outlive the run launches it outside `omn`.

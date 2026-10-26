@@ -235,7 +235,7 @@ impl Collector for SwitchCollector {
             Mode::Count => {
                 return Err(
                     "`count` mode for `pmu:sw` needs the perf layer's counting support \
-                     (see STATE.md); ask for `--mode trace` to get one event per switch"
+                     (see docs/dev/STATE.md); ask for `--mode trace` to get one event per switch"
                         .to_owned(),
                 )
             }

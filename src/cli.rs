@@ -622,7 +622,7 @@ pub struct JoinArgs {
 
 /// `omn import`: a trace another tool recorded, merged into a stored run.
 ///
-/// An import rather than a source (`DECISIONS.md`, boundary 6): LTTng-UST
+/// An import rather than a source (`docs/DECISIONS.md`, boundary 6): LTTng-UST
 /// writes in-line into its own buffer, so its events exist for no program of
 /// this tool's, and are read after the fact instead.
 #[derive(Debug, Args)]

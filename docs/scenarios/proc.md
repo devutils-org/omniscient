@@ -187,7 +187,7 @@ twentieth wave. `force:` skips the choice, not the pinned backend's own
 probes, and a missing requirement is refused before a missing collector: the
 session exits **3** where tracefs is readable and the binary holds its
 capabilities, and **1** where tracefs is root-only, as on this project's own
-machine (`GUIDE.md` says the same). The demonstration of exit 3 is therefore
+machine (`docs/GUIDE.md` says the same). The demonstration of exit 3 is therefore
 still a demonstration that depends on the machine, for the reason below.
 
 There is a lesson in that for the other families, and it is not about `proc`:
@@ -402,7 +402,7 @@ silently or not at all.
 
 **All six are fixed** — 1 and 2 by stream E of the fifth wave, 3, 4 and 6 by
 stream A, and 5 by stream B. The convention that replaced "delete the test" is
-`BRIEF.md`'s: **the reproduction stays and what it asserts is turned round**, so
+`docs/dev/BRIEF.md`'s: **the reproduction stays and what it asserts is turned round**, so
 the scenario that found a defect is the one that would fail if it came back.
 Each entry below says which test carries it, and `docs/fixes/` says what became
 of it.
@@ -438,7 +438,7 @@ and the series recovers on the second — `proc-handles.yml` reads `3, 20, 20, 2
 `--mode snapshot` against a launched program is unusable today; read it against
 `--pid` instead.
 
-It is the same trap `STATE.md` already records for the symbolizer, in a new
+It is the same trap `docs/dev/STATE.md` already records for the symbolizer, in a new
 place: for a launched program, `start` is too early because the child has not
 exec'd. The first tick is the right moment there, and something like it is the
 right moment here.
@@ -555,7 +555,7 @@ put a cheap poller beside an expensive one.
 > place the four answers map to codes. Asserted by
 > `a_machine_that_cannot_serve_a_valid_request_has_its_own_exit_code`.
 
-`BRIEF.md` defines three answers and three exit codes. Only two of the codes
+`docs/dev/BRIEF.md` defines three answers and three exit codes. Only two of the codes
 exist. `src/main.rs:162` returns `EXIT_REJECTED` — 2, the code that means the
 request cannot mean anything — when the resolver finds no viable backend, one
 line after printing a hint that says the exact opposite:
@@ -575,7 +575,7 @@ against this — the case the codes exist for — cannot tell a request it shoul
 rewrite from one it should run on another machine, which is precisely the
 distinction class D is about.
 
-Related and already known: `STATE.md` records that "valid, but this mechanism is
+Related and already known: `docs/dev/STATE.md` records that "valid, but this mechanism is
 not built" used to return 1 like a real failure and now returns 3. This is the
 other half of that same cleanup and was missed.
 
@@ -729,7 +729,7 @@ event was one syscall with its arguments decoded; this collector aggregates in
 the kernel and cannot carry either, and the entry's own caveat is why. `cgroup`
 on the other two waits on the same helper the cgroup *target* does, so it is
 worth keeping in the entry only if the entry is meant to describe what a future
-build would emit — and `CATALOG.md` says the opposite, that a declaration is a
+build would emit — and `docs/CATALOG.md` says the opposite, that a declaration is a
 promise the build keeps.
 
 ### 10. `proc.syscall`'s `comm` was the name its window's first call saw

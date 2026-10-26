@@ -138,7 +138,7 @@ the program did).
 ## A fault count is predicted by alignment, not by size, and not by mTHP
 
 The first correlation found ~515 faults for an 8 MiB allocation, where 4 KiB
-pages would need 2048. `DECISIONS.md` records the finding and explains it with
+pages would need 2048. `docs/DECISIONS.md` records the finding and explains it with
 **multi-size** transparent huge pages: "the kernel picks larger folios for larger
 regions". The engine prints the same explanation under every interval join, and
 the `mem.faults` caveat says it too.
@@ -177,7 +177,7 @@ Measured against that prediction, three times at each size:
 | 64 MiB | 543, 543, 543 | 543 | 31 + 513 |
 
 Twenty of twenty-one exactly, and the twenty-first is the interpreter's first
-fault. `DECISIONS.md`'s own numbers — 263 faults for 1 MiB, 528 for 32 MiB — are
+fault. `docs/DECISIONS.md`'s own numbers — 263 faults for 1 MiB, 528 for 32 MiB — are
 what this predicts, plus a few. The count is nearly flat across sizes because
 **every mapping pays about 512 faults for its unaligned edges**, whatever its
 size, and a handful for its middle.
@@ -328,7 +328,7 @@ and each of those passed when run on its own a minute later:
 | 4 | `scenario_cpu::a_known_number_of_retired_instructions_is_counted_as_that_number`, and the format test beside it | 1 016 919 080 instructions for 1 000 000 000, +1.7 % |
 
 Each is a test asserting what the machine was doing, which is the shape
-`STATE.md` warns about, and none of them touches a file this stream wrote. They
+`docs/dev/STATE.md` warns about, and none of them touches a file this stream wrote. They
 are the coordinator's to weigh at the merge, on a quiet machine.
 
 ---
@@ -442,7 +442,7 @@ and it comes before the launch. Two things are wrong with it:
 - **It exits 2**, "the request cannot mean anything", because
   `CollectError::ConflictingEnvironment` is classed `Whose::Request`. This
   request means something, `omn validate` accepts it, and it is the build that
-  cannot serve it: `DECISIONS.md` settled that as exit 3.
+  cannot serve it: `docs/DECISIONS.md` settled that as exit 3.
 - **It is why this crossing is two sessions.** "Which allocation cost memory and
   did it stay" is one question about one program, and the tool could not ask it
   in one run. One shim stream per launch, fanned out to every preload collector
@@ -481,7 +481,7 @@ The first half is right and is the important half. The second is a mechanism,
 and on this machine it is not the mechanism: every multi-size size is `never`,
 and the counts are predicted exactly by 2 MiB alignment, as measured above.
 The same sentence is in the `mem.faults` caveat in `catalog/mem.yaml`, in
-`DECISIONS.md` and in `docs/scenarios/mem.md`. What the note should say is what
+`docs/DECISIONS.md` and in `docs/scenarios/mem.md`. What the note should say is what
 is true on every kernel: fault counts depend on how a range is backed —
 huge pages, multi-size folios, or base pages — and on where it lands, so two
 ranges of one size can differ by two orders of magnitude, and the THP mode is

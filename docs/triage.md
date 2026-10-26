@@ -1,6 +1,6 @@
 # Triage — the layer above the engine, and the escalation
 
-`ROADMAP.md` phase 10: the tenth wave's stream T built the three questions,
+`docs/ROADMAP.md` phase 10: the tenth wave's stream T built the three questions,
 and the eleventh wave's stream E the escalation, item 3. This is the
 deliverable, not a log about one: what the layer is, what it answers and
 against what ground truth, what it does not do and why, what it asked of the
@@ -329,7 +329,7 @@ collector layer that names triage is `escalation_for`, the registration, as
 and a new subcommand needs a dispatch line there. The session is also the
 better surface: `-o`, `--budget`, `cost.json`, the encoders and the resolved
 file all come with `omn -f` for free, and the file is the record of what was
-asked, as `DECISIONS.md` settled for every other measurement.
+asked, as `docs/DECISIONS.md` settled for every other measurement.
 
 **The cheap pass** is two requests the session runs for the whole run, on the
 workload: `sched.offcpu` (where the main thread blocked, in which state, and
@@ -575,7 +575,7 @@ escalation)*:
    across a held source in `Session::check_escalation`.
 3. `src/emit.rs` (J): the window on `Results`, seconded -- the escalation's
    windows are in its notes, with monotonic stamps, until it is a field.
-4. The coordinator: the escalation's mechanism for `DECISIONS.md`, and the
+4. The coordinator: the escalation's mechanism for `docs/DECISIONS.md`, and the
    index rows below.
 
 The tenth wave's five requests are still under their own heading, *the tenth
@@ -635,7 +635,7 @@ it back out. Filed for the coordinator.
 
 ## Index rows
 
-For `examples/README.md` and `GUIDE.md` -- the session-index test in
+For `examples/README.md` and `docs/GUIDE.md` -- the session-index test in
 `tests/cli.rs` is red on this branch until they are added. The tenth wave's
 five `triage-*` rows are in both indexes already.
 

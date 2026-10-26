@@ -1,7 +1,7 @@
 # The eighteenth wave, stream engine
 
-Branch `feat/w18-engine`, from `main` at `9cd5409`. `BRIEF.md`'s section
-"engine -- the files nobody owned": `STATE.md` item 6, item 8 (except
+Branch `feat/w18-engine`, from `main` at `9cd5409`. `docs/dev/BRIEF.md`'s section
+"engine -- the files nobody owned": `docs/dev/STATE.md` item 6, item 8 (except
 `tests/cases.rs`, `docs/cases.md` and `scenario_sched`) and item 11's engine
 lines. Everything below was run on the development machine (24 cpus, Linux
 7.2.7, `CAP_BPF` and `CAP_PERFMON` on `target/debug/omn` through `make`) on
@@ -12,10 +12,10 @@ time.
 
 | Commit | What |
 |---|---|
-| `0a25793` | `fix(shim)`: no clock read on a call that does not report (`STATE.md` item 6) |
+| `0a25793` | `fix(shim)`: no clock read on a call that does not report (`docs/dev/STATE.md` item 6) |
 | `9970178` | `fix(bpf)`: `Btf::member_offset` follows a typedef to the struct it names |
 | `7876659` | `test(join)`: the reclaim session's `enclosing:` line with its assertion; another namespace's lo |
-| `81f78c1` | `docs`: the perf map under `--symbols local` in `CATALOG.md`; `iface#<netns>:<index>` in `docs/families/join.md` |
+| `81f78c1` | `docs`: the perf map under `--symbols local` in `docs/CATALOG.md`; `iface#<netns>:<index>` in `docs/families/join.md` |
 | `6f5ac61` | `feat(join)`: a rule chooses its tier -- `agent`, `query` over the stored run, `kernel` refused; `join::sources_read` |
 | `66f16e4` | `docs/families/join.md`, the eighteenth wave's record |
 
@@ -77,10 +77,10 @@ appended as filed. Run once with the capabilities: **their namespace
 4026532813: credited 0, uncredited 2000, 5 rows of theirs**. It skips with the
 machine's reason where `unshare -rn` or `netem` fails.
 
-### 5. `docs/families/join.md:39` and `CATALOG.md`'s `--symbols` lines
+### 5. `docs/families/join.md:39` and `docs/CATALOG.md`'s `--symbols` lines
 
 The identity is `iface#<netns>:<index>` (`iface:<netns>:<name>` when the
-index stayed 0), with why. `CATALOG.md` said `--symbols debuginfod` was "the
+index stayed 0), with why. `docs/CATALOG.md` said `--symbols debuginfod` was "the
 mechanism landed, the flag not yet"; the flag is in `src/cli.rs`. It now says
 what `--symbols local` reads -- the mapped files, `/proc/kallsyms`, and the
 `/tmp/perf-<pid>.map` for an anonymous executable mapping -- and what
@@ -238,7 +238,7 @@ seventeenth wave's build stream's 20 M pairs): a `sched.mutex`-only session
 over a `malloc`/`free` loop, before and after `0a25793`, comparing the
 target's cpu time.
 
-## For DECISIONS.md
+## For docs/DECISIONS.md
 
 - **A join rule chooses its tier per rule** (`tier: agent | query | kernel`,
   `agent` by default). `query` applies the same engine to a stored run's `raw`
@@ -297,7 +297,7 @@ The adversarial review's round, in `7cc2f79`.
   green.
 - **Nit, `tests/cross_machine.rs`.** Acknowledged above (section 3); for the
   coordinator, unchanged.
-- **Nit, `CATALOG.md`.** Now quotes the facts line as `src/unwind.rs` and
+- **Nit, `docs/CATALOG.md`.** Now quotes the facts line as `src/unwind.rs` and
   `src/stack.rs` write it: `names came from -- ... perf-<pid>.map: perf-map,
   the <n> lines the program wrote for code no file holds`.
 
@@ -354,7 +354,7 @@ defect, not a pattern to add. And `man/omn.1`'s description of a join rule wants
 
 `--symbols local` (and so `debuginfod`) reads `/tmp/perf-<pid>.map` for an
 address in an anonymous executable mapping no file names; a frame it named
-says `perf-map`. `CATALOG.md` says so now; `docs/unwind.md` does not yet.
+says `perf-map`. `docs/CATALOG.md` says so now; `docs/unwind.md` does not yet.
 
 ### To whoever owns `src/bpf/net_qdisc.rs` next: ask for the `net` pointer
 
@@ -362,9 +362,9 @@ says `perf-map`. `CATALOG.md` says so now; `docs/unwind.md` does not yet.
 add it to `nd_net`'s offset instead of writing 0, and its doc comment's "does
 not follow a typedef" is no longer true.
 
-### To the coordinator (`ROADMAP.md` phase 5, `STATE.md`)
+### To the coordinator (`docs/ROADMAP.md` phase 5, `docs/dev/STATE.md`)
 
 Phase 5's first criterion: the query tier is served and tested, the kernel
-tier refused with the reason; `[~]` for the kernel tier only. `STATE.md` items
+tier refused with the reason; `[~]` for the kernel tier only. `docs/dev/STATE.md` items
 6 and 8 (this stream's lines) and item 11's "a rule choosing the kernel or
 query tier" and "`assemble`'s linear clone" (half: the diff above) can move.

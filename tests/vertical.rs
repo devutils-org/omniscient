@@ -1,6 +1,6 @@
 //! The vertical case: one request's latency, decomposed boundary by boundary.
 //!
-//! `ROADMAP.md` phase 4, checked the way its exit criterion asks: a real server
+//! `docs/ROADMAP.md` phase 4, checked the way its exit criterion asks: a real server
 //! whose delays the test injected, decomposed by the tool, and every row held
 //! to what the server and its client measured on their own clocks. The tool
 //! reads none of that; the server prints it on stderr, prefixed `vertical:`,

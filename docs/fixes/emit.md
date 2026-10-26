@@ -1,7 +1,7 @@
 # Stream C — emit, filter, render
 
 What was fixed, what turned out to be something else, and what was left. The
-five defects `BRIEF.md` gave this stream are sched 1, runtime 1, runtime 2,
+five defects `docs/dev/BRIEF.md` gave this stream are sched 1, runtime 1, runtime 2,
 net 6 and mem D4; a sixth, io 9, was assigned elsewhere and is in this stream's
 files, so it is here too.
 
@@ -57,7 +57,7 @@ headline it fails with the defect printed verbatim:
 
 This is the invariant in `CLAUDE.md` — *losses are counted and surfaced to the
 user, always* — and it was half true in the one format a person actually reads.
-`BRIEF.md` gave io 9 to stream F with the note that "the second is stream A's
+`docs/dev/BRIEF.md` gave io 9 to stream F with the note that "the second is stream A's
 type and your headline"; the type is stream A's and the headline is in
 `src/encode.rs`, which is this stream's. Taken here for that reason. Stream F
 has no file to fix it in.
@@ -123,7 +123,7 @@ keeps an assertion that it is still silent, pointing at
 
 ### sched 1 — the cause named in the brief is not the cause
 
-`BRIEF.md` says the likely cause is "the one `emit::WEIGHT_ATTR` was added for,
+`docs/dev/BRIEF.md` says the likely cause is "the one `emit::WEIGHT_ATTR` was added for,
 in a source that does not yet carry it — check before assuming". Checked, and it
 is not. Weighting makes the number worse, not better.
 

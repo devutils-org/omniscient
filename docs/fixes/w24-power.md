@@ -228,7 +228,7 @@ cd /home/moha/repos/omniscient && make && cargo test --test reference pairs_powe
   `keys: &[]` and fans out on the `domain` attribute; unkeyed it now gets the
   package alone (it got package alone on this AMD machine before, too). To
   show the cores, ask with `keys: &["domain"]`.
-- **Coordinator**: `CATALOG.md`'s power section (the `pmu` road of
+- **Coordinator**: `docs/CATALOG.md`'s power section (the `pmu` road of
   `power.freq` and its requirements, the `domain` key, `power.wakeups`),
-  `man/omn.1`, `STATE.md` (power 2-6 of the twenty-second wave's gaps: 2, 3,
+  `man/omn.1`, `docs/dev/STATE.md` (power 2-6 of the twenty-second wave's gaps: 2, 3,
   5 and 6 done for a process; 4 through `power.freq`'s `idle`).

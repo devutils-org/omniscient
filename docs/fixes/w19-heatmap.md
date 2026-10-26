@@ -143,7 +143,7 @@ It was 14 MB of `results.json` here, mostly the 6 000 `tiny` launches and
 every view's other traced sources; `launches 1000` twice keeps the shape at a
 third of the size.
 
-## Decision lines for DECISIONS.md
+## Decision lines for docs/DECISIONS.md
 
 - **The heatmap draws only `raw` events** (wave 19): never the aggregated
   emits, so a live run draws as a finished one, and a result kept as a

@@ -4,7 +4,7 @@
 //!
 //! The chain's first backend for this source is `pmu:sw`, an inherited
 //! software counter that is exact and free and follows threads and cpus
-//! (`DECISIONS.md`, the fourteenth wave, says why it stays first). This one
+//! (`docs/DECISIONS.md`, the fourteenth wave, says why it stays first). This one
 //! is reached where that one cannot serve -- a cgroup, which a counter that
 //! follows threads cannot see into -- or when it is forced
 //! (`--backend force:bpf:raw_tp`) for the split.

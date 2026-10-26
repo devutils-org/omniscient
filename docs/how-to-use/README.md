@@ -7,8 +7,8 @@ page for what every family shares.
 
 It is not the reference. The catalog is (`catalog/*.yaml`, projected by `omn
 list`), and when this guide and `omn list <source>` disagree, `omn list` is
-right and this page is stale. `CATALOG.md` is the vocabulary in full,
-`man/omn.1` every flag, `GUIDE.md` the demonstrations.
+right and this page is stale. `docs/CATALOG.md` is the vocabulary in full,
+`man/omn.1` every flag, `docs/GUIDE.md` the demonstrations.
 
 | Family | The questions it answers | Page |
 |---|---|---|

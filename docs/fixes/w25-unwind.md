@@ -41,7 +41,7 @@ checkout.
 aggregation --test encoders --test cli --test recorder --test catalog_model
 --test unwind --test stack_capture --test family_cpu`, clippy, fmt.
 
-## Decision lines for `DECISIONS.md`
+## Decision lines for `docs/DECISIONS.md`
 
 - A frame's object travels in the provenance, frame for frame with the
   labels, so a label stays the function's name and `--keys object` reads the

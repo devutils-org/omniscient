@@ -46,7 +46,7 @@ root (`sudo -n`, or the test run as root), `perf trace`, `perf sched` and
 (`make CAPTURE=1`), the RAPL files and `cpupower monitor -m Mperf` root or a
 grant, and the cpu-wide `perf` and `turbostat --no-msr` pairs
 `perf_event_paranoid` at most 0. `catalog/references/README.md` says how a
-pair runs and skips; `STATE.md`, "What remains", lists the exact commands.
+pair runs and skips; `docs/dev/STATE.md`, "What remains", lists the exact commands.
 
 ## Try it
 
@@ -68,8 +68,8 @@ mem.rss  via fs:proc:smaps_rollup  (mem.rss)
 ```
 
 `omn list` is what this machine can serve, probed now; `omn list <source>`
-says why a source is out of reach. `man omn` is the manual, `DEMO.md` is the
-tool in one page, and `GUIDE.md` walks through more than a hundred and fifty
+says why a source is out of reach. `man omn` is the manual, `docs/DEMO.md` is the
+tool in one page, and `docs/GUIDE.md` walks through more than a hundred and fifty
 sessions in `examples/`.
 
 ---
@@ -160,7 +160,7 @@ checked, and the resolver will not select such a backend while a verified one
 exists. **COLLECTOR** is what this build can measure, which is a different
 question again: a source can be reachable here with nothing written for it.
 
-`CATALOG.md` is the vocabulary and `catalog/*.yaml` is the same thing as data.
+`docs/CATALOG.md` is the vocabulary and `catalog/*.yaml` is the same thing as data.
 Adding a source means adding an entry: it appears in `omn list`, in validation
 and in the help without touching code.
 
@@ -195,7 +195,7 @@ joins:
     window: 60s
 ```
 
-YAML, JSON and TOML are all accepted. `GUIDE.md` explains the sessions in
+YAML, JSON and TOML are all accepted. `docs/GUIDE.md` explains the sessions in
 `examples/` and what each one shows; `examples/README.md` is the
 index; `scripts/demo.sh <family>` runs one family's and `make demo-all` runs the
 lot.
@@ -252,7 +252,7 @@ them into perceived bugs.
 
 ## State
 
-`STATE.md` has the measured numbers, where each roadmap phase stands, and what
+`docs/dev/STATE.md` has the measured numbers, where each roadmap phase stands, and what
 remains in the order it is worth doing. In short: the skeleton is finished and
 96 of 101 sources collect for real, over eight mechanisms: procfs and sysfs,
 `perf_event_open` counting and sampling, netlink, an `LD_PRELOAD` shim, NVML
@@ -281,15 +281,15 @@ They found 63 defects in the fourth wave alone, none worked around, and
 | `docs/install.md` | installing, the two capabilities, what a stock distribution serves |
 | `docs/how-to-use/` | per family: which source for which question, and how to choose its target, mode, cost and backend |
 | `man/omn.1` | the manual page — `make man` |
-| `CATALOG.md` | the vocabulary: axes, backends, families, caveats |
-| `STATE.md` | what works today, and what is left |
-| `ROADMAP.md` | the milestones and their exit criteria |
-| `DECISIONS.md` | what is settled, what is open, and why |
+| `docs/CATALOG.md` | the vocabulary: axes, backends, families, caveats |
+| `docs/dev/STATE.md` | what works today, and what is left |
+| `docs/ROADMAP.md` | the milestones and their exit criteria |
+| `docs/DECISIONS.md` | what is settled, what is open, and why |
 | `docs/contributing.md` | how to add a source |
 | `docs/open-findings.md` | findings that cut across families |
 | `docs/families/*.md` | what each family's measurements taught |
 | `docs/bpf-layer.md` | how a program is loaded and attached |
-| `GUIDE.md` | how to run the demonstrations, and what each session shows |
+| `docs/GUIDE.md` | how to run the demonstrations, and what each session shows |
 | `docs/triage.md` | the intelligence layer: objectives, verdicts, the escalation |
 | `docs/bench.md` | what each source costs, measured on this machine |
 | `docs/portability.md` | the kernel matrix, the degradation runs, the CI |

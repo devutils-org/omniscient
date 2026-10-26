@@ -1,6 +1,6 @@
 # The reference pairs (tests/reference.rs, docs/replaces.md) on distributions
 # other than the development machine's, each with the witnesses its own
-# packages carry (ROADMAP.md phase 13, task 5; docs/distroproof.md).
+# packages carry (docs/ROADMAP.md phase 13, task 5; docs/distroproof.md).
 #
 #   scripts/release.sh && scripts/distroproof/reference-build.sh
 #   distroproof up -f distroproof-reference.toml --no-tui --jobs 3 --json target/matrix/reference.json

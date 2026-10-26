@@ -7,7 +7,7 @@
 //! of cpu burned, fifty sleeps, a core with one tenant -- and asks whether the
 //! number that comes back is that property.
 //!
-//! The four classes of `BRIEF.md`, and where each one lives below:
+//! The four classes of `docs/dev/BRIEF.md`, and where each one lives below:
 //!
 //! - **A, the capability sweep**: every mode and emit the catalog declares for
 //!   this family, driven from `omn list cpu --format json` so that the sweep is
@@ -3418,7 +3418,7 @@ fn each_refusal_names_the_thing_that_is_missing() {
     for (args, expected) in unbuilt {
         let (code, message) = run(args).refusal();
         // Unwritten and missing something here is answered in the chain's
-        // order, the machine first (`DECISIONS.md`, "one order for unbuilt
+        // order, the machine first (`docs/DECISIONS.md`, "one order for unbuilt
         // and missing"): a kernel without PSI has no `cpu.pressure` anywhere.
         if code == 1 && message.contains("missing:") {
             eprintln!(

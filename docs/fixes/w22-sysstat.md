@@ -112,7 +112,7 @@ sudo slabtop -o -s c | head -20
 and `make` before `pidstat -d` against `io.bytes --pid` (capabilities).
 If sysstat is missing on another machine: `sudo pacman -S sysstat numactl`.
 
-## Decision lines for DECISIONS.md
+## Decision lines for docs/DECISIONS.md
 
 - A system-wide tool and omn observe the same seconds: the workload runs in
   the background and both start together; omn's `--system` takes no program.

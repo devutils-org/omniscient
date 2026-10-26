@@ -1,6 +1,6 @@
 # The nineteenth wave, stream flows
 
-Branch `feat/w19-flows`, from `main` at `91a0cef`. `BRIEF.md`, "flows --
+Branch `feat/w19-flows`, from `main` at `91a0cef`. `docs/dev/BRIEF.md`, "flows --
 where the bytes went": bytes as flows, process -> socket -> interface and
 process -> file -> device, widths in proportion, each edge with its rate and
 its losses. (A rate is drawn per socket or file, not per thread -> object
@@ -102,7 +102,7 @@ Reasoned, not held:
   device), and no source maps a filesystem to the block devices `io.bytes`
   counts (`259:0`). Drawn as the junction instead, and said in
   `docs/view/flows.md`. Both are collector changes in families no stream of
-  this wave owns: for `STATE.md`'s "What remains".
+  this wave owns: for `docs/dev/STATE.md`'s "What remains".
 - **A file's name.** `io.fs` keys by device and inode; the view names a file
   `btrfs 3316766`.
 - **Bytes per file on the default request.** Needs the `NEEDS` change below.
@@ -169,7 +169,7 @@ make && docs/view/gallery/flows-run/record.sh
 OMN_VIEW_BLESS=1 cargo test -p omn-view --lib flows
 ```
 
-## Decision lines for DECISIONS.md
+## Decision lines for docs/DECISIONS.md
 
 - **flows draws the kernel layer as a junction, never as edges.** No source
   ties a socket to an interface or a file's bytes to a device; the target's
@@ -201,7 +201,7 @@ OMN_VIEW_BLESS=1 cargo test -p omn-view --lib flows
 - **core (`tests/view_fixtures/record.sh`)**, optional: adopt
   `docs/view/gallery/flows-run/record.sh`'s file server as a common fixture
   once the row above lands; the flows view's test then reads it from there.
-- **for `STATE.md`'s "What remains"** (no stream owns these this wave):
+- **for `docs/dev/STATE.md`'s "What remains"** (no stream owns these this wave):
   `net.socket` carrying the interface index of the socket's route; a mapping
   from a filesystem's superblock device to the block devices under it, so
   `io.fs` and `io.bytes` meet; `io.bytes` and `net.bytes` split by direction.

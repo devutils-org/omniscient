@@ -1,6 +1,6 @@
 # w26 poller — cumulative counters read at intervals, in one module
 
-Phase 0a of the twenty-sixth wave (`BRIEF.md`, "0a · `poller`").
+Phase 0a of the twenty-sixth wave (`docs/dev/BRIEF.md`, "0a · `poller`").
 
 ## Landed
 

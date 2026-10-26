@@ -1,6 +1,6 @@
 # The nineteenth wave, stream flame
 
-Branch `feat/w19-flame`, from `main` at `91a0cef`. `BRIEF.md`, "flame -- a
+Branch `feat/w19-flame`, from `main` at `91a0cef`. `docs/dev/BRIEF.md`, "flame -- a
 flamegraph in the terminal": from `cpu.profile` and `sched.offcpu` stacks, an
 icicle that zooms into a frame and back out, search by name, on-cpu and
 off-cpu side by side, and the difference of two runs (`omn top --replay <a>
@@ -138,7 +138,7 @@ counts above are from this worktree's own output.
 
 None. Nothing here touches a collector or the machine.
 
-## Decision lines for DECISIONS.md
+## Decision lines for docs/DECISIONS.md
 
 - **The flame view folds a call chain that never visibly branches into one
   box** -- a frame whose heaviest callee holds it to within one cell at the

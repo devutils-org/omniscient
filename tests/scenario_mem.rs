@@ -155,7 +155,7 @@ fn json(output: &Output) -> serde_json::Value {
 /// What this machine lacks for `backend` of `source`, as `omn list` probes it
 /// -- the requirements it calls missing -- or `None` when nothing it needs is
 /// missing here. A pinned backend is refused for the machine before the build
-/// (`DECISIONS.md`, "one order for unbuilt and missing"), so which refusal a
+/// (`docs/DECISIONS.md`, "one order for unbuilt and missing"), so which refusal a
 /// pin earns is this answer's.
 fn lacks_here(source: &str, backend: &str) -> Option<Vec<String>> {
     let listing = run(&["list", source, "--format", "json"]);
@@ -1637,7 +1637,7 @@ fn both_huge_page_backends_read_the_same_promotion_counter() {
 /// with the refusal instead. The refusal says the machine where it lacks
 /// something the backend needs, as the walk does (exit 1), and the build where
 /// it lacks nothing (exit 3) -- never the build for a backend this machine
-/// could not serve whoever wrote it (`DECISIONS.md`, "one order for unbuilt and
+/// could not serve whoever wrote it (`docs/DECISIONS.md`, "one order for unbuilt and
 /// missing").
 #[test]
 fn forcing_a_backend_with_no_collector_names_it_in_the_chains_order() {
@@ -2407,7 +2407,7 @@ struct Beside {
 /// as each other* and as
 /// `a_gibibyte_of_reads_costs_one_l1_miss_per_cache_line`, whose ground truth
 /// is a machine with cpu and contiguous memory to spare. That is the trap
-/// `STATE.md` names: a measurement of a shared machine is not repeatable inside
+/// `docs/dev/STATE.md` names: a measurement of a shared machine is not repeatable inside
 /// a parallel suite.
 ///
 /// One at a time is not a fix for that -- nothing makes a scenario immune to

@@ -533,7 +533,7 @@ fn a_waiting_program_is_weighed_with_the_process_it_started_and_its_stop_ends_bo
 
 /// An orphan the program left -- its parent gone first, in a session of its
 /// own, adopted by `omn` -- is in the program's denominator while it runs
-/// (`DECISIONS.md`, an adopted orphan's cpu). The program here sleeps two
+/// (`docs/DECISIONS.md`, an adopted orphan's cpu). The program here sleeps two
 /// seconds while its orphan burns one: weighed against the sleeping shell
 /// alone, `mem.rss`'s cost read hundreds of percent mid-run and a 5 % budget
 /// moved it off `smaps_rollup` onto `statm` in each of three runs; weighed

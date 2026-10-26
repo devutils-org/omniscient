@@ -113,7 +113,7 @@ composition is `advice_for(action, sysctl, withheld)`.
 The withheld branch is held to the composition only: an in-process test
 binary carries no file capabilities, and the attach is reached after the probe,
 which already says the same since the fifteenth wave. End to end, it is the
-`nosuid` item under "Needs privilege" in `STATE.md`.
+`nosuid` item under "Needs privilege" in `docs/dev/STATE.md`.
 
 ## 3. `net_probe` is gone
 
@@ -141,7 +141,7 @@ output rather than reading it as a machine limit.
   `wakers`) checked once, and the moderate-rate test beside it; the Python
   session stays the demonstration, and the workloads list says which is which.
 - `docs/families/sched.md:57`: `sched.lock`'s backends require `kernel>=6.1`;
-  there is no floor for the tool (`DECISIONS.md`, the fifteenth wave).
+  there is no floor for the tool (`docs/DECISIONS.md`, the fifteenth wave).
 - `docs/flaky.md`: #3 closed (the row and its paragraph), and a section for
   this wave's reruns.
 - `docs/scenarios/mem.md`: D14.
@@ -276,7 +276,7 @@ Before the review:
 
 ## Needs privilege
 
-None beyond `make`. End to end for item 2 is `STATE.md`'s existing `nosuid`
+None beyond `make`. End to end for item 2 is `docs/dev/STATE.md`'s existing `nosuid`
 item (2), unchanged:
 
 ```console
@@ -288,7 +288,7 @@ sudo setcap cap_bpf,cap_perfmon+ep /mnt/omn-nosuid/omn
 sudo umount /mnt/omn-nosuid
 ```
 
-## For DECISIONS.md
+## For docs/DECISIONS.md
 
 - **A forced error path is the real one.** A test that forces a fallback
   (here, paranoid 2's user-mode retry) forces it with an error in the shape the

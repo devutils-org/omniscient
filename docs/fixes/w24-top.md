@@ -121,7 +121,7 @@ target/debug/omn top --headless -d 8s -o /tmp/omn-top-machine
 python3 -c "import json; d=json.load(open('/tmp/omn-top-machine/results.json')); [print(r['label'], r['events_seen']) for r in d['results']]"
 ```
 
-## Decision lines for `DECISIONS.md`
+## Decision lines for `docs/DECISIONS.md`
 
 - **The batch output prints raw numbers, never a unit's words**: shares as
   fractions, times in nanoseconds, sizes in bytes, `-` for not measured.

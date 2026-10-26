@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The self-benchmark: ROADMAP.md phase 8. docs/bench.md says what each step
+# The self-benchmark: docs/ROADMAP.md phase 8. docs/bench.md says what each step
 # measures and what it found.
 #
 #   scripts/bench.sh              everything, in order, stopping at the gate

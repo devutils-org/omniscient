@@ -359,7 +359,7 @@ finding 4). `mkfs.ext4`, `mount` and `chown` may not be in the sudoers file;
 if not, `docs/scenarios/io.md` section 18's dm-delay recipe (a loop device
 written through directly) is the one to adapt.
 
-## 7. Decision lines for `DECISIONS.md`
+## 7. Decision lines for `docs/DECISIONS.md`
 
 | Question | Decision | Why |
 |---|---|---|

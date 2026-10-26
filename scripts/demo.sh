@@ -8,7 +8,7 @@
 #   scripts/demo.sh mem     one family's sessions
 #   scripts/demo.sh --list  what there is, without running any of it
 #
-# See GUIDE.md for what each session shows and why.
+# See docs/GUIDE.md for what each session shows and why.
 #
 # Nothing is written outside the scratch directory.
 set -u
@@ -174,7 +174,7 @@ FAMILIES="cpu mem io net sched power gpu proc runtime general"
 
 if [ "$MODE" = list ] || [ "$MODE" = tour ]; then
     section "9. Every session this repository ships" \
-"Each one is a measurement written down, and each is explained in GUIDE.md.
+"Each one is a measurement written down, and each is explained in docs/GUIDE.md.
 Run one with \`omn -f <file>\`, a family with \`scripts/demo.sh <family>\`, or
 all of them with \`scripts/demo.sh --all\`."
     for family in $FAMILIES; do

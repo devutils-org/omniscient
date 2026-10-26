@@ -148,7 +148,7 @@ through the runner:
 Each gap is a line in its family's handoffs (`docs/fixes/w22-<family>.md`,
 "Gaps", `docs/fixes/w23-<family>.md`, and the twenty-fourth wave's stream
 handoffs `docs/fixes/w24-<stream>.md`) and, grouped by the file it lands in,
-in `STATE.md`'s "What remains".
+in `docs/dev/STATE.md`'s "What remains".
 
 ## What a verdict rests on
 

@@ -164,7 +164,7 @@ required to carry it and each column capped by the same column of
 run is refused by name, so the scenario cannot pass there at all.
 
 The first form of it asserted that a write workload reads nothing and had to be
-rewritten, which is the trap `STATE.md` names in as many words: it passed alone
+rewritten, which is the trap `docs/dev/STATE.md` names in as many words: it passed alone
 and failed inside the suite with exactly 67108864 bytes in the read column,
 which belonged to the cold-read scenario running beside it on the same device.
 Bracketing each column against the kernel's own is what survives a shared
@@ -311,6 +311,6 @@ One flake seen once, in a file this stream does not own and did not change:
 `collect::tests::what_a_run_reports_spending_is_the_cpu_it_actually_burned`
 failed in a `make check` run that shared the machine with a build, and passed
 alone immediately after and in every run since. It is the species
-`docs/open-findings.md` §11 and `STATE.md` both describe — two cpu-time readings
+`docs/open-findings.md` §11 and `docs/dev/STATE.md` both describe — two cpu-time readings
 taken at different instants, pulled apart under load — and it is recorded rather
 than worked around.

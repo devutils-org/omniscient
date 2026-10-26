@@ -95,7 +95,7 @@ target/debug/omn net.socket --system --mode trace --emit raw --duration 2s --for
 sudo -n ip netns del omn-w20
 ```
 
-## Decision lines for DECISIONS.md
+## Decision lines for docs/DECISIONS.md
 
 - **`net.socket`'s interface is the route's, read at the call, in this
   namespace only.** Another namespace's index would name some other
@@ -140,7 +140,7 @@ sudo -n ip netns del omn-w20
   and the "in apart from out" split then survives the end of the run.
   `docs/view/system.md`'s "The catalog refuses `raw` for four of these
   sources" drops `net.bytes`.
-- **docs (`CATALOG.md`)**: in the `net.socket` row, the interface as a key.
+- **docs (`docs/CATALOG.md`)**: in the `net.socket` row, the interface as a key.
   In the `net.bytes` row, `raw`.
 - **coordinator (flaky tally)**:
   `scenario_net::every_datagram_sent_to_a_closed_port_is_a_drop_with_one_reason`
@@ -180,7 +180,7 @@ so I made no change in code this round. What is left goes to the coordinator:
    hook. That is a few lines, because the struct already exists and the
    notes are written from it.
 3. **Settle the decision line** "`net.bytes` direction stays an attribute,
-   not a series". If DECISIONS.md takes the other side, the re-key is a
+   not a series". If docs/DECISIONS.md takes the other side, the re-key is a
    change in this family, but every `net.bytes` reader must move with it in
    one commit.
 4. **The other-namespace case** stays reasoned until someone does the

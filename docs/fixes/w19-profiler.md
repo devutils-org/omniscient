@@ -1,7 +1,7 @@
 # The nineteenth wave, stream profiler
 
 Branch `feat/w19-profiler`, from `main` at `91a0cef` (cupti, device and core
-merged). `BRIEF.md`, "profiler -- inside a kernel (phase B)".
+merged). `docs/dev/BRIEF.md`, "profiler -- inside a kernel (phase B)".
 
 ## What landed
 
@@ -75,7 +75,7 @@ merged). `BRIEF.md`, "profiler -- inside a kernel (phase B)".
   determinism `medium`, caveats); **`gpu.profile`** new (`vendor:cupti`,
   `trace`, `[stack, topk, raw]`, `{launch}`). The two new `cost:` values are
   placeholders for bench (`extreme`, `med`).
-- **`CATALOG.md`** section 8: the two rows and their caveats.
+- **`docs/CATALOG.md`** section 8: the two rows and their caveats.
 - **`tests/gpu_inside.py`** (new): `hotloop N ITERS` (sixteen dependent FMAs
   on line 20 of `.loc`-annotated PTX, JIT with `CU_JIT_GENERATE_LINE_INFO`),
   `hotloop-bare` (no line information); everything else delegated to
@@ -144,7 +144,7 @@ The adversarial review's ten points, all taken; none was wrong.
   and that the bare kernel's hottest offset is the lined one's, on line 20;
   the pid-refusal test accepts "no viable backend" only where CUPTI does not
   resolve.
-- **`CATALOG.md` (nit)**: flagged under "Needs from another stream".
+- **`docs/CATALOG.md` (nit)**: flagged under "Needs from another stream".
 
 ## Shown versus reasoned
 
@@ -254,7 +254,7 @@ and the numbers in the family document taken without another tenant:
 cd /home/moha/repos/omniscient && make && nvidia-smi --query-compute-apps=pid,process_name --format=csv && cargo test --test gpu_counters -- --nocapture
 ```
 
-## Decision lines for DECISIONS.md
+## Decision lines for docs/DECISIONS.md
 
 - **`gpu.counters` is CUPTI's range profiler in kernel replay with
   automatic ranges, from the injection library** (wave 19); `vendor:ncu`
@@ -299,10 +299,10 @@ cd /home/moha/repos/omniscient && make && nvidia-smi --query-compute-apps=pid,pr
 
 ## Needs from another stream
 
-- **Coordinator (`CATALOG.md`)**: section 8 was edited by this stream (the
+- **Coordinator (`docs/CATALOG.md`)**: section 8 was edited by this stream (the
   `gpu.counters` and `gpu.profile` rows and caveats, and since the review
-  the pairing and shortfall sentences), although `BRIEF.md`'s ownership
-  table does not list `CATALOG.md` for profiler: expect it at the merge.
+  the pairing and shortfall sentences), although `docs/dev/BRIEF.md`'s ownership
+  table does not list `docs/CATALOG.md` for profiler: expect it at the merge.
 
 - **Coordinator / cupti's files**: expect the edits listed above in
   `cupti/src/{lib,api,channel,wire}.rs` and `src/collect/gpu/kernel.rs`
@@ -324,8 +324,8 @@ cd /home/moha/repos/omniscient && make && nvidia-smi --query-compute-apps=pid,pr
   lines 617-618 name `vendor:ncu`, which left the chain.
 - **device (`docs/scenarios/gpu.md`)**: lines 425-428 and 517-522 say
   `gpu.counters` has no collector and name `vendor:ncu`.
-- **Coordinator**: the decision lines above; `STATE.md`'s `gpu.counters` row
-  and a `gpu.profile` row; `STATE.md` line 978 (`CUPTI, Nsight`).
+- **Coordinator**: the decision lines above; `docs/dev/STATE.md`'s `gpu.counters` row
+  and a `gpu.profile` row; `docs/dev/STATE.md` line 978 (`CUPTI, Nsight`).
 - **lanes / flame**: `gpu.profile` gives stacks of `kernel;file:line;stall`
   through `Collector::stacks()`, so a flame of the device's cycles needs no
   code of its own.

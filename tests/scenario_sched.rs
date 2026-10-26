@@ -7,7 +7,7 @@
 //! this file: what is measured, what cannot be, and what these runs found
 //! wrong.
 //!
-//! The four classes of `BRIEF.md`, and where each one is:
+//! The four classes of `docs/dev/BRIEF.md`, and where each one is:
 //!
 //! - **the capability sweep**: `examples/sched-sweep.yml`, checked against the
 //!   emits the catalog itself declares, read back out of `omn list`.
@@ -94,7 +94,7 @@ fn exit_code(output: &Output) -> i32 {
 /// What this machine lacks for `backend` of `source`, as `omn list` probes it
 /// -- the requirements it calls missing -- or `None` when nothing it needs is
 /// missing here. A pinned backend is refused for the machine before
-/// the build (`DECISIONS.md`, "one order for unbuilt and missing"), so which
+/// the build (`docs/DECISIONS.md`, "one order for unbuilt and missing"), so which
 /// refusal a pin earns is this answer's.
 fn lacks_here(source: &str, backend: &str) -> Option<Vec<String>> {
     let listing = omn(&["list", source, "--format", "json"]);
@@ -1892,7 +1892,7 @@ fn a_source_with_no_collector_is_refused_with_its_own_exit_code() {
 /// comparison `--backend force:` exists for is with the refusal.
 ///
 /// Every backend pinned in this session is a classic tracepoint, and none has
-/// a collector. Which refusal that earns is the chain's order (`DECISIONS.md`,
+/// a collector. Which refusal that earns is the chain's order (`docs/DECISIONS.md`,
 /// "one order for unbuilt and missing"): where the machine lacks something a
 /// backend needs -- tracefs unreadable by this uid, as on this project's own
 /// machine -- it is the machine's, exit 1, as the walk says it; where it lacks

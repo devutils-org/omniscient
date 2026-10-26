@@ -5,7 +5,7 @@ Branches `feat/w25-net` (the capture header, merged first) and
 
 ## Outside the owned files, said first
 
-- `CATALOG.md`: the `net.tcp.connect`, `net.tcp.lifetime`, `net.snmp` rows
+- `docs/CATALOG.md`: the `net.tcp.connect`, `net.tcp.lifetime`, `net.snmp` rows
   and notes, a `net.sockstat` row.
 
 ## What landed
@@ -85,7 +85,7 @@ catalog_model --test cli --test lazy --test encoders`, clippy, fmt. Two
 (`a_net_source_this_build_does_not_collect_exits_three_and_names_the_backend`,
 `the_three_answers_an_ebpf_net_request_can_be_refused_with`): no CAP_BPF.
 
-## Decision lines for `DECISIONS.md`
+## Decision lines for `docs/DECISIONS.md`
 
 - A raw-tracepoint road beside a fentry one is a fallback, degraded by what it
   cannot see (an outcome, a generated cookie), and asked for by name when

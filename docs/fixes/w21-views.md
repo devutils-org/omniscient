@@ -1,6 +1,6 @@
 # The twenty-first wave, stream views
 
-What the views asked of each other (`BRIEF.md`, "views"), on
+What the views asked of each other (`docs/dev/BRIEF.md`, "views"), on
 `feat/w21-views`. Eight commits, all inside `view/**` (not `process.rs`),
 `docs/view/*.md` (not `process.md`), `tests/view_model.rs`, and the gallery
 snapshots my own changes redrew (see "Needs from another stream").

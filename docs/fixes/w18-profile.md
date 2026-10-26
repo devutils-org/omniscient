@@ -1,6 +1,6 @@
 # The eighteenth wave — stream profile
 
-Brief: `BRIEF.md`, "profile -- what a profile costs, and the ladder". Files
+Brief: `docs/dev/BRIEF.md`, "profile -- what a profile costs, and the ladder". Files
 owned: `src/collect/cpu/profile.rs`, `src/unwind.rs`,
 `src/collect/mem/page_faults.rs`, `catalog/unwind.yaml`,
 `tests/{unwind,stack_capture}.rs`, `docs/unwind.md`. The long form, with the
@@ -288,7 +288,7 @@ stops it above 100 % until the two filings below land. Then the case itself,
 the agent's way, once the mcp stream's single privilege model is merged:
 `cargo test --test cases every_case_names_its_known_cause_both_ways -- --nocapture` at paranoid 2, read for `sqlite3-durability`.
 
-## Decision lines for `DECISIONS.md`
+## Decision lines for `docs/DECISIONS.md`
 
 - **A collector's per-tick work follows what the tick drained.** Work a tick
   does whatever its samples -- re-reading a process's maps, its executable,
@@ -345,7 +345,7 @@ the agent's way, once the mcp stream's single privilege model is merged:
   seen once in a workspace run at load 30 to 48 after 22 green alone; and
   `unwind::dwarf_recovers_the_whole_tree_...`, once at load 48 (a branch's
   share outside its slack), six of six alone.
-- **coordinator** (`STATE.md` item 11): "the mode ladder where `mem.faults` is
+- **coordinator** (`docs/dev/STATE.md` item 11): "the mode ladder where `mem.faults` is
   served" and "`collector_cpu_ns`" can leave the list (sections 2 and 3
   above); "`unwind`'s stripped-build second shape" stays, seen once more
   under load (section 4); the per-tick work and the one-time load are filed

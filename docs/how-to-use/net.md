@@ -83,4 +83,4 @@ The program declares its requests with two USDT probes, `request__start(id)`
 and `request__done(id)`, in the executable. Each request is then split into
 on-cpu, runnable, sleeping, blocked, `net_rx` and `net_tx`, summing to its
 latency by construction. Linux 6.6 or later. `examples/vertical-*.yml` and
-`ROADMAP.md` phase 4 are the walk-through.
+`docs/ROADMAP.md` phase 4 are the walk-through.

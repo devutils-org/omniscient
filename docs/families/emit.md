@@ -60,7 +60,7 @@ end of the distribution the missing values were at.
 `Losses::dropped` is a count of records and yields a fraction.
 `Losses::throttled` is a count of *windows in which the kernel declined to
 deliver*, and how many events happened inside one is recorded nowhere.
-`DECISIONS.md` already chose that answer for the loss line; this says the same
+`docs/DECISIONS.md` already chose that answer for the loss line; this says the same
 thing rather than inventing an estimate:
 
 ```
@@ -87,7 +87,7 @@ and producing a number that is neither.
 | `undecoded` | no | a record shape this build cannot parse; nothing suggests the shapes it cannot parse are the slow ones |
 
 The `poll` half was closed before this stream existed and for a better reason.
-`CATALOG.md` §12 refuses `poll` with `hist` because *a histogram of a polled
+`docs/CATALOG.md` §12 refuses `poll` with `hist` because *a histogram of a polled
 gauge is a histogram of when the poller happened to look*, which is the
 coordinated-omission argument written down before anyone here used the term.
 `src/validate.rs`'s `the_mode_emit_matrix_is_enforced` is the test; this stream
@@ -169,7 +169,7 @@ skipped here. Both can skip elsewhere, loudly and with the numbers:
 - **The loss counters and `loss_headline`.** Counted and surfaced already; the
   invariant held. This is the step after it, not a replacement for it.
 - **`rate`, `topk` and `stack`.** Understated by the same losses, and not
-  marked. The finding, `BRIEF.md` and `STATE.md` all scope themselves to
+  marked. The finding, `docs/dev/BRIEF.md` and `docs/dev/STATE.md` all scope themselves to
   distributions, and widening the scope inside this stream would be deciding
   something three documents left alone. The argument for widening it is real
   and is written up under "Needs from another stream" in

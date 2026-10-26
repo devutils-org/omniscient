@@ -268,7 +268,7 @@ they are other worktrees):
 for w in docs engine kernel probes resolver runner; do cargo clean --manifest-path /home/moha/repos/omniscient-$w/Cargo.toml; done
 ```
 
-## For DECISIONS.md
+## For docs/DECISIONS.md
 
 - **A gauge is held to the kernel's own reading of the same gauge, not to a
   workload's promise.** The queue depth is required only when the kernel's

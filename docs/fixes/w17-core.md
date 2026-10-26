@@ -81,8 +81,8 @@ unrelated ones that passed alone:
 | `tests/cli.rs:1665` `a_request_keyed_on_what_its_backend_does_not_attach_is_refused_with_the_backend_that_does` | the same, through the CLI | the same |
 | `tests/scenario_net.rs` (`net.hwts`, ~2076): a request, not a failing test | already branches on the machine (exit 1 without a readable PTP clock, 3 with one) | add the pinned twin: `--backend force:so_timestamping` exits the same code as the walk on each branch |
 
-These tests are written against `DECISIONS.md`'s settled line *"Valid, and not
-built" is exit 3, wherever it is discovered* (`DECISIONS.md:127`), and
+These tests are written against `docs/DECISIONS.md`'s settled line *"Valid, and not
+built" is exit 3, wherever it is discovered* (`docs/DECISIONS.md:127`), and
 `scenario_proc`'s message says it outright: *"`force:` bypasses the resolver so
 no machine can turn it into any other answer"*. The brief's decision narrows
 that line: a backend both unbuilt **and** unservable here is the machine's, on
@@ -255,7 +255,7 @@ sampled in user mode only (perf_event_paranoid 2)"*. If the lower bound fails
 there, the memset reasoning in §3 is wrong and the test should keep only the
 upper bound at paranoid 2.
 
-## Decision lines for `DECISIONS.md`
+## Decision lines for `docs/DECISIONS.md`
 
 - **The GPL-2.0 text ships** (moves from "Open"): `LICENSES/GPL-2.0-only.txt`,
   installed under `share/doc/omn/LICENSES/` and packed by `scripts/release.sh`,

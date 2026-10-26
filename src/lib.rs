@@ -10,7 +10,7 @@
 //!
 //! The ordering is deliberate. The request model and the catalog are what every
 //! later phase is written against, and they are the expensive things to change;
-//! a collector is a day's work. See `ROADMAP.md`.
+//! a collector is a day's work. See `docs/ROADMAP.md`.
 
 /// Implements `Serialize` and `Deserialize` for a type through its `Display`
 /// and `FromStr`, so a value reads identically on the command line, in a

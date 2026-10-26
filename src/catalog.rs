@@ -1,6 +1,6 @@
 //! The catalog: the tool's vocabulary, loaded as data.
 //!
-//! `CATALOG.md` describes the entries and `catalog/*.yaml` holds them. The CLI,
+//! `docs/CATALOG.md` describes the entries and `catalog/*.yaml` holds them. The CLI,
 //! the help text, `omn list` and the validator are projections of these files;
 //! adding a source means adding an entry, not touching code.
 //!
@@ -66,7 +66,7 @@ pub struct Entry {
     pub targets: BTreeMap<TargetKind, TargetSupport>,
     /// Why each target the `targets:` line writes `no` is refused: the
     /// reason a refusal quotes, read from that line and from nowhere else,
-    /// so it sits on the axis it explains (`DECISIONS.md`).
+    /// so it sits on the axis it explains (`docs/DECISIONS.md`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub refused: BTreeMap<TargetKind, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -305,7 +305,7 @@ impl Backend {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Backend {
-    /// A backend tag from `CATALOG.md`: `pmu`, `bpf:tp`, `fs:proc`, and so on.
+    /// A backend tag from `docs/CATALOG.md`: `pmu`, `bpf:tp`, `fs:proc`, and so on.
     pub id: String,
     /// What the machine must provide: tracepoints, PMU events, files, BTF.
     /// The resolver probes each one; nothing here is assumed.
@@ -319,7 +319,7 @@ pub struct Backend {
     /// +0.15 % of a memory-bound one. `cost` stays the worst of them; this
     /// says which programs pay it, for the budget's note and the run's cost
     /// line, and the bench checks each regime's rows against its band
-    /// (`DECISIONS.md`, settled 2026-10-19).
+    /// (`docs/DECISIONS.md`, settled 2026-10-19).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub cost_by_regime: BTreeMap<String, Cost>,
     /// What is lost relative to the backend above it in the chain. Required on
@@ -429,7 +429,7 @@ pub struct Backend {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JoinRule {
-    /// The typed key, written as in `CATALOG.md`: `blk:rq@open_ts`.
+    /// The typed key, written as in `docs/CATALOG.md`: `blk:rq@open_ts`.
     pub key: String,
     #[serde(rename = "match")]
     pub match_kind: MatchKind,
@@ -535,7 +535,7 @@ pub enum Cost {
     /// +1000 %, and `proc.syscall`'s program on every system call, +296 % --
     /// and it is also where kernel replay would sit, as a GPU profiler does it
     /// to read more counters than the hardware has. Not dynamic binary
-    /// instrumentation, which `DECISIONS.md` rules out as a backend.
+    /// instrumentation, which `docs/DECISIONS.md` rules out as a backend.
     Extreme,
 }
 
@@ -1300,7 +1300,7 @@ impl Catalog {
 /// Either the requests of each band the family can keep, or `none`, the
 /// reason the family has no default that is safe to run without choosing.
 /// A family owns its default the way it owns its sources, so it is data in
-/// the family's own file, never code (`DECISIONS.md`, "the lazy mode").
+/// the family's own file, never code (`docs/DECISIONS.md`, "the lazy mode").
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FamilyDefault {

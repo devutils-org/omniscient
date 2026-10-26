@@ -160,7 +160,7 @@ pub const SPECS: &[Spec] = &[
     // The degraded fallback the catalog declares (`CPU time, not cycles:
     // blind to DVFS`): the same group and window, one software counter, and
     // the counter's own name in the event so the value is never read as
-    // cycles. DECISIONS.md, the fifteenth wave.
+    // cycles. docs/DECISIONS.md, the fifteenth wave.
     Spec {
         source: "cpu.cycles",
         backend: "pmu:sw",

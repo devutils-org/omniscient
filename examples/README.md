@@ -10,7 +10,7 @@ scripts/demo.sh --list                # all of them, named, without running any
 make demo                             # the guided tour
 ```
 
-**`GUIDE.md` is the document to read first.** It explains the four kinds of
+**`docs/GUIDE.md` is the document to read first.** It explains the four kinds of
 session — ground truth, the capability sweep, the backend comparison, the loss
 path and the refusal — and what to look for in each. This file is only the
 index.
@@ -216,7 +216,7 @@ each mode costs and what it was held to.
 
 ## vertical
 
-`ROADMAP.md` phase 4: one request followed from where it entered to where it
+`docs/ROADMAP.md` phase 4: one request followed from where it entered to where it
 touched the disk, by the id it carried. A real server on loopback, delays
 injected where the test chose them, and each landing in its own row.
 
@@ -227,7 +227,7 @@ injected where the test chose them, and each landing in its own row.
 
 ## attach
 
-`ROADMAP.md` phase 6, task 4: a request whose window is its own, attached and
+`docs/ROADMAP.md` phase 6, task 4: a request whose window is its own, attached and
 detached inside a run that keeps going. Each session checks that a source
 counts what happened while it was attached and nothing outside it.
 
@@ -239,7 +239,7 @@ counts what happened while it was attached and nothing outside it.
 
 ## record
 
-`STATE.md`'s flight recorder: a session whose duration is *until a predicate
+`docs/dev/STATE.md`'s flight recorder: a session whose duration is *until a predicate
 fires*, which keeps a bounded span of what it read and writes one document per
 firing. Each session checks the documents against what the workload says it
 did, and a trigger that never fires against the run's own bounds.
@@ -251,7 +251,7 @@ did, and a trigger that never fires against the run's own bounds.
 
 ## triage
 
-`ROADMAP.md` phase 10: the layer above the engine, which asks it a question
+`docs/ROADMAP.md` phase 10: the layer above the engine, which asks it a question
 for an objective and names what dominates. Each is the session `omn latency`
 or `omn saturate` runs, against a workload whose limit the test chose.
 

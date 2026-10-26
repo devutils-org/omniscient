@@ -1,6 +1,6 @@
 # The nineteenth wave, stream wake
 
-Branch `feat/w19-wake`, from `main` at `91a0cef`. `BRIEF.md`, "wake -- who
+Branch `feat/w19-wake`, from `main` at `91a0cef`. `docs/dev/BRIEF.md`, "wake -- who
 woke whom": the wake chain from `sched.wakeup` as a tree, from a blocked
 thread up to what finally unblocked it, with the time spent at each link.
 Files owned: `view/src/views/wake.rs`, its snapshots under
@@ -133,7 +133,7 @@ The label matters: the view tells a machine-wide request by its
 `@system` suffix, as `omn top` labels one. (`/tmp/www` prepared as `tests/view_fixtures/record.sh`'s `record_http_server`
 prepares `$work/www`.) If it is worth keeping, core's `record.sh` takes it.
 
-## Decision lines for DECISIONS.md
+## Decision lines for docs/DECISIONS.md
 
 - **The wake view follows a chain through each waker's latest wakeup before
   the one it issued, and folds the chains per thread into a tree** (wave 19).

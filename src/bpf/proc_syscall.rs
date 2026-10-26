@@ -24,7 +24,7 @@
 //! `write` on the machine. So a predicate that names one syscall is written
 //! into the instruction stream, ahead of the map write, and the collector says
 //! in its notes that it was -- a filter reported as pushed down and applied in
-//! userspace is the shape `DECISIONS.md` calls the worst a bug takes here.
+//! userspace is the shape `docs/DECISIONS.md` calls the worst a bug takes here.
 //!
 //! The bucketing is `emit::BucketLayout::Log2`, the same definition userspace
 //! uses, for the reason `src/bpf/runqlat.rs` records: it is what lets a

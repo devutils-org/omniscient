@@ -4,7 +4,7 @@ The triage and the cases: the items `docs/open-findings.md` carried for
 `src/triage/**` and `tests/cases.rs` since the twenty-first wave (stream
 run's "the failure channel" and "`--program-stderr` and `--runs`", stream
 data's "the provenance from the results", stream docs' "the job restricted
-to the followed child's parent") and the three cases `STATE.md` names.
+to the followed child's parent") and the three cases `docs/dev/STATE.md` names.
 Branch `feat/w24-triage`, commits `9f3124b`, `f49d539`, `4b101d7`,
 `b512089`, the refactor that moves the failures beside the run
 (`engine::Ran`, so `tests/view_timebar.rs`, which builds an
@@ -164,7 +164,7 @@ least each task's first event of `sched.offcpu` or `sched.runqlat`.
   that waits beside the main thread" for the MCP way (landed, the case's
   findings removed).
 
-## Decision lines for `DECISIONS.md`
+## Decision lines for `docs/DECISIONS.md`
 
 - **Several launches keep each stderr as `FILE.<n>`** (`omn latency
   --runs N --program-stderr FILE`): numbered from 1 in the order the

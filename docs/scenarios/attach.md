@@ -1,6 +1,6 @@
 # Hot attach — a request whose window is its own
 
-`ROADMAP.md` phase 6, task 4: *a collector can be added and removed
+`docs/ROADMAP.md` phase 6, task 4: *a collector can be added and removed
 mid-session*, without restarting the run or breaking in-flight joins. This is
 the tenth wave's stream H, and this document is its handoff.
 
@@ -171,10 +171,10 @@ should be refused, pointing at `window`, is a decision for the coordinator.
 | the window's placement in the results document | `src/emit.rs` (`Results::window`); until then it is a note and `stopped_because` | yes |
 | a late counter on a threaded program | `src/collect/cpu/counters.rs` declaring `follows_only_later_threads`, or opening per thread | yes |
 | `--window` on the command line | `src/cli.rs`, `man/omn.1` | yes |
-| `DECISIONS.md`'s concurrent-requests line | the coordinator; what it should say is in the filing | yes |
+| `docs/DECISIONS.md`'s concurrent-requests line | the coordinator; what it should say is in the filing | yes |
 | the escalation (phase 10) | the next wave, standing on this | — |
 
-**The concurrent-requests line in `DECISIONS.md`.** It says a session with
+**The concurrent-requests line in `docs/DECISIONS.md`.** It says a session with
 several requests is refused until hot attach lands. That has not been true for
 several waves: a session runs any number of requests in one window, one
 workload beside any number of machine targets, and each now has its own window
@@ -215,7 +215,7 @@ row.
 
 ## Index rows, ready to paste
 
-`examples/README.md` and `GUIDE.md`, in a new `attach-` section:
+`examples/README.md` and `docs/GUIDE.md`, in a new `attach-` section:
 
 ```
 | `attach-late-probe.yml` | Does a kernel probe loaded mid-run see what happened after it and nothing before? |

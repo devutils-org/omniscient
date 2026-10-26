@@ -3,7 +3,7 @@
 //! `omn trace cpu -- prog` names a family where a source is expected, and
 //! the run composes the rest -- the sources, the modes, the emits -- from
 //! that family's default, the `- default:` item of its catalog file. A family
-//! name has no dot, so it never collides with a source (`DECISIONS.md`, "the
+//! name has no dot, so it never collides with a source (`docs/DECISIONS.md`, "the
 //! lazy mode"). `--cost low|med|high` picks the band of the default, in the
 //! cost words the catalog's chains already declare; absent, the cheapest band
 //! the family has.

@@ -128,8 +128,8 @@ only through `bpf:raw_tp` in this wave.
 ## Needs from another stream
 
 - **Coordinator** (files this stream does not own): the deleted
-  `onpid.py`/`run_pairs.py` are still mentioned in `STATE.md` (line ~1350:
-  "through `onpid.py`; TIME+ on alternate runs"), `DECISIONS.md` (line
+  `onpid.py`/`run_pairs.py` are still mentioned in `docs/dev/STATE.md` (line ~1350:
+  "through `onpid.py`; TIME+ on alternate runs"), `docs/DECISIONS.md` (line
   ~1246, "top's `onpid.py`"), and `docs/open-findings.md` (lines
   ~12377-12384, the request for `onpid_attach`, now answered by `run:
   attach`: close it). `docs/replaces.md`'s top line can say "11 held, one

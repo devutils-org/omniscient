@@ -1,7 +1,7 @@
 # The twenty-first wave, stream data
 
 Branch `feat/w21-data`, from `main` at `156f1c5` (`git merge main`: already
-up to date). `BRIEF.md`, "data -- what results carry"; `STATE.md`, "What
+up to date). `docs/dev/BRIEF.md`, "data -- what results carry"; `docs/dev/STATE.md`, "What
 remains", item 4 (the `src/collect/mod.rs` and `src/emit.rs` line, the
 `src/catalog.rs` line, the `src/stack.rs` line) and the shared stream's
 "not done" (`NamedBy`, the executable of each task). Measured on the
@@ -116,7 +116,7 @@ Wanted: `executables` naming `/usr/bin/python3.x` for the program's task,
 `perf_maps` naming `/tmp/perf-<pid>.map` with a non-zero inode, and stack
 rows carrying `"series": "task:<tid>"`.
 
-## Decision lines for DECISIONS.md
+## Decision lines for docs/DECISIONS.md
 
 - **A collector's fields are counts** (`Results::fields`, a
   `BTreeMap<String, u64>`): what a caveat says in a sentence as a whole
@@ -162,13 +162,13 @@ rows carrying `"series": "task:<tid>"`.
   `executables`, `named_by` and `perf_maps` in the view's model, so the
   request view reads `fields` in place of sentences. (`StackCount::series`
   landed in the review round, below.)
-- **docs** (`CATALOG.md`; `docs/contributing.md` is nobody's): the
+- **docs** (`docs/CATALOG.md`; `docs/contributing.md` is nobody's): the
   `targets: {pid: "no: <reason>"}` form where the `targets:` line is
   described, and `dir` among the keys.
 - **triage** (`src/triage/`): read `named_by` and `perf_maps` from the
   results instead of reading `/tmp/perf-<pid>.map` back after the run, once
   a collector fills them.
-- **coordinator** (`DECISIONS.md`): the lines above; the nineteenth wave's
+- **coordinator** (`docs/DECISIONS.md`): the lines above; the nineteenth wave's
   "a refused target's reason comes from a caveat" row is now superseded.
 
 ## The tests

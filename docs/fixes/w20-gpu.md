@@ -1,6 +1,6 @@
 # The twentieth wave, stream gpu
 
-Item 3 of `STATE.md` ("The GPU, what its streams left") and the defect the
+Item 3 of `docs/dev/STATE.md` ("The GPU, what its streams left") and the defect the
 bench found after the nineteenth wave (`docs/open-findings.md`, "The
 nineteenth wave, coordinator, after the merge"). Branch `feat/w20-gpu`,
 merged with `main` at `444900b`.
@@ -135,7 +135,7 @@ Reasoned, not shown:
   is the catalog loader's `TargetSupport` parsing (`src/catalog.rs`, the
   shared stream's) and every entry that refuses a target with a reason.
   Filed below and as a decision line.
-- **`docs/bench.md` lines 617-618 and `CATALOG.md`'s NVML cost cells**: not
+- **`docs/bench.md` lines 617-618 and `docs/CATALOG.md`'s NVML cost cells**: not
   this stream's files. Filed below.
 - The AMD and Intel kernel paths wait for a card in the machine.
 
@@ -151,7 +151,7 @@ scripts/bench.sh gpu
 cargo test --test gpu_counters --test gpu_kernel -- --test-threads=1
 ```
 
-## Decision lines for DECISIONS.md
+## Decision lines for docs/DECISIONS.md
 
 - **A cost per regime in the catalog's schema** (proposed, with numbers).
   The bench's two tables give, for one backend, bands two orders of
@@ -186,8 +186,8 @@ cargo test --test gpu_counters --test gpu_kernel -- --test-threads=1
 - **shared** (`src/catalog.rs`): the `targets: {pid: "no: <reason>"}` form
   above, if the decision is taken; `validate.rs`'s
   `target_rejection_reason` then reads it rather than searching caveats.
-- **docs** (`docs/bench.md` lines 617-618, `CATALOG.md`): stop naming
-  `vendor:ncu` as a backend; `CATALOG.md`'s `gpu.engine_busy` row gains
+- **docs** (`docs/bench.md` lines 617-618, `docs/CATALOG.md`): stop naming
+  `vendor:ncu` as a backend; `docs/CATALOG.md`'s `gpu.engine_busy` row gains
   `raw`, and its NVML cost cells follow `catalog/gpu.yaml`.
 - **bench schedule** (`examples/bench/gpu.rs`, `tests/bench_gpu.rs`, nobody's
   this wave): fewer launches on the `launch` regime for a replaying arm

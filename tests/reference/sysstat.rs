@@ -1,5 +1,5 @@
 //! Parsers for the `sysstat` family's reference tools. Each turns a tool's
-//! output into the values a pair compares (BRIEF.md, "Decided before this
+//! output into the values a pair compares (docs/dev/BRIEF.md, "Decided before this
 //! wave").
 //!
 //! Every busy share here is `(100 - %idle - %iowait) / 100`, a ratio like

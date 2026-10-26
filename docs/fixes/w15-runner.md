@@ -75,7 +75,7 @@ compared, never summed. The field docs say so.
 
 `Overhead::tool_cpu_ns()` is the sum of the two and `collector_cpu_ns`. The
 percentage and the budget are unchanged: none of the startup is dilation (see
-"For DECISIONS.md").
+"For docs/DECISIONS.md").
 
 **Ground truth**: `budget::what_a_profile_with_stacks_says_it_cost_adds_up_to_what_the_kernel_counted`.
 A python target burns half a second and prints its own lifetime
@@ -279,7 +279,7 @@ synthetic rows (`bench_harness::a_row_is_held_to_its_band_on_the_larger_of_its_s
   human runs `sudo sysctl kernel.bpf_stats_enabled=1` before the run. Optional,
   and nothing here depends on it.
 
-## For `DECISIONS.md`
+## For `docs/DECISIONS.md`
 
 - **What a run cost the machine is reported whole, and what it cost the target
   is weighed apart.** `cost.json` carries this process's cpu before the window

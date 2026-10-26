@@ -296,7 +296,7 @@ make check                            # everything, the way CI would
 
 `make check` was run four times against this branch, two of them clean end to
 end — 993 tests, clippy and fmt. None of the failures seen across the four is in
-a file this stream owns, every one is the species `STATE.md` already names —
+a file this stream owns, every one is the species `docs/dev/STATE.md` already names —
 *a measurement of a shared machine is not repeatable inside a parallel test
 suite* — and every one passes in isolation. The machine carried a load average
 between six and ten throughout, because seven other worktrees were running their

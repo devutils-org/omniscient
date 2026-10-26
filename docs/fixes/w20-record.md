@@ -1,6 +1,6 @@
 # The twentieth wave, stream record
 
-Item 2 of `STATE.md`'s "What remains", phase B's recording half: one
+Item 2 of `docs/dev/STATE.md`'s "What remains", phase B's recording half: one
 re-recording of every fixture on merged phase A, a recording of each view's
 workload, every snapshot redrawn, each view held to its workload's manifest,
 and the gallery's README rewritten with the user's verdict. Branch

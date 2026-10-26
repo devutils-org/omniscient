@@ -5,7 +5,7 @@
 //! `sched.switches` is served first by `pmu:sw`, an inherited software counter
 //! that is exact and costs nothing, and that follows threads and cpus but not
 //! a cgroup. This program is the second backend of the chain
-//! (`DECISIONS.md`, the fourteenth wave): it serves every target, a cgroup
+//! (`docs/DECISIONS.md`, the fourteenth wave): it serves every target, a cgroup
 //! included, in `count` mode, and it is the one that can tell the two kinds of
 //! switch apart, which the entry's caveat says only a `sched_switch` backend
 //! can.

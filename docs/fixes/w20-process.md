@@ -108,7 +108,7 @@ OMN_VIEW_BLESS=1 cargo test -p omn-view --lib views::process
 And one for the user at a terminal: `target/debug/omn top --replay
 docs/view/gallery/process-run`, then click a tile twice and right click.
 
-## Decision lines for DECISIONS.md
+## Decision lines for docs/DECISIONS.md
 
 - **A tile's colour is the suspect's state, on the tile that explains it**
   (cpu, threads, wake, flows or cost by the state), never a threshold; a

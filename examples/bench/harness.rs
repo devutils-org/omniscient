@@ -1,4 +1,4 @@
-//! The self-benchmark's harness: `ROADMAP.md` phase 8.
+//! The self-benchmark's harness: `docs/ROADMAP.md` phase 8.
 //!
 //! Shared by every `tests/bench_*.rs` through `#[path]`, because an integration
 //! test is its own crate and this code belongs to none of them. It is not an
@@ -558,7 +558,7 @@ impl Evictor {
 /// says rather than reading as "never throttled".
 ///
 /// These are the files `power.throttle`'s `fs:sys` backend reads, and they are
-/// read here directly rather than through the tool, on purpose (`DECISIONS.md`,
+/// read here directly rather than through the tool, on purpose (`docs/DECISIONS.md`,
 /// the sixteenth wave). The guardrail wraps the bare runs as well as the
 /// traced ones, and the bare run is the baseline every dilation is measured
 /// against: running `omn` beside it would make it a traced run, and the
@@ -1495,7 +1495,7 @@ impl Band {
 /// The cost compared is the larger of the share of the target's cpu
 /// `cost.json` reports and the dilation the workload measured of itself: an
 /// in-kernel collector's cost is in the target's dilation and not in the
-/// tool's cpu (`DECISIONS.md`, the bench's correction to the bands), so a
+/// tool's cpu (`docs/DECISIONS.md`, the bench's correction to the bands), so a
 /// band judged on the tool's cpu alone would pass every eBPF program. Either
 /// column is enough to judge by; a row with neither, with no repetition that
 /// completed, or with no collector cpu at all is missing what the table is for.

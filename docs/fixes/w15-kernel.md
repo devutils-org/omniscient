@@ -269,7 +269,7 @@ sudo rmmod null_blk
 The launched `fio` is the target (`--thread`, so its eight jobs are one
 process's threads, which is what a process target keeps).
 
-## For `DECISIONS.md`
+## For `docs/DECISIONS.md`
 
 - **A backend that serves fewer modes than its chain declares them, per
   backend** (`modes:` on the backend), rather than a factory refusing at the
@@ -298,7 +298,7 @@ fifteenth wave, stream kernel":
   `src/collect/mod.rs:2637`, `tests/scenario_runtime.rs:240`: the same
   lost-`\` continuation.
 - The coordinator: `docs/scenarios/net.md` (defect 7's record), `docs/scenarios/sched.md`
-  (the loss workload), `ROADMAP.md` phase 3 and 6 audit notes, the flaky tally
+  (the loss workload), `docs/ROADMAP.md` phase 3 and 6 audit notes, the flaky tally
   (#3 closed), `.github/expected-skips.txt` (the bpftool skip wording).
 
 ## Session index rows

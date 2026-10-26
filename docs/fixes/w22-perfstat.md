@@ -155,7 +155,7 @@ pseudo-paths such as `summary.total` that are not in omn's JSON.
   meaning as in `catalog/references/power.yaml`, so the runner needs one
   implementation for both families.
 - **Pseudo-paths: the notation is the brief's, kept on purpose.**
-  `summary.total` is the example BRIEF.md's schema gives for `compare.omn`,
+  `summary.total` is the example docs/dev/BRIEF.md's schema gives for `compare.omn`,
   and eleven pairs across the families use it. It names the value for a
   reader. It cannot be a literal path: the value is the sum of a
   summary's series (one per cpu with `--system`), and the pid pair divides

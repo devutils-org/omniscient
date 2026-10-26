@@ -1,6 +1,6 @@
 # Portability: the kernel matrix, the degradation runs, and the CI
 
-`ROADMAP.md`'s test strategy had two rows nobody had built:
+`docs/ROADMAP.md`'s test strategy had two rows nobody had built:
 
 | Row | What it asks |
 |---|---|
@@ -184,7 +184,7 @@ and every difference is a requirement the catalog wrote, answered by name:
 
 | Source | Below | Why the listing changed |
 |---|---|---|
-| `sched.runqlat`, `sched.offcpu`, `sched.lock` | 6.1 | `kernel>=6.1: missing: kernel 5.15 is older than 6.1` -- the floor, refused by name as `DECISIONS.md` says |
+| `sched.runqlat`, `sched.offcpu`, `sched.lock` | 6.1 | `kernel>=6.1: missing: kernel 5.15 is older than 6.1` -- the floor, refused by name as `docs/DECISIONS.md` says |
 | `sched.switches` | 6.1 | its `bpf:raw_tp` backend only: `kernel>=6.1` is that backend's requirement, not the source's. `pmu:sw` and the `bpf:tp` count program below it name no kernel, and the sixteenth wave's sweep found the source usable on 5.15 through `pmu:sw` ("The sixteenth wave's sweep", below). Listed here as refused at first, which read a backend's refusal as the source's |
 | `io.pagecache` | 7.2 | `raw_tracepoint:mm_filemap_get_pages: missing: this kernel defines no mm_filemap_get_pages tracepoint; it is absent from its own BTF` |
 | `io.readahead` | 7.2 | the same tracepoint, and it takes its `bpf:fentry` backend instead |
@@ -539,7 +539,7 @@ names it.
 stream D's collector or on `modes: [trace]` with its test's wording), P10's
 `mem.cgroup` (the guest's), and P11.
 
-### For `DECISIONS.md`
+### For `docs/DECISIONS.md`
 
 - **A prototype is written in the catalog as well as in the program.** The
   probe must answer before anything is loaded, so it cannot ask the program;
@@ -566,7 +566,7 @@ stream D's collector or on `modes: [trace]` with its test's wording), P10's
 - Filed in `docs/open-findings.md` under this stream: the prototype contract
   for the raw-tracepoint programs' owner, with the two widenings the matrix
   measured (`sk_ino` through `sk_socket->file->f_inode`; the one-slot-moved
-  prototypes of 6.6 and 5.15); the four new notations for `CATALOG.md` §1;
+  prototypes of 6.6 and 5.15); the four new notations for `docs/CATALOG.md` §1;
   P7's `sched.switches -m count` for stream D; and the `cgroup`/`container`
   targets of the counting sources, `cpu.profile` and `mem.faults`, for
   stream W next wave (not taken: the collectors over `perf::Scope::CgroupOnCpu`
@@ -841,7 +841,7 @@ performance unit"* instead of unknown. **Cells still to verify**, for the coordi
 | `here-nocaps` | strip both links of the binary (`setcap -r target/debug/omn target/debug/deps/omn-*`), then `scripts/matrix.sh here` | the counting sources on `--system` are refused before the start for per-cpu events as before; every judge passes |
 | `ci-*-nocaps` | the next push | the configured cell (paranoid 2): the counting sources serve a launched program; the skip gate's unexpected list should be empty but for what the first push names |
 
-### For `DECISIONS.md`
+### For `docs/DECISIONS.md`
 
 - **A cgroup is counted like a process**: one event, the sum over the cpus it
   ran on, keyed on the cgroup. Its cpus are where its tasks happened to run,
@@ -1150,13 +1150,13 @@ once. The pass changed:
 ### Index rows for sessions added
 
 `examples/gpu-draw-in-watts.yml`, in
-`examples/README.md` and `GUIDE.md`'s gpu table:
+`examples/README.md` and `docs/GUIDE.md`'s gpu table:
 
 ```
 | `gpu-draw-in-watts.yml` | How many watts the board drew over a window, from its energy counter. |
 ```
 
-### For `DECISIONS.md`
+### For `docs/DECISIONS.md`
 
 - **A source is usable only through a backend this build collects.** The
   listing's `here` is "available means it attaches" for this binary; a backend
@@ -1265,7 +1265,7 @@ Served, through the `pmu:sw` backend the catalog already declared degraded
 counter group and window, under the counter name `cpu_clock_ns`, with the
 degradation in the result. On a cloud VM with no PMU `cpu.cycles` now measures
 where it was refused as the build's gap (exit 3). Decided for the chain rather
-than for a refusal by name: `DECISIONS.md`'s open line said leaving it open
+than for a refusal by name: `docs/DECISIONS.md`'s open line said leaving it open
 cost `cpu.cycles` on most cloud VMs, and the project's line is every mechanism
 as a chain, with a fallback that says what it degrades. The unit stays the
 entry's (`count`), which is the price: a reader who ignores the `degraded:`
@@ -1280,7 +1280,7 @@ line reads nanoseconds as cycles, at one gigahertz.
 
 ### 4. The bench's guardrail and `power.*`
 
-Not changed here, and why. `ROADMAP.md` phase 9 says `power` has been
+Not changed here, and why. `docs/ROADMAP.md` phase 9 says `power` has been
 collected unconditionally since phase 8 as a guardrail. What the bench does
 (`examples/bench/harness.rs`, the runner stream's) is read
 `/sys/devices/system/cpu/cpu*/thermal_throttle/{core,package}_throttle_count`

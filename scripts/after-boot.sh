@@ -1,6 +1,6 @@
 #!/bin/sh
 # The settings the reference pairs and the bench want, which a reboot resets
-# (STATE.md, "What the user grants"). Run once after each boot, as yourself:
+# (docs/dev/STATE.md, "What the user grants"). Run once after each boot, as yourself:
 # sudo asks for the password once.
 #
 #   scripts/after-boot.sh

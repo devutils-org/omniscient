@@ -115,4 +115,4 @@ session, compose it as the command does, and answer what they decided under
 A default is held to what a request would be: the catalog refuses to load one
 that names a source, a mode, an emit or a key its family does not have, or
 puts a source in a band its cheapest backend cannot keep. The reasoning is in
-`DECISIONS.md`, "the lazy mode".
+`docs/DECISIONS.md`, "the lazy mode".

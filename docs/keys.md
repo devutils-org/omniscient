@@ -1,6 +1,6 @@
 # The correlation keys
 
-`ROADMAP.md` phase 1 asks for a one-page note that justifies each key by the
+`docs/ROADMAP.md` phase 1 asks for a one-page note that justifies each key by the
 boundary it crosses. This is that note. The set is closed:
 `request::KeyKind` names the kinds and `event::KeyValue` carries the values.
 A join rule matches on keys and on nothing else, so the join engine never
@@ -87,7 +87,7 @@ in, by the inode `/proc/<pid>/ns/pid` names, and its pid inside that
 namespace, the last `NSpid` of `/proc/<pid>/status`
 (`KeyValue::proc_of`). Two containers' pid 1 are two keys, and a process is
 never its main thread, which `task:<pid>` is. Kept rather than removed because
-`CATALOG.md` ("The container trap") names it as the answer to `--cgroup` not
+`docs/CATALOG.md` ("The container trap") names it as the answer to `--cgroup` not
 being a pid filter. `KeyValue::proc_of` is the one way to make it. The
 per-process procfs sources carry it as their second key, after `task`:
 `proc.fd` and `proc.threads` (`src/collect/proc/status.rs`) and `mem.rss`,
@@ -120,12 +120,12 @@ socket `accept` returns are two cookies. And it means nothing off the machine.
 kernel's own `request.start_time_ns`, the only key two collectors that never
 met can agree on (`src/collect/io/block.rs`, the only producer). It crosses
 insert, issue and completion across cpus and into IRQ context. It is scoped
-because the kernel recycles a request within milliseconds: `STATE.md` shows
+because the kernel recycles a request within milliseconds: `docs/dev/STATE.md` shows
 one pointer under two open timestamps four milliseconds apart. What it does
 not survive: `start_time_ns` comes from a clock cached for the length of a
 plug, so two lives of one pointer inside one plug share the whole key. The
 engine pairs them by order, counts them in `states.scope_collapsed`, and
-rates the match `TEMPORAL` within the key (`DECISIONS.md`, the thirteenth
+rates the match `TEMPORAL` within the key (`docs/DECISIONS.md`, the thirteenth
 wave). A request without `start_time_ns` is scoped by the run's first sight of
 it, and says so. A bio-based stacked device (device-mapper) has no request of
 its own; its I/O is keyed at the device underneath.
@@ -141,7 +141,7 @@ because the free closes the old one. The key carries **no address space**:
 two processes' identical addresses are one range to it, which is sound only
 because both sides of a session's interval join watch one workload. And a
 fault's address is not the extent the fault filled. Under THP `always` one
-fault fills an aligned 2 MiB page (`DECISIONS.md`, "What the measurement
+fault fills an aligned 2 MiB page (`docs/DECISIONS.md`, "What the measurement
 taught").
 
 **`gpu`, a fence.** `fence_ctx` plus `seqno`, from the DRM scheduler's job

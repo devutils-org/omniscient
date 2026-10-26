@@ -1,6 +1,6 @@
 //! Reading a CTF 1.8 trace, the format LTTng writes, into this tool's events.
 //!
-//! An import, not a source (`DECISIONS.md`, boundary 6): LTTng-UST is fast
+//! An import, not a source (`docs/DECISIONS.md`, boundary 6): LTTng-UST is fast
 //! because it writes in-line into its own buffer without a trap, which is also
 //! why its events do not exist for an eBPF program. What it recorded is read
 //! after the fact and merged into a stored run, where `omn join` meets it

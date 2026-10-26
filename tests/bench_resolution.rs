@@ -1,4 +1,4 @@
-//! Effective resolution: are two events X us apart told apart? (`ROADMAP.md`
+//! Effective resolution: are two events X us apart told apart? (`docs/ROADMAP.md`
 //! phase 8, task 5.)
 //!
 //! The workload produces pairs of marker events -- two signals, two marked

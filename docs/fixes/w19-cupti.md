@@ -1,6 +1,6 @@
 # The nineteenth wave, stream cupti
 
-Branch `feat/w19-cupti`, from `main` at `4aef377`. `BRIEF.md`, "cupti --
+Branch `feat/w19-cupti`, from `main` at `4aef377`. `docs/dev/BRIEF.md`, "cupti --
 every kernel, its time, and what was lost".
 
 ## What landed
@@ -165,7 +165,7 @@ cd /home/moha/repos/omniscient && make install-check && make dist-verify
 `RmProfilingAdminOnly` does not matter to this stream: the activity API is not
 the profiling API, and ran here without it.
 
-## Decision lines for DECISIONS.md
+## Decision lines for docs/DECISIONS.md
 
 - **CUPTI is reached from an injection library loaded at `cuInit`**
   (wave 19): `cupti/`, a workspace member like the preload shim, named in
@@ -237,7 +237,7 @@ the profiling API, and ran here without it.
   would be the stricter alternative, if you prefer it. And
   `docs/install.md`'s layout (lines 31, 432): add
   `bin/libomn_cupti.so  the CUDA injection library gpu.kernel loads`.
-- **Coordinator**: the decision lines above; `STATE.md`'s `gpu.kernel` row.
+- **Coordinator**: the decision lines above; `docs/dev/STATE.md`'s `gpu.kernel` row.
 
 ## The suite
 
@@ -302,7 +302,7 @@ The adversarial review's eight findings, and what became of each.
   extrapolation in its `ts_err_ns` (`ClockMap::err_at`: the slope's
   measured error times the distance, 500 ppm declared before a second
   bracket).
-- **`CATALOG.md` listing `pid`** (nit): fixed, `launch`.
+- **`docs/CATALOG.md` listing `pid`** (nit): fixed, `launch`.
 - **The channel departing from the brief's ring** (nit): said under "What
   landed".
 - **Edits in device's files** (nit): unchanged and still flagged; the

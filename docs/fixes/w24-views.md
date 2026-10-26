@@ -119,7 +119,7 @@ Reasoned only:
   changes there is resolved by re-blessing (`OMN_VIEW_BLESS=1 cargo test
   --test view_snapshots`).
 
-## Decision lines for `DECISIONS.md`
+## Decision lines for `docs/DECISIONS.md`
 
 - A view's layout scales with the terminal: every growable element (a
   history, a bar, a lane, a list) takes the rows and columns the fixed lines

@@ -13,7 +13,7 @@ it, the paragraph says what would.
 Classes: **(a)** it asserts what the machine was doing, not what the workload did;
 **(b)** a timing threshold or delay calibrated on a quiet machine; **(c)** a real tool
 defect that load exposes; **(d)** cannot tell from reading. Owner is the twelfth
-wave's, from `BRIEF.md`'s table. "nobody" means the file is not listed there.
+wave's, from `docs/dev/BRIEF.md`'s table. "nobody" means the file is not listed there.
 
 | # | Test | file:line | Class | Owner | One-line fix |
 |---|---|---|---|---|---|

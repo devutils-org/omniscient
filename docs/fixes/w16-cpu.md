@@ -283,7 +283,7 @@ git worktree list
 for w in engine kernel runner probes resolver; do rm -rf ../omniscient-$w/target; done
 ```
 
-## For DECISIONS.md
+## For docs/DECISIONS.md
 
 - **A forced `--stack` mode whose requirement the machine lacks is the
   machine's refusal, exit 1**, and one the machine would serve with no
@@ -308,7 +308,7 @@ stream cpu":
 - `src/main.rs:~1337` and `src/triage/engine.rs:~214`:
   `entry.backend_unit(&serving.backend.id)` for a result's unit, then the
   `#[ignore]` off `scenario_cpu::the_cpu_clock_fallback_of_cpu_cycles_...`.
-- `CATALOG.md`: the backend key `unit`.
+- `docs/CATALOG.md`: the backend key `unit`.
 - `src/collect/mod.rs:~2159` (`late_stacks`) and `src/collect/mem/ibs.rs:626`:
   prime the kernel's symbols only for a kernel half.
 

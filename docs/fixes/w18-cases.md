@@ -1,6 +1,6 @@
 # Stream cases, eighteenth wave: the cases, re-asked (phase B)
 
-`BRIEF.md`, "cases -- the cases, re-asked"; `STATE.md` "After the seventeenth
+`docs/dev/BRIEF.md`, "cases -- the cases, re-asked"; `docs/dev/STATE.md` "After the seventeenth
 wave" item 8's `tests/cases.rs` and `docs/cases.md` lines and the privilege
 half of "Decided before this wave"; the requests to stream cases in
 `docs/open-findings.md` (the seventeenth wave's streams python and build) and
@@ -312,7 +312,7 @@ For the tally.
 ## 5. Privileged runs wanted (the coordinator, alone)
 
 Every case at `perf_event_paranoid` 2, with and then without the
-capabilities, read through the skip gate (`STATE.md` "After the seventeenth
+capabilities, read through the skip gate (`docs/dev/STATE.md` "After the seventeenth
 wave" item 1; it failed twice in two runs at `718cae1` because the two ways
 ran with different privileges):
 
@@ -333,7 +333,7 @@ every cause skipping with the machine's reason, both ways the same reason.
 
 ---
 
-## 6. Decision lines for `DECISIONS.md`
+## 6. Decision lines for `docs/DECISIONS.md`
 
 - **One privilege model, the cases' half** (moves out of "Open" with stream
   mcp's half): `tests/cases.rs` reads the capabilities of the `omn` the
@@ -400,7 +400,7 @@ every cause skipping with the machine's reason, both ways the same reason.
   runs showed the same through the run's line (`leaf None` both ways), but
   nothing then made it a check.
 - Section 3.8 for the tally.
-- `STATE.md` (lines 634 and 691) and `ROADMAP.md` (line 870) still say
+- `docs/dev/STATE.md` (lines 634 and 691) and `docs/ROADMAP.md` (line 870) still say
   `gcc-shell` is held back under `cases/held/`; it is `cases/gcc-shell/` and
   asked.
 - `docs/open-findings.md`'s seventeenth-wave asks to stream cases (python's

@@ -1,6 +1,6 @@
 # The twentieth wave, stream cpu
 
-Exact on-cpu time per thread, and `raw` (STATE.md items 8 and 2).
+Exact on-cpu time per thread, and `raw` (docs/dev/STATE.md items 8 and 2).
 
 ## What landed
 
@@ -91,7 +91,7 @@ None of their failures is from this change; see "The suite".
   no collector, and is refused before launch as the build's gap. A per-slice
   stream would need `sched_switch` and a ring, and nothing asked for it this
   wave.
-- **`CATALOG.md`** and `docs/scenarios/cpu.md` are not my files. See the
+- **`docs/CATALOG.md`** and `docs/scenarios/cpu.md` are not my files. See the
   requests below.
 - I did not add a note when the poll is faster than the scheduler tick (a
   running thread's readings come in steps of one tick). The caveat states it.
@@ -111,7 +111,7 @@ sudo -n sysctl kernel.bpf_stats_enabled=0
 The matrix (alone, at the end of the wave) should show the `fs:proc` fallback
 on a kernel older than 6.8, where the prototype has three arguments.
 
-## Decision lines for DECISIONS.md
+## Decision lines for docs/DECISIONS.md
 
 - `cpu.oncpu_time` per thread through `sched_stat_runtime`, not
   `sched_switch`: the scheduler's own increments, credited every tick, so a
@@ -122,10 +122,10 @@ on a kernel older than 6.8, where the prototype has three arguments.
 
 ## Needs from another stream
 
-- **docs**: `CATALOG.md`'s `cpu.oncpu_time` row: the `bpf:raw_tp` backend on
+- **docs**: `docs/CATALOG.md`'s `cpu.oncpu_time` row: the `bpf:raw_tp` backend on
   `sched_stat_runtime`, poll only, per thread; `raw` on `cpu.oncpu_time` and
   `power.energy`.
-- **coordinator**: STATE.md item 8 (the `bpf:raw_tp` collector; `raw` on
+- **coordinator**: docs/dev/STATE.md item 8 (the `bpf:raw_tp` collector; `raw` on
   `power.energy` and `cpu.oncpu_time`) and item 2 (`raw` on `cpu.util` and
   `cpu.oncpu_time` for the views) can be struck. `docs/scenarios/cpu.md` could
   record the `sched_switch` version's blind spot as a finding the scenario

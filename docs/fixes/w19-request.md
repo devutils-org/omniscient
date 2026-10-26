@@ -1,6 +1,6 @@
 # The nineteenth wave, stream request
 
-Branch `feat/w19-request`, from `main` at `91a0cef`. `BRIEF.md`, "request --
+Branch `feat/w19-request`, from `main` at `91a0cef`. `docs/dev/BRIEF.md`, "request --
 what one request costs": the same sheet as the ledger for one unit of work,
 from `net.request` and the join engine: a waterfall of its life by state and
 its share of each resource, held to the `http-server-*` cases' requests,
@@ -112,7 +112,7 @@ Reasoned, not shown:
 None. The view reads recordings; nothing it does needs a capability beyond
 what `make` grants, and it changes no machine state.
 
-## Decision lines for DECISIONS.md
+## Decision lines for docs/DECISIONS.md
 
 - **The request view draws the states inside a request by share, never in
   sequence**: `net.request` adds a request's time up by state in the kernel

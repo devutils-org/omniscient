@@ -1,9 +1,9 @@
 # Stream mcp, eighteenth wave: one privilege model, and what `run_session` answers
 
 Branch `feat/w18-mcp`, from `main` at `9cd5409`. Owns `mcp/**`, `Makefile`,
-`scripts/release.sh`, `docs/install.md`. Brief: `BRIEF.md`, "mcp"; the
+`scripts/release.sh`, `docs/install.md`. Brief: `docs/dev/BRIEF.md`, "mcp"; the
 finding: `docs/open-findings.md`, "`omn-mcp` carries no capabilities";
-`STATE.md` item 4's `mcp/` half.
+`docs/dev/STATE.md` item 4's `mcp/` half.
 
 ## 1. What landed
 
@@ -35,7 +35,7 @@ finding: `docs/open-findings.md`, "`omn-mcp` carries no capabilities";
   denominator is not changed here (that is `src/main.rs`, stream launcher);
   it is said.
 - **One privilege model, on `omn`.** `omn-mcp` already collected through the
-  `omn` beside it (`DECISIONS.md`, "Who answers a machine question asked
+  `omn` beside it (`docs/DECISIONS.md`, "Who answers a machine question asked
   through MCP"); this wave *shows* it on a run, and says it everywhere a grant
   is made: the `Makefile`'s caps comment and install message, `release.sh`'s
   header, `docs/install.md` ("Grant them to `omn`, and to nothing else"). The
@@ -136,7 +136,7 @@ handoff.
   `open_findings` entries to be removed from `cases/*/case.yml`, which belongs
   to stream cases. The coordinator can make that three-line removal at the
   merge, or merge this stream together with cases.
-- **Change `DECISIONS.md` and `docs/mcp.md`**, which both still say "with a
+- **Change `docs/DECISIONS.md` and `docs/mcp.md`**, which both still say "with a
   required budget". They belong to the coordinator and to stream names: see
   sections 7 and 8.
 - **Edit the sudoers line in `CLAUDE.md`**, which belongs to the coordinator:
@@ -172,7 +172,7 @@ stream profile). And
 `cargo test -p omn-mcp --test protocol a_run_through_the_server_is_as_privileged_as_omn`
 at paranoid 2 shows the `CAP_PERFMON` half.
 
-## 7. Decision lines for `DECISIONS.md`
+## 7. Decision lines for `docs/DECISIONS.md`
 
 - Settled (moves out of "Open", as "Decided before this wave" asks): **One
   privilege model for `omn` and `omn-mcp`.** The capabilities go on `omn`

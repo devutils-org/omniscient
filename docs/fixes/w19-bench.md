@@ -1,6 +1,6 @@
 # The nineteenth wave, stream bench
 
-Branch `feat/w19-bench`, from `main` at `91a0cef`. `BRIEF.md`, "bench -- what
+Branch `feat/w19-bench`, from `main` at `91a0cef`. `docs/dev/BRIEF.md`, "bench -- what
 a GPU tracer costs (phase B)". Everything measured here was measured on the
 development machine (GeForce RTX 2080 Ti, driver 615.71.09, 24 cpus) with the
 other streams of the wave building and testing beside it.
@@ -58,7 +58,7 @@ other streams of the wave building and testing beside it.
   The brief asks for "the regime named where the cost depends on it", and a
   YAML comment is not where a reader of `--budget` looks. Additive; no
   existing caveat changed.
-- `CATALOG.md` lines 460-461: the cost cells of `gpu.kernel` and `gpu.api`,
+- `docs/CATALOG.md` lines 460-461: the cost cells of `gpu.kernel` and `gpu.api`,
   to match the cost lines.
 - `examples/bench/harness.rs` is this stream's (`examples/bench/**`), but its
   `plan` change alters what the next backends table measures: two fewer
@@ -152,7 +152,7 @@ about 15 minutes; then paste `target/bench/gpu-<stamp>/record.md` over the
 `cargo test --test bench_gpu`. It confirms the record with the machine
 alone and measures `gpu.counters` and `gpu.profile`.
 
-## Decision lines for DECISIONS.md
+## Decision lines for docs/DECISIONS.md
 
 - **A GPU workload's threads are placed apart** (wave 19): the launching
   thread alone on one cpu for the timed section, every other thread (the
@@ -219,8 +219,8 @@ alone and measures `gpu.counters` and `gpu.profile`.
 - **Coordinator, the catalog's schema** (open): a cost per regime, or a
   `cost_note`, so that `--budget` need not refuse `gpu.kernel` on a program
   of long kernels. Not proposed as a change here.
-- **Coordinator**: the decision lines above; `STATE.md`'s GPU cost rows;
-  `CATALOG.md`'s other GPU cost cells (NVML) are stale since the eighteenth
+- **Coordinator**: the decision lines above; `docs/dev/STATE.md`'s GPU cost rows;
+  `docs/CATALOG.md`'s other GPU cost cells (NVML) are stale since the eighteenth
   wave and were not touched.
 
 ## The suite
@@ -311,5 +311,5 @@ The adversarial review's six points, each fixed:
    measured -0.39 % there.
 
 Outside my row, still: the two caveats in `catalog/gpu.yaml` were reworded
-to the record's figures (no band changed in this round), and `CATALOG.md`'s
+to the record's figures (no band changed in this round), and `docs/CATALOG.md`'s
 cost cells are unchanged since the first round.

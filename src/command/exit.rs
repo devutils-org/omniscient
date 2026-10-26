@@ -20,7 +20,7 @@ pub const EXIT_NOT_IMPLEMENTED: u8 = 3;
 /// The exit code for a refusal, from whose gap it is.
 ///
 /// One function, so that the three answers cannot drift apart again: they did,
-/// and nine families found it independently. `man omn.1` and `GUIDE.md` carry
+/// and nine families found it independently. `man omn.1` and `docs/GUIDE.md` carry
 /// the same table in words.
 pub fn exit_for(whose: crate::collect::Whose) -> u8 {
     use crate::collect::Whose;

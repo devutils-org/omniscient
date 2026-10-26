@@ -326,7 +326,7 @@ coordinator rather than applied here.
 ## Declared: one edit outside this stream's paths
 
 `shim/src/lib.rs` is not under `src/collect/{mem,proc,power}/`, and mem D2 lives
-nowhere else. `BRIEF.md` assigns the defect to this stream, no other stream owns
+nowhere else. `docs/dev/BRIEF.md` assigns the defect to this stream, no other stream owns
 the shim, and `docs/scenarios/mem.md` says the fix "should go first" because it
 masks the loss paths underneath it. Both changes to it are in `report()` and its
 neighbourhood and are described above.
@@ -352,4 +352,4 @@ One thing to know before reading a red suite from this wave:
 `tests/scenario_net.rs::the_count_leg_of_the_sweep_finds_the_traffic_the_scenario_pushed`
 failed once here while several suites ran at once, measuring the machine's
 loopback traffic rather than its own. It is stream F's family and the shape
-`STATE.md` already warns about.
+`docs/dev/STATE.md` already warns about.

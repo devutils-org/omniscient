@@ -1,4 +1,4 @@
-# The bench — `ROADMAP.md` phase 8
+# The bench — `docs/ROADMAP.md` phase 8
 
 Stream X of the tenth wave. This file is the handoff and the deliverable: what
 the harness is, what each part was checked against, what it measured on this
@@ -239,7 +239,7 @@ before  101 sources: 90 usable here, 7 unverified, 4 out of reach on this machin
 after   101 sources: 93 usable here, 4 unverified, 4 out of reach on this machine.
 ```
 
-**For `STATE.md`**, which is the coordinator's: the "90 usable" there becomes
+**For `docs/dev/STATE.md`**, which is the coordinator's: the "90 usable" there becomes
 93 with this branch.
 
 ## What the steps measured

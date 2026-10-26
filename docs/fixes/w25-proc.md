@@ -6,7 +6,7 @@ Branch `feat/w25-proc`. Done sequentially by one agent, in the main checkout.
 
 - `src/bpf/mod.rs`: `pub use sched_common::Descendants`, so a collector
   outside sched follows a target's forks.
-- `CATALOG.md`: the `proc.calls` row.
+- `docs/CATALOG.md`: the `proc.calls` row.
 
 ## What landed
 

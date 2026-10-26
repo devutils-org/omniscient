@@ -1,7 +1,7 @@
 # Stream triage, twentieth wave: what the re-asked cases found
 
-Branch `feat/w20-triage`, from `main` at `444900b`. `BRIEF.md`, "triage --
-what the re-asked cases found (item 6)"; `STATE.md` item 6;
+Branch `feat/w20-triage`, from `main` at `444900b`. `docs/dev/BRIEF.md`, "triage --
+what the re-asked cases found (item 6)"; `docs/dev/STATE.md` item 6;
 `docs/fixes/w18-cases.md` section 3 (3.1, 3.2, 3.5, 3.6) and
 `docs/fixes/w18-triage.md` section 7. Files touched: `src/triage/latency.rs`,
 `src/triage/diff.rs`, `src/triage/workload.c`, `src/triage/serve.py` (new),
@@ -177,7 +177,7 @@ coordinator) should re-run the cases this addresses, alone:
 make && cargo test --test cases -- make-sqlite gcc-shell http-server-stdlib sqlite3-durability --nocapture
 ```
 
-## 5. Decision lines for `DECISIONS.md`
+## 5. Decision lines for `docs/DECISIONS.md`
 
 - **The JSON spells a limit as the text does** (`cpu-queue`,
   `other-block`). The old spelling is still read. Leaving it open costs
@@ -214,7 +214,7 @@ make && cargo test --test cases -- make-sqlite gcc-shell http-server-stdlib sqli
   task), so a job's wait can be followed into the chosen child's subtree
   instead of every process off the way.
 
-### To the coordinator (`docs/triage.md`, `DECISIONS.md`, `STATE.md` item 6)
+### To the coordinator (`docs/triage.md`, `docs/DECISIONS.md`, `docs/dev/STATE.md` item 6)
 
 - `docs/triage.md`'s latency section: the new relation `waiting`, the
   `job` field, the lossy-row undecided reason, and the eBPF samples set

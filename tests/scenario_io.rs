@@ -113,7 +113,7 @@ fn json(output: &Output) -> serde_json::Value {
 /// What this machine lacks for `backend` of `source`, as `omn list` probes it
 /// -- the requirements it calls missing -- or `None` when nothing it needs is
 /// missing here. A backend this build has not written is refused for the
-/// machine before the build (`DECISIONS.md`, "one order for unbuilt and
+/// machine before the build (`docs/DECISIONS.md`, "one order for unbuilt and
 /// missing"), so which refusal a pin or a key hint earns is this answer's.
 fn lacks_here(source: &str, backend: &str) -> Option<Vec<String>> {
     let listing = run(&["list", source, "--format", "json"]);
@@ -998,7 +998,7 @@ fn a_filter_the_backend_cannot_carry_names_the_backend_that_can() {
 /// resolved onto them would be events no join over that key could ever match.
 /// The catalog says so in each backend's `keys`, and the resolver refuses with
 /// the eBPF backend that carries them -- which this build has not written. The
-/// hint names them as the walk would answer (`DECISIONS.md`, "one order for
+/// hint names them as the walk would answer (`docs/DECISIONS.md`, "one order for
 /// unbuilt and missing"): the build's (exit 3) where this machine could run a
 /// carrier, the machine's (exit 1) where it can run none -- without the
 /// capabilities, or with tracefs unreadable and no raw tracepoint carrier.
@@ -1143,7 +1143,7 @@ fn a_request_keyed_on_what_the_counter_files_do_not_name_is_refused_with_the_bac
 /// This family still has one *implemented* backend per source -- procfs for the
 /// counters, the raw tracepoint for the block layer -- so there is no second
 /// road within a chain to compare a number against, and the comparison is with
-/// the refusal instead, which is what `BRIEF.md` asks for where a chain has one
+/// the refusal instead, which is what `docs/dev/BRIEF.md` asks for where a chain has one
 /// implementation and others declared. The comparison across two mechanisms
 /// that *is* now possible is
 /// `the_tracer_and_the_kernels_own_counter_see_the_same_requests`, further
@@ -1207,7 +1207,7 @@ fn forcing_a_backend_this_build_has_not_written_names_it_in_the_chains_order() {
         );
         match output.status.code() {
             // A backend this machine lacks something for is the machine's
-            // first, as on the walk (`DECISIONS.md`, "one order for unbuilt
+            // first, as on the walk (`docs/DECISIONS.md`, "one order for unbuilt
             // and missing"), and only then.
             Some(EXIT_NO_BACKEND) => {
                 let lacks = lacks_here(source, backend).unwrap_or_else(|| {
@@ -1333,7 +1333,7 @@ fn a_known_volume_of_writes_reaches_the_device_and_the_session_finds_it() {
 /// strictly encloses the tool's. Neither cap is the tool's own number.
 ///
 /// Both columns are bracketed rather than the read side being required to be
-/// zero, and the reason is the trap `STATE.md` names: nine hundred tests share
+/// zero, and the reason is the trap `docs/dev/STATE.md` names: nine hundred tests share
 /// this machine's disks, and the read scenario below pulls its own 64 MiB off
 /// the same device while this one runs. Asserting "a write workload reads
 /// nothing" measured the suite and not the tool -- it failed with exactly
@@ -6320,7 +6320,7 @@ fn the_in_kernel_histogram_costs_a_two_million_iops_load_under_one_percent() {
     // request `null_blk` answers from memory takes no time of its own, and 1 %
     // of nothing is under one program run; this machine's nvme takes 50 us
     // (29 us at best, fio, 2026-10-20), so 20 us holds a faster disk too
-    // (`DECISIONS.md`, settled 2026-10-20).
+    // (`docs/DECISIONS.md`, settled 2026-10-20).
     const REAL_REQUEST_NS: f64 = 20_000.0;
     const DEVICE: &str = "/dev/nullb0";
     const JOBS: f64 = 8.0;
@@ -6887,7 +6887,7 @@ sys.exit(os.waitstatus_to_exitcode(status))
 /// `omn trace io.syscall -- ./script.sh` timed the shell's own calls and none
 /// of the programs it ran: the entry programs compared the caller with the
 /// launched process alone, where every `sched` source follows the processes
-/// it starts (`STATE.md`, item 1, `src/bpf/fentry.rs`). Ground truth is the
+/// it starts (`docs/dev/STATE.md`, item 1, `src/bpf/fentry.rs`). Ground truth is the
 /// child's own count of the `pread64` calls it made, which the parent never
 /// makes; they are counted one for one, under the child's pid.
 #[test]

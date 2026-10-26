@@ -64,7 +64,7 @@ test moved to the pinned `pmu` row: `mem.cache_l1 -m sample` is served now.
 
 - **mem**: `func`, `within`, `insn` in `mem.cache_*`'s `keys:`.
 
-## Decision lines for `DECISIONS.md`
+## Decision lines for `docs/DECISIONS.md`
 
 - A frequency-mode sample weighs the period the kernel chose for it.
 - `cpu.profile`'s `pmu` row stays as a pointer to `cpu.cycles -m sample`

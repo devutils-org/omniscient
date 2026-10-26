@@ -263,7 +263,7 @@ cargo test --test cases -- --nocapture 2>&1 | grep -E 'SKIPPED|test result'
 sudo -n /usr/bin/sysctl kernel.perf_event_paranoid=-1 && make
 ```
 
-## 7. Decision lines for `DECISIONS.md`
+## 7. Decision lines for `docs/DECISIONS.md`
 
 | Question | Decision | Why |
 |---|---|---|

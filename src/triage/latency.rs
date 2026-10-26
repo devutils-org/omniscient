@@ -65,7 +65,7 @@ pub const BLOCKED: &str = "blocked";
 pub const FUTEX: &str = "futex";
 pub const MUTEX: &str = "mutex";
 /// Who woke whom: the thread whose wakeups ended a block names what the
-/// block waited on when no frame does (`DECISIONS.md`, settled 2026-10-19).
+/// block waited on when no frame does (`docs/DECISIONS.md`, settled 2026-10-19).
 pub const WAKEUP: &str = "wakeup";
 
 /// The requests this mode can do without: they name a wait, and a table

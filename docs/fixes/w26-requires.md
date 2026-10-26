@@ -1,6 +1,6 @@
 # w26 requires — requirements read at load, and probed by kind
 
-Phase 0a of the twenty-sixth wave (`BRIEF.md`, "0a · `requires`"), with
+Phase 0a of the twenty-sixth wave (`docs/dev/BRIEF.md`, "0a · `requires`"), with
 phase 1's `probe` items it absorbs.
 
 ## Landed

@@ -1,5 +1,5 @@
 //! Parsers for the `top` family's reference tools. Each turns a tool's
-//! output into the values a pair compares (BRIEF.md, "Decided before this
+//! output into the values a pair compares (docs/dev/BRIEF.md, "Decided before this
 //! wave"). Sizes come out in bytes and times in nanoseconds, the units omn
 //! reports them in; a utilization comes out as a ratio in [0, 1].
 //!

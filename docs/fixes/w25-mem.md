@@ -13,7 +13,7 @@ Branch `feat/w25-mem`. Done sequentially by one agent, in the main checkout.
   counter and the loader instead of copying them.
 - `src/request.rs` (the `KeyKind` seam): `cache`, a derived key read off the
   `cache` attribute.
-- `CATALOG.md`: the `mem.oom` row and a `mem.slab` row (`tests/cli.rs` checks
+- `docs/CATALOG.md`: the `mem.oom` row and a `mem.slab` row (`tests/cli.rs` checks
   the cost column against the chain).
 
 ## What landed
@@ -91,7 +91,7 @@ machine refuses with exit 1 for want of CAP_BPF and per-cpu perf events.
 `every_mode_and_emit_of_the_counter_sources_...` failed once under load and
 passed alone.
 
-## Decision lines for `DECISIONS.md`
+## Decision lines for `docs/DECISIONS.md`
 
 - A source whose backends answer different questions by mode (counts, or
   victims) declares each backend's `modes:`, so a mode lands only on a

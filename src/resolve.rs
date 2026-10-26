@@ -356,7 +356,7 @@ impl KeyElsewhere {
     /// the machine cannot serve, as on the walk: the walk passes over a
     /// backend that lacks something here and stops at the first one this
     /// machine could run, so its answer is the build's whenever such a
-    /// backend exists, and the hint gives the same one (`DECISIONS.md`, "one
+    /// backend exists, and the hint gives the same one (`docs/DECISIONS.md`, "one
     /// order for unbuilt and missing"). A missing carrier may be unwritten as
     /// well, so naming it first would send a reader after privileges for a
     /// collector nobody wrote.
@@ -502,7 +502,7 @@ pub fn resolve(
         //
         // A backend both unwritten in this build and missing something here
         // is answered in the chain's order: the machine first, as the walk
-        // does (`DECISIONS.md`, "one order for unbuilt and missing"). One
+        // does (`docs/DECISIONS.md`, "one order for unbuilt and missing"). One
         // request then exits the same way whichever path reached it -- the
         // walk exited 1 and the pin 3 for `net.hwts` on a runner with no
         // readable PTP clock -- and on that machine no build would serve it
@@ -1056,7 +1056,7 @@ fn check_keys_carried(
 
 /// What stands between the request and a backend that attaches its key. The
 /// machine's gap is looked at before the build's, in the chain's order, as the
-/// walk and the pinned path do (`DECISIONS.md`, "one order for unbuilt and
+/// walk and the pinned path do (`docs/DECISIONS.md`, "one order for unbuilt and
 /// missing"): a backend this machine cannot serve is out of reach here
 /// whoever writes its collector.
 fn key_elsewhere(

@@ -127,5 +127,5 @@ Ranked:
   cache hit"; the means differ because perf counts cycles between tags.
   `omn`'s results now carry the delivered rate in their first note.
 - **coordinator**: `docs/open-findings.md` can close the "IBS delivered
-  rate" finding as fixed-by-stating; `CATALOG.md` and `man/omn.1` gain
+  rate" finding as fixed-by-stating; `docs/CATALOG.md` and `man/omn.1` gain
   `mem.system`, `mem.oom`, `mem.numa --system`, `mem.swap`'s `perf:kprobe`.

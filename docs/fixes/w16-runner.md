@@ -325,7 +325,7 @@ only `skipped:` and `SKIPPED`, so none of them can fail a cell.
 None. Everything above ran as uid 1000 with what `make` grants
 (`cap_bpf,cap_perfmon` on `target/debug/omn`, verified with `getcap`).
 
-## For DECISIONS.md
+## For docs/DECISIONS.md
 
 Move the three "Open" lines to the settled ones:
 
@@ -375,8 +375,8 @@ end of `docs/open-findings.md`:
   `degrade`'s notes;
 - the owner of `src/collect/mem/page_faults.rs`: `weight = period` on sampled
   faults;
-- the coordinator: the `DECISIONS.md`, `ROADMAP.md` (phases 6 and 9) and
-  `STATE.md` lines (corrected after the review: the mode ladder is built and
+- the coordinator: the `docs/DECISIONS.md`, `docs/ROADMAP.md` (phases 6 and 9) and
+  `docs/dev/STATE.md` lines (corrected after the review: the mode ladder is built and
   passes over its only rung; the denominator is not in effect).
 
 ## Review

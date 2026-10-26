@@ -1,6 +1,6 @@
 # The fifteenth wave, stream docs
 
-Stream docs owned `DECISIONS.md`, `ROADMAP.md`, `CLAUDE.md`, `docs/keys.md`
+Stream docs owned `docs/DECISIONS.md`, `docs/ROADMAP.md`, `CLAUDE.md`, `docs/keys.md`
 (new), `docs/open-requests.md` and `docs/contributing.md`. No file under `src/`
 or `tests/` changed. Every reason written into a decision was read off the
 code, with the file it came from named beside it.
@@ -11,7 +11,7 @@ Each item below lists the check that holds it. A document has no ground-truth
 test of its own, so the check is the code the document was read against, plus
 `cargo test --test cli` for the index and session tests (20 passed).
 
-1. **`DECISIONS.md`, the three Phase 0 lines whose reasons no longer held,
+1. **`docs/DECISIONS.md`, the three Phase 0 lines whose reasons no longer held,
    amended in place.** They are backed by a new section, "Settled in the
    fifteenth wave: what the first lines became".
    - *Language*: Rust, with no libbpf. The programs are instruction arrays
@@ -29,13 +29,13 @@ test of its own, so the check is the code the document was read against, plus
      Checked against the notes in `src/collect/cpu/counters.rs:681-700`,
      `src/collect/mem/page_faults.rs:368` and `src/collect/cpu/profile.rs:681`,
      and against `counted_only_in_kernel` (`src/capabilities.rs:1040`).
-2. **`DECISIONS.md`: no `Span` struct, and no bounded reorder window.** Each
+2. **`docs/DECISIONS.md`: no `Span` struct, and no bounded reorder window.** Each
    records why, what it costs, and the naming hazard `join::Span` presents.
    Checked against `join::Correlation`, `join::Attribution`,
    `rule.top` (`src/join.rs:2043`), and the sorts at `src/collect/mod.rs:2427`,
    `:4373` and `src/join.rs:1017`. Also checked against
    `join::input_order_does_not_change_the_answer`.
-3. **`ROADMAP.md`**:
+3. **`docs/ROADMAP.md`**:
    - a note under Phase 0's output;
    - phase 1's `Span` task and its criterion, pointing at the decision;
    - phase 3's watermark task and its reordering criterion, pointing at the
@@ -54,7 +54,7 @@ test of its own, so the check is the code the document was read against, plus
    how keys compare was read from `join::identity`. Two findings came out of
    it (filed, below).
 5. **`CLAUDE.md`**: *"86 usable sources and 51"* now reads *"92 ... and 51"*,
-   as `STATE.md` measures. Nothing else changed.
+   as `docs/dev/STATE.md` measures. Nothing else changed.
 6. **`docs/open-requests.md`, refreshed at d1f0182.** All 122 rows the twelfth
    wave's snapshot left open were judged again against the code, each with a
    file and a line. A script checked that every one of their line numbers is
@@ -88,7 +88,7 @@ names it, and nothing in it contradicts the code.
 - **Two ROADMAP boxes** (phase 1's five structs, phase 3's reordering) are
   still `[~]`. The coordinator decides whether a recorded decision closes them.
 - **In `docs/open-requests.md`, the 8388, 8552, 8612, 8658 and 8747 rows**
-  are marked open from `STATE.md`'s list of the fourteenth wave's filings.
+  are marked open from `docs/dev/STATE.md`'s list of the fourteenth wave's filings.
   They were not re-read line by line: the wave's merge was a day old, and
   each names a file another stream owns this wave.
 
@@ -99,9 +99,9 @@ None. `cargo test --test cli` needs the preload shim built
 two of its tests fail on `mem.heap.alloc`, which is the `make` versus
 `cargo build` trap `CLAUDE.md` describes.
 
-## For DECISIONS.md
+## For docs/DECISIONS.md
 
-The five decisions above are in `DECISIONS.md` already, since this stream owns
+The five decisions above are in `docs/DECISIONS.md` already, since this stream owns
 it. One decision is not taken here and is left for the probes stream: the
 power guardrail (phase 9). This stream landed nothing on it.
 
@@ -115,10 +115,10 @@ end of `docs/open-findings.md`:
   `net.qdisc`'s `iface:lo`. Some producers leave the index at 0.
 - **`src/request.rs`, `src/event.rs`: `proc` has no producer.** Processes are
   keyed `task:<pid>`.
-- **`STATE.md`, `docs/install.md`, `docs/families/sched.md`**: three places
+- **`docs/dev/STATE.md`, `docs/install.md`, `docs/families/sched.md`**: three places
   still call 6.1 the floor.
 - **The probes stream**: the power guardrail decision, to be sent under "For
-  DECISIONS.md" in its handoff.
+  docs/DECISIONS.md" in its handoff.
 
 ## Session index rows
 

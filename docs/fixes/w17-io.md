@@ -1,7 +1,7 @@
 # The seventeenth wave, stream io
 
 Branch `feat/w17-io`, from `main` at `d3a829c`. One item: the in-kernel
-histogram's 23.6 % at 3 M IOPS (`BRIEF.md`, "io"). The defect's account is in
+histogram's 23.6 % at 3 M IOPS (`docs/dev/BRIEF.md`, "io"). The defect's account is in
 `docs/scenarios/io.md`, "The seventeenth wave", defect 19.
 
 ## What landed
@@ -141,7 +141,7 @@ summed; Q against N is the split the decision below needs). If that line
 reads "not known" instead, it carries the tool's reason. For
 comparison, the same first command on `main` read 23.57 % (781 ns).
 
-## Decision lines for DECISIONS.md
+## Decision lines for docs/DECISIONS.md
 
 - **The in-kernel block histogram has its own program pair** (wave 17): the
   open writes only the time, into an entry that outlives its request and is
@@ -165,7 +165,7 @@ comparison, the same first command on `main` read 23.57 % (781 ns).
   `src/bpf/io.rs` can read `request.part->bd_dev` with two loads instead of
   two `probe_read_kernel` calls.
 - **Coordinator**: the privileged runs above, and the result into
-  `docs/scenarios/io.md` defect 19 and `STATE.md`.
+  `docs/scenarios/io.md` defect 19 and `docs/dev/STATE.md`.
 
 ## The suite
 

@@ -222,10 +222,10 @@ $ sudo -n perf record -q -e branch-misses -F 997 -o perf2.data -- target/referen
 
 ### To the coordinator
 
-- `CATALOG.md`: a `cpu.branches` row; `cpu.oncpu_time` gains `count` and
+- `docs/CATALOG.md`: a `cpu.branches` row; `cpu.oncpu_time` gains `count` and
   `pmu:sw`; `cpu.pressure`'s attribute names; `cpu.cycles` and the counting
   sources' `sample` now served.
-- `man/omn.1` and `STATE.md`: sysstat 2 and 3, perfstat 1 and 4, top 7 (the
+- `man/omn.1` and `docs/dev/STATE.md`: sysstat 2 and 3, perfstat 1 and 4, top 7 (the
   `fields` half), perfrecord 1, 2 and 8 done; perfrecord 3-4 with emit;
   perfrecord 7 open.
 

@@ -160,7 +160,7 @@ withheld, never wrong.
    its stack. That is a different ranking, not a key, and was left for
    after the self share.
 3. A summary over `sched.runqlat`'s `wake_to_run_ns` (perfsched 8) is in
-   `STATE.md`'s list but not in this stream's section of the brief, so it
+   `docs/dev/STATE.md`'s list but not in this stream's section of the brief, so it
    was not started.
 4. `omn list` does not show a backend's own `emits` (it shows no
    per-backend modes either).
@@ -187,7 +187,7 @@ withheld, never wrong.
   attribute named after the key). A key that needs only an appended variant
   needs nothing from this stream.
 
-## Decision lines for `DECISIONS.md`
+## Decision lines for `docs/DECISIONS.md`
 
 - A backend may declare its own `emits:`, a non-empty subset of the
   entry's. The resolver passes over one that does not produce an asked emit,

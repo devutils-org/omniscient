@@ -77,7 +77,7 @@ second one now — defect 2.
 
 `runtime.jit` has two backends, `bpf:usdt` then `fs:jit-map`, and one of them is
 written. So the comparison this family can make is not between two numbers; it
-is between a measurement and a refusal, which is what `BRIEF.md` prescribes for
+is between a measurement and a refusal, which is what `docs/dev/BRIEF.md` prescribes for
 exactly this case.
 
 `--backend force:fs:jit-map` measures, and says twice that this is not a

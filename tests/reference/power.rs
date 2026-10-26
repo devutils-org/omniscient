@@ -1,5 +1,5 @@
 //! Parsers for the `power` family's reference tools. Each turns a tool's
-//! output into the values a pair compares (BRIEF.md, "Decided before this
+//! output into the values a pair compares (docs/dev/BRIEF.md, "Decided before this
 //! wave").
 //!
 //! - `power_perf_stat_energy`: `perf stat -x, -e power/energy-pkg/`, the

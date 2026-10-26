@@ -1108,7 +1108,7 @@ impl fmt::Display for ModeMove {
 
 /// Whether a series begun in `from` can be continued in `to` for the emits a
 /// request asked for: what one series made of two modes means to an emit
-/// (`DECISIONS.md`, settled in the sixteenth wave).
+/// (`docs/DECISIONS.md`, settled in the sixteenth wave).
 ///
 /// A budget may move a collection only onto a mode whose events every one of
 /// the request's emits can take. Within one mode nothing changes. Across two,
@@ -1215,7 +1215,7 @@ pub enum KeyKind {
     /// A key rather than an attribute so that a counter of both directions
     /// is one series per direction under every aggregating emit, and a
     /// `results.json` keeps the split the views draw live
-    /// (`DECISIONS.md`, the twenty-first wave).
+    /// (`docs/DECISIONS.md`, the twenty-first wave).
     Dir,
     /// `syscall:<name>`, the system call a `proc.syscall` row counted, so
     /// one run keyed on it is a `strace -c` table (the twenty-fourth wave).

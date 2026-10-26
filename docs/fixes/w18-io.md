@@ -1,6 +1,6 @@
 # The eighteenth wave, stream io
 
-Branch `feat/w18-io`, from `main` at `9cd5409`. The items of `BRIEF.md`,
+Branch `feat/w18-io`, from `main` at `9cd5409`. The items of `docs/dev/BRIEF.md`,
 "io": the program statistics that read 0, which way the 348 ns points, udev
 and the `chmod`, the polled queue the CI cannot see, and item 11's io lines.
 The account of each is in `docs/scenarios/io.md`, "The eighteenth wave",
@@ -144,7 +144,7 @@ All alone, on `main` with this branch merged, after `make`.
    Sudoers line wanted for it, beside the two `null_blk` loads already there:
    `/usr/bin/modprobe null_blk queue_mode=2 irqmode=2 completion_nsec=3000000 nr_devices=1 gb=1 bs=4096`.
 
-## Decision lines for `DECISIONS.md`
+## Decision lines for `docs/DECISIONS.md`
 
 - **`io.inflight` reads both of the kernel's in-flight accounts and reports
   the larger, carrying each.** `/proc/diskstats`' column and
@@ -180,9 +180,9 @@ If the launcher's read above does not land: a `detach()` on each program type
 that drops its links and keeps its programs, called from the collector's stop
 in place of `self.program = None`, as `BlockProgram::detach` does.
 
-### To the coordinator (`STATE.md`, sudoers)
+### To the coordinator (`docs/dev/STATE.md`, sudoers)
 
-- `STATE.md` "Needs privilege" item 1's commands: `udevadm settle
+- `docs/dev/STATE.md` "Needs privilege" item 1's commands: `udevadm settle
   --timeout=10` between the `modprobe` and the `chmod`.
 - The `irqmode=2 completion_nsec=3000000` load above, in
   `/etc/sudoers.d/omniscient-privileged`, and item 11's "a known set of device
@@ -205,7 +205,7 @@ The fix round after the adversarial review:
 - **The root cause on 6.17** was not found. Not fixable here (no 6.17 source
   or machine); `docs/scenarios/io.md` defect 20 is now titled *worked around
   in the source; the cause still open*, and the coordinator should keep it
-  open in `STATE.md` and `docs/open-findings.md`.
+  open in `docs/dev/STATE.md` and `docs/open-findings.md`.
 - **The catalog entry**: caveat and backend comment added. Fixed.
 - **An unreadable sysfs file** now names the device in the run's notes
   (`Collector::notes`), held by `queue_depth_is_reported_as_it_stands`. Fixed.

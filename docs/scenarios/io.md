@@ -276,7 +276,7 @@ rather than measuring nothing.
 
 ## What `io` contributes to a crossing, and on which key
 
-One line, as `BRIEF.md` asks for: **`io` knows what the device actually did,
+One line, as `docs/dev/BRIEF.md` asks for: **`io` knows what the device actually did,
 which no other family can see** — the page-cache hits that never reached it,
 the readahead and journal writes that did, and the queue that requests waited
 in. What it cannot say is who caused any of it.
@@ -324,7 +324,7 @@ adjacent small reads under `mq-deadline` would.
 of the five sources has exactly one implemented backend, so
 `--backend force:` cannot put two roads to one number in one window, and the
 self-benchmark in `src/main.rs` needs two distinct backends before it prints
-anything. What the scenarios do instead is the substitute `BRIEF.md`
+anything. What the scenarios do instead is the substitute `docs/dev/BRIEF.md`
 prescribes — force every declared-and-unwritten backend and check the refusal
 names it and exits 3 —
 `forcing_a_backend_this_build_has_not_written_names_it_in_the_chains_order`. The
@@ -452,7 +452,7 @@ $ echo $?
 
 The message is exemplary: it names the file, names the backend, and says the
 request itself is fine. The exit code is 2, the code for a request that cannot
-mean anything — `BRIEF.md`'s table gives 1 for this case, and `src/main.rs`
+mean anything — `docs/dev/BRIEF.md`'s table gives 1 for this case, and `src/main.rs`
 returns `EXIT_REJECTED` for every resolver error. A caller that scripts around
 these three answers cannot tell "fix your request" from "run this somewhere
 else".
@@ -868,7 +868,7 @@ catches is the failure that matters -- a tracer reporting *more* requests than
 the device completed, which is double counting, or a fraction of them, which is
 silent loss.
 
-`BRIEF.md` asked for the comparison "where a source now has both an eBPF and a
+`docs/dev/BRIEF.md` asked for the comparison "where a source now has both an eBPF and a
 procfs backend". No source does: `io.bytes`, `io.iops` and `io.merges` declare
 one and this wave did not write it, deliberately. Adding a `bpf:raw_tp`
 collector for `io.bytes` would move every existing `io.bytes --system` run onto
@@ -951,7 +951,7 @@ N requests in Ts, which is R a second, and the ring overflows above about
 250000" -- and says that the run correctly reported no loss over the events it
 did see.
 
-That is the shape `BRIEF.md` asks for and the shape findings 11 and 35 were
+That is the shape `docs/dev/BRIEF.md` asks for and the shape findings 11 and 35 were
 about: a scenario that states its limit is worth more than one that hides it.
 
 ### 13. A `sync` that waited for the device
@@ -1046,7 +1046,7 @@ skipped: the build directory is not on a block device
 
 because `no_device_here` was handed a path that does not exist and
 `Path::canonicalize` failed on it rather than on the device question. Six tests
-passed without measuring anything, which is the exact shape `STATE.md` warns
+passed without measuring anything, which is the exact shape `docs/dev/STATE.md` warns
 about under "a test that skips is not a test that passes" and the exact shape
 findings 11 and 35 record.
 

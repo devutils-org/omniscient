@@ -1,6 +1,6 @@
 # The twentieth wave, stream view
 
-Item 2 of `STATE.md`'s "What remains", the frame's half: what the nine views
+Item 2 of `docs/dev/STATE.md`'s "What remains", the frame's half: what the nine views
 asked of the frame and of `results.json`, the links between views, the mouse,
 and the `process` view registered as a stub. Branch `feat/w20-view`, three
 commits before this one (`d7cebb7`, `e548ce2`, `0276a65`).
@@ -88,7 +88,7 @@ program nothing in the opening data says so yet: filed to budget below.
 **Documents**: `docs/view/README.md` (keys, the first screen, the contract's
 new methods, "The links between views", "The mouse" with what a terminal and
 tmux need), `man/omn.1` (`omn top` in the synopsis and the commands, a new
-section THE VIEW), `GUIDE.md` (a section "`omn top`: the views").
+section THE VIEW), `docs/GUIDE.md` (a section "`omn top`: the views").
 
 ## Shown versus reasoned
 
@@ -152,7 +152,7 @@ them.
   time)" has nothing to start from. Adding the line is the ledger's design
   (the views were kept as drawn), so I left `ITEMS` alone and said it in the
   README's table.
-- **`STATE.md`'s tables** (item 2 says "and this file's tables"): the
+- **`docs/dev/STATE.md`'s tables** (item 2 says "and this file's tables"): the
   coordinator's.
 
 ## Files outside my row, changed
@@ -185,7 +185,7 @@ target/debug/omn top --replay tests/view_fixtures/http-server
 target/debug/omn top -- python3 -c 'import time; [sum(range(10**6)) or time.sleep(0.01) for _ in range(300)]'
 ```
 
-## Decision lines for DECISIONS.md
+## Decision lines for docs/DECISIONS.md
 
 - **A click selects, a second click on the selection goes in; there is no
   double-click timer.** crossterm reports no double click, and a timer would

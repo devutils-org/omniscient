@@ -137,7 +137,7 @@ omn top -- python3 cases/cpython-interpreter/hot.py   # live, then q
 omn top --gallery tests/view_fixtures/sqlite-commits   # space steps the views
 ```
 
-## 5. Decision lines for `DECISIONS.md`
+## 5. Decision lines for `docs/DECISIONS.md`
 
 - **The overview draws every resource on one time axis**: one box, a
   section per resource, every chart in the same columns over the same run,

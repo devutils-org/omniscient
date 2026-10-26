@@ -13,7 +13,7 @@ pinned `net.hwts` twin in `tests/scenario_net.rs`.
 | The eleven tests of `docs/fixes/w17-core.md` §2, in the same commit | landed | `e04ef9a` |
 | `scenario_io`'s two rows | landed (in the eleven) | `e04ef9a` |
 | The pinned `net.hwts` twin | landed | `267842a` |
-| `DECISIONS.md`'s exit-3 line, re-worded | below, for the coordinator | -- |
+| `docs/DECISIONS.md`'s exit-3 line, re-worded | below, for the coordinator | -- |
 | Review round: the power skip line, the rank's unit test, the cli hint, the sched comment | landed | see "Review" |
 
 ## 1. One order (`src/resolve.rs`)
@@ -136,9 +136,9 @@ capabilities), as described under "Shown"; the CI's `stock` cell is the same
 view on a runner without a readable PTP clock, and is where the twin's exit-1
 branch will first run.
 
-## Decision lines for `DECISIONS.md`
+## Decision lines for `docs/DECISIONS.md`
 
-- **One order for "unbuilt" and "missing"** (row at `DECISIONS.md:770`,
+- **One order for "unbuilt" and "missing"** (row at `docs/DECISIONS.md:770`,
   "Decided, not yet in the code" → settled): *A backend both unbuilt in this
   build and missing a requirement here is the machine's (exit 1) on every
   path -- the walk, a pin, and the key hint. Landed in the eighteenth wave
@@ -146,7 +146,7 @@ branch will first run.
   carrier this machine can run and nobody wrote above one this machine cannot
   run, as the walk stops at the first backend it could run.* Reason: one
   request exited 1 or 3 by the path that reached it.
-- **The exit-3 line** (`DECISIONS.md:127`), re-worded: *"Valid, and not
+- **The exit-3 line** (`docs/DECISIONS.md:127`), re-worded: *"Valid, and not
   built" is exit 3, wherever it is discovered, on a machine that lacks nothing
   the backend needs* -- and the italic seventeenth-wave note replaced by:
   *Eighteenth wave: a backend both unbuilt and missing a requirement here is
@@ -170,14 +170,14 @@ branch will first run.
   each lacks nothing. The header should say both, as `proc-not-built.yml`'s
   text needs to (below).
 - **Coordinator** (`docs/scenarios/{sched,power,mem,gpu}.md`,
-  `docs/families/proc.md`, `GUIDE.md`, `examples/README.md`): the renamed tests
+  `docs/families/proc.md`, `docs/GUIDE.md`, `examples/README.md`): the renamed tests
   and the changed answer.
   - `docs/scenarios/sched.md`: `pinning_a_backend_this_build_lacks_blames_the_build_and_not_the_machine` → `pinning_a_backend_this_build_lacks_is_refused_in_the_chains_order`
   - `docs/scenarios/power.md:200`: `pinning_a_backend_this_build_does_not_have_names_it_and_exits_three` → `pinning_a_backend_this_build_does_not_have_names_it_in_the_chains_order`
   - `docs/scenarios/mem.md`: `forcing_a_backend_with_no_collector_exits_three_and_names_it` → `forcing_a_backend_with_no_collector_names_it_in_the_chains_order`
   - `docs/scenarios/gpu.md`: `forcing_a_backend_this_build_does_not_implement_exits_three_and_names_it` → `forcing_a_backend_this_build_does_not_implement_names_it_in_the_chains_order`
   - `scenario_proc`'s `a_source_this_build_does_not_implement_exits_three_and_names_the_backend` → `a_source_this_build_does_not_implement_is_refused_in_the_chains_order` (cited only in `docs/fixes/`, which are history)
-  - `docs/scenarios/proc.md:161,182`, `GUIDE.md:362`, `examples/README.md:191`:
+  - `docs/scenarios/proc.md:161,182`, `docs/GUIDE.md:362`, `examples/README.md:191`:
     `proc-not-built.yml` is exit 1 on a machine whose tracefs this uid cannot
     read, exit 3 elsewhere.
 - **io** (`docs/scenarios/io.md`): `forcing_a_backend_this_build_has_not_written_names_it_and_exits_three` → `forcing_a_backend_this_build_has_not_written_names_it_in_the_chains_order`.

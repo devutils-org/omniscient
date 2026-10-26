@@ -315,7 +315,7 @@ sudo -n /usr/bin/sysctl kernel.perf_event_paranoid=-1 && make
 
 Nothing in these cases needs `null_blk`, `dmsetup` or a sysctl of its own.
 
-## 7. Decision lines for `DECISIONS.md`
+## 7. Decision lines for `docs/DECISIONS.md`
 
 | Question | Decision | Why |
 |---|---|---|

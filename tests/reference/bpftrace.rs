@@ -1,5 +1,5 @@
 //! Parsers for the `bpftrace` family's reference tools. Each turns a tool's
-//! output into the values a pair compares (BRIEF.md, "Decided before this
+//! output into the values a pair compares (docs/dev/BRIEF.md, "Decided before this
 //! wave").
 //!
 //! Two kinds of output come out of `/usr/share/bpftrace/tools/`: the maps

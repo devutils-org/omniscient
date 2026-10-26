@@ -2,7 +2,7 @@
 #
 #   omn -f examples/vertical-one-request.yml
 #
-# ROADMAP.md phase 4, the milestone it calls the real one. A real TCP server on
+# docs/ROADMAP.md phase 4, the milestone it calls the real one. A real TCP server on
 # loopback serves five requests, each with delays injected where the test
 # chose them:
 #

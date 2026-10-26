@@ -1,4 +1,4 @@
-# Family `mem` — see CATALOG.md section 3.
+# Family `mem` — see docs/CATALOG.md section 3.
 # Cardinal rule: the accounting metric is always explicit. RSS, PSS, USS, live
 # heap, retained heap and memory.current are six different numbers, all correct.
 # A `mem` request without a named metric must fail rather than pick a default.

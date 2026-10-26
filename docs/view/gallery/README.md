@@ -1,6 +1,6 @@
 # The gallery: ten views kept
 
-Every view of `omn top` was an experiment (`docs/briefs/wave-19-gpu-view.md`):
+Every view of `omn top` was an experiment (`docs/dev/briefs/wave-19-gpu-view.md`):
 built in the nineteenth wave, drawn on the same recorded runs, and kept or
 dropped on what it shows on screen. The user kept all nine on 2026-10-04,
 after using them; the twentieth wave linked them, made them clickable, added

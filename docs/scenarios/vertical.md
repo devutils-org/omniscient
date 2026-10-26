@@ -1,6 +1,6 @@
 # The vertical case — one request, boundary by boundary
 
-**Where did one request's latency go?** `ROADMAP.md` phase 4 calls this the
+**Where did one request's latency go?** `docs/ROADMAP.md` phase 4 calls this the
 real milestone: a request that reads a file and sends it back, decomposed
 across the boundaries it crosses, every line carrying its evidence, checked
 against a server whose delays the test injected. This document was stream V's
@@ -330,7 +330,7 @@ client's read opens the window, in the client's context. What ties those
 moments to the request is the socket's cookie, matched between the program
 that saw the byte and the probe that named the socket -- a key both sides
 agree on, not an identity one of them propagated. `KEY`, which is also what
-`ROADMAP.md`'s table says of boundaries 1 and 10.
+`docs/ROADMAP.md`'s table says of boundaries 1 and 10.
 
 **The table prints `IDENTITY`**, because the decomposition rates every row of a
 `by: req` table by that key alone, and there is no way for a part to say it was
@@ -472,7 +472,7 @@ network rows then made too many; see "Why the rows are KEY" above.*
 
 ## The roadmap's ten boundaries, and where this build is
 
-| # | Boundary | `ROADMAP.md` | This build | Evidence |
+| # | Boundary | `docs/ROADMAP.md` | This build | Evidence |
 |---|---|---|---|---|
 | 1 | NIC → softirq → TCP | `sock:cookie` | **`net_rx`: the first byte stamped at `tcp_data_ready`, by cookie**; on loopback there is no NIC, and the receive runs in the client's send | KEY (printed IDENTITY, filed) |
 | 2 | socket ready → thread woken | WAKEUP | inside `net_rx`: the thread waits for the rest of its request before the request exists, and after the birth its waits in `sk_wait_data` are `rx_wait_ns` | -- |
@@ -617,7 +617,7 @@ repeated five times alone and once under the full suite.
 ## Index rows, ready to paste
 
 **Tenth wave: no session was added.** The two rows exist in `examples/README.md`
-and `GUIDE.md`; what the sessions show grew, and the rows can say so -- the
+and `docs/GUIDE.md`; what the sessions show grew, and the rows can say so -- the
 coordinator's call:
 
 ```
@@ -625,15 +625,15 @@ coordinator's call:
 | `vertical-abandoned.yml` | Is a request the server never ended, or an answer that never left, counted and named, or dropped? |
 ```
 
-For the coordinator beside the rows: `STATE.md`'s phase-4 line and
-`ROADMAP.md`'s exit criteria say the network rows wait on root; they do not any
+For the coordinator beside the rows: `docs/dev/STATE.md`'s phase-4 line and
+`docs/ROADMAP.md`'s exit criteria say the network rows wait on root; they do not any
 more (the ground truth above is a client's, not `tc netem`'s), and
-`dm-delay` is the one injection left. `CATALOG.md` has no row for
+`dm-delay` is the one injection left. `docs/CATALOG.md` has no row for
 `net.request`; its two backends are `bpf:usdt` and `bpf:usdt:threads`.
 
 Ninth wave:
 
-`examples/README.md` and `GUIDE.md`, in the `vertical-` section:
+`examples/README.md` and `docs/GUIDE.md`, in the `vertical-` section:
 
 ```
 | `vertical-abandoned.yml` | Is a request the server never ended counted and named, or dropped? |

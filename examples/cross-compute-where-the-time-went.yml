@@ -3,7 +3,7 @@
 #   omn -f examples/cross-compute-where-the-time-went.yml
 #
 # This is thread state analysis for one task, and the first piece of the layer
-# `ROADMAP.md` phase 10 describes: it answers "why is this slow", which is the
+# `docs/ROADMAP.md` phase 10 describes: it answers "why is this slow", which is the
 # question people arrive with. Three states cover a task's life, and each has a
 # source that already collects and is already checked on its own:
 #

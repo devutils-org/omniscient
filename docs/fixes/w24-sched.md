@@ -151,7 +151,7 @@ sudo -n bpftrace -e 'tracepoint:sched:sched_wakeup /args.comm == "omnref-sleep"/
   rows (the job restricted to the followed child's parent,
   `docs/open-findings.md`, "To the sched sources ... `ppid`").
 - **views / top**: the `process` suspect (not done, 5).
-- **coordinator**: `CATALOG.md` and `man/omn.1` for `sched.interrupts`,
+- **coordinator**: `docs/CATALOG.md` and `man/omn.1` for `sched.interrupts`,
   `sched.runqueue`, `sched.slices`, and `sched.lock`'s `kind` filter field.
 
 ## Review
@@ -185,7 +185,7 @@ Tests of the round: `cargo test --lib sched` 141 passed, `cargo test --lib
 catalog` 66, `cargo test --test family_sched -- slices interrupt` 4 (after
 `make`, privileged; `time_slices_*` three times), clippy and fmt clean.
 
-## Decision lines for `DECISIONS.md`
+## Decision lines for `docs/DECISIONS.md`
 
 - A counted `sched.switches` rate on a task is per second of the run; the
   counter's enabled time, which advances only while the task runs, is kept

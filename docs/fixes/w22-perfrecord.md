@@ -157,7 +157,7 @@ cd /home/moha/repos/omniscient && make && cargo test --test reference perfrecord
 - The `perfrecord` pairs take some 40 s together (seven pairs, two runs of 2 s
   plus perf's post-processing each).
 
-### To the coordinator (`STATE.md` "What remains")
+### To the coordinator (`docs/dev/STATE.md` "What remains")
 
 - Gaps 1 to 9 above, all features. Gap 1 is not a defect: the drop is
   counted and its cause named (see "Review"); file it as a missing field.

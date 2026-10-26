@@ -1,6 +1,6 @@
 # The eighteenth wave, stream names: what the verdict names
 
-`STATE.md` item 3, its last two bullets: `--symbols` on `omn latency` and
+`docs/dev/STATE.md` item 3, its last two bullets: `--symbols` on `omn latency` and
 `omn saturate`, the verdict's names note, the hottest function under a perf
 map, a flat interpreter profile, and a block's stack printed to the program's
 own frame (`docs/fixes/w17-python.md` findings 1 to 3,
@@ -26,7 +26,7 @@ branch sets `--symbols` on `cpu.profile` *and* `sched.offcpu`
 replaces both lines with `diff::ask_symbols`, which sets it only where
 `stack::reads_symbols` is true -- `cpu.profile` today. `sched.offcpu`'s
 collector does not read it: carried there, `debuginfod` is a request
-silently not made (what `DECISIONS.md` refuses with exit 3 for `omn trace`),
+silently not made (what `docs/DECISIONS.md` refuses with exit 3 for `omn trace`),
 and the session `--dump-session` prints would be refused by `omn trace`
 (`symbols_not_read`). The patch adjusts triage's own test
 (`the_first_pass_asks_no_mutex_and_the_stacks_that_read_symbols_carry_them`)
@@ -303,7 +303,7 @@ verdict's names note absent rather than invented.
   `Results::stacks` (or a per-result set of perf-map-named labels), so the
   triage stops reading `/tmp` back -- `emit.rs`, so the coordinator's call.
 
-## 6. Decision lines for `DECISIONS.md`
+## 6. Decision lines for `docs/DECISIONS.md`
 
 | Decision | Choice | Reason |
 |---|---|---|

@@ -4,7 +4,7 @@
 #   scripts/spawn.sh stock
 #   cd ../omniscient-stock && claude "$(cat ../omniscient-stock.prompt)"
 #
-# Streams own disjoint sets of files (see BRIEF.md), so the worktrees never need
+# Streams own disjoint sets of files (see docs/dev/BRIEF.md), so the worktrees never need
 # to rebase against each other and the merge order does not matter. A merge that
 # conflicts anywhere other than an append seam means a stream edited something
 # it does not own.
@@ -13,7 +13,7 @@
 # (perf_event_paranoid 2, a cloud VM with no hardware PMU), which the CI's two
 # runs showed and the development machine cannot, then installable and
 # demonstrable end to end. A catalog entry belongs to the stream that owns its
-# collector, whole. The two session indexes, examples/README.md and GUIDE.md,
+# collector, whole. The two session indexes, examples/README.md and docs/GUIDE.md,
 # belong to the coordinator and are held to the sessions on disk by a test, so
 # a session added without a row is a red suite rather than a gap. The CI logs
 # the streams reproduce from are in ../omniscient-ci-logs/.
@@ -29,7 +29,7 @@ declare -A OWNS=(
     [kernel]="src/bpf/** (except syscall.rs and usdt.rs) src/collect/{sched,proc,io,net}/** src/collect/mem/** (except page_faults.rs and heap/**) src/collect/psi.rs the sched.*, proc.*, io.*, net.* and mem.* entries of catalog/*.yaml (except mem.faults) tests/scenario_{sched,proc,io,net,mem}.rs tests/family_{sched,proc,io,net,mem}.rs tests/raw_tracepoints.rs examples/{sched,proc,io,net,mem}-*.yml (except sched-wakeup.yml)"
     [agent]="src/join.rs src/event.rs src/clock.rs mcp/** tests/join_engine.rs tests/cross_*.rs tests/vertical.rs examples/{cross,join,vertical}-*.yml examples/sched-wakeup.yml examples/mcp/** (new) docs/mcp.md"
     [unwind]="src/perf.rs src/stack.rs src/unwind.rs (new) catalog/unwind.yaml (new) src/collect/cpu/profile.rs the cpu.profile entry of catalog/cpu.yaml StackMode in src/request.rs and its parsing check_stack in src/validate.rs the lines of src/collect/cpu/mod.rs and src/collect/mem/mod.rs that read request.stack tests/stack_capture.rs tests/unwind.rs (new) examples/unwind-*.yml (new)"
-    [install]="Makefile scripts/release.sh (new) .github/workflows/release.yml (new) README.md DEMO.md"
+    [install]="Makefile scripts/release.sh (new) .github/workflows/release.yml (new) README.md docs/DEMO.md"
 )
 declare -A TITLE=(
     [stock]="Stream P -- the stock machine"
@@ -80,11 +80,11 @@ You are ${TITLE[$stream]} of the Omniscient project.
 
 Read these first, in this order:
   1. CLAUDE.md                 the standing invariants of this repository
-  2. STATE.md                  what works today, measured, and what is left
-  3. BRIEF.md                  the rules, then the section for Stream ${LETTER[$stream]}
+  2. docs/dev/STATE.md                  what works today, measured, and what is left
+  3. docs/dev/BRIEF.md                  the rules, then the section for Stream ${LETTER[$stream]}
   4. docs/contributing.md      what ground truth means here
 
-Your work is BRIEF.md's section for Stream ${LETTER[$stream]}, whole: its numbered
+Your work is docs/dev/BRIEF.md's section for Stream ${LETTER[$stream]}, whole: its numbered
 items, its ground truth, and its handoff. Several items cite a line of
 docs/open-requests.md, which is a snapshot taken before the twelfth wave: check
 each against the code first, and one that has landed is a line in your handoff,
@@ -132,7 +132,7 @@ you finish, and a context that fills up is compacted mid-task, losing detail.
     src/emit.rs, src/join.rs, docs/open-findings.md, docs/open-requests.md).
   - Filter test and build output: \`... 2>&1 | grep -E '^test result|FAILED|panicked'\`
     or \`| tail -40\`. Read a full failure only for the test you are fixing.
-  - Read the background documents (CLAUDE.md, STATE.md, BRIEF.md,
+  - Read the background documents (CLAUDE.md, docs/dev/STATE.md, docs/dev/BRIEF.md,
     docs/contributing.md) once; after that, grep them for the passage you need.
 
 THE PORTABILITY MATRIX runs alone, at the end of the wave, by the coordinator:

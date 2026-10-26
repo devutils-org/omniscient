@@ -467,7 +467,7 @@ What came of each:
 1. **`Cargo.toml` and `Cargo.lock` edited (framehop).** Real, and kept. Item 2
    of the brief names `framehop` or libdw as the way `dwarf` is served, and a
    dependency lives only in `Cargo.toml`. No stream owns that file. The
-   alternative, a DWARF unwinder of our own, is what `ROADMAP.md` rules out.
+   alternative, a DWARF unwinder of our own, is what `docs/ROADMAP.md` rules out.
    The two files change by one dependency line and its lock entries, and
    nothing else. The coordinator is asked to take it at the merge (filed).
 2. **`src/unwind.yaml` instead of `catalog/unwind.yaml`.** Real, kept in the
@@ -513,7 +513,7 @@ What came of each:
    this stream's work makes false. The change it needs is filed for P, and
    the coordinator's merge takes both at once.
 
-## For `DECISIONS.md`
+## For `docs/DECISIONS.md`
 
 - **The mode table is `catalog/unwind.yaml`** (superseding the fourteenth
   wave's `src/unwind.yaml`). `Catalog::load_dir` passes over
@@ -563,7 +563,7 @@ Under "Needs from another stream — the fourteenth wave, stream U" in
 
 ## Session index rows
 
-For `examples/README.md` and `GUIDE.md`:
+For `examples/README.md` and `docs/GUIDE.md`:
 
 | session | what it shows |
 |---|---|

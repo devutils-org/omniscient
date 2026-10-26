@@ -972,7 +972,7 @@ enum HistStart {
 /// typed kernel pointer the verifier lets the program load through: the two
 /// reads of the device are then two loads, where a raw tracepoint program
 /// pays a `bpf_probe_read_kernel` call for each. They were most of the
-/// program's 149 ns a run at two million requests a second (`ROADMAP.md`,
+/// program's 149 ns a run at two million requests a second (`docs/ROADMAP.md`,
 /// phase 6).
 ///
 /// **`HistStart::Kernel`** takes the start from the request itself, which only

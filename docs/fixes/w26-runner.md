@@ -1,6 +1,6 @@
 # w26 runner — one run entry point, and the runner in files by concern
 
-Phase 0b of the twenty-sixth wave (`BRIEF.md`, "0b · `runner`").
+Phase 0b of the twenty-sixth wave (`docs/dev/BRIEF.md`, "0b · `runner`").
 
 ## Landed
 

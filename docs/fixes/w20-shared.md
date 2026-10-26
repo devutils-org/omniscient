@@ -1,7 +1,7 @@
 # The twentieth wave, stream shared
 
-Branch `feat/w20-shared`, from `main` at `444900b`. `BRIEF.md`, "shared --
-the shared layers and the files nobody owned (item 9)"; `STATE.md`, "What
+Branch `feat/w20-shared`, from `main` at `444900b`. `docs/dev/BRIEF.md`, "shared --
+the shared layers and the files nobody owned (item 9)"; `docs/dev/STATE.md`, "What
 remains", item 9. Measured on the development machine with the other streams
 of the wave building and testing beside it.
 
@@ -87,7 +87,7 @@ clean; the lib tests stopped it on `perf::tests::an_ibs_sample_says_which_level_
 `scenario_sched`, three `unwind`, the lib's `cpu::profile` machine test).
 One fails again: `runner::a_profile_s_losses_land_on_the_series_of_the_task_whose_ring_overflowed`
 (75102 against 73963; "the kernel throttled this profile 3800 times and its
-rings account for 0 of them") -- the known red of `STATE.md` item 4, stream
+rings account for 0 of them") -- the known red of `docs/dev/STATE.md` item 4, stream
 rings'. None of the fifteen reads a file this branch changed except
 `join_engine`'s, whose failing test is a decomposition this branch does not
 touch and passes alone.
@@ -108,7 +108,7 @@ touches, all `main`'s as merged:
   budget's `program_stderr` -- the request budget filed to docs
   (`tests/cases.rs`).
 - `runner::a_profile_s_losses_land_on_the_series_...`: 77295 against 76224,
-  the known red of `STATE.md` item 4 (rings').
+  the known red of `docs/dev/STATE.md` item 4 (rings').
 - `scenario_sched::a_workload_that_is_half_blocked_measures_as_half_blocked`:
   29 % blocked against a half; sched's.
 - `view_workloads::system_panels_carry_at_least_the_manifests_cost`: 2.086 s
@@ -152,7 +152,7 @@ it this wave (`adcf0e0`, in `main`). Three bullets remain, to route:
 | `NamedBy` kept in `Results::stacks`; stack rows keyed by the request's keys | `src/emit.rs` | view | no | not applied, nor on `feat/w20-view` | to view in its fix round, or to the next wave's owner of `emit.rs` |
 | The executable of each task a result keys | `src/stack.rs`, `src/collect/sched/offcpu.rs` | budget, sched | yes, yes | not applied | to the next wave, one owner for both files, since the field has to agree |
 
-`STATE.md`'s item 9 should keep these three and drop the other seven
+`docs/dev/STATE.md`'s item 9 should keep these three and drop the other seven
 (`cheaper_equivalents`, the footprint re-read, the per-call cgroup, `omn
 join` with `tier:` and the `/tmp` leak by this stream; `net_qdisc` by net).
 

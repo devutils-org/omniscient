@@ -1,5 +1,5 @@
 //! Parsers for the `io` family's reference tools. Each turns a tool's
-//! output into the values a pair compares (BRIEF.md, "Decided before this
+//! output into the values a pair compares (docs/dev/BRIEF.md, "Decided before this
 //! wave").
 //!
 //! - `fio_json`: fio's `--output-format=json` report, per direction of the

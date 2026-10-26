@@ -1,7 +1,7 @@
 # The twentieth wave, stream docs
 
 Items 10 (the documents that lag the code, the part this row owns) and 11
-(the flaky tally's entries in files nobody else owns) of `STATE.md`. Branch
+(the flaky tally's entries in files nobody else owns) of `docs/dev/STATE.md`. Branch
 `feat/w20-docs`, on `main` at `777d6dd` merged in.
 
 ## What landed
@@ -24,11 +24,11 @@ Items 10 (the documents that lag the code, the part this row owns) and 11
 - **`518328c` docs(examples): `proc-not-built` exits 3, or 1 where tracefs
   is root-only.** The header said 3 everywhere; `force:` skips the
   resolver's choice but not the pinned backend's probes, and a missing
-  requirement is refused before a missing collector. `GUIDE.md` and
-  `examples/README.md` say both. `GUIDE.md`'s exit-code blockquote ("two of
+  requirement is refused before a missing collector. `docs/GUIDE.md` and
+  `examples/README.md` say both. `docs/GUIDE.md`'s exit-code blockquote ("two of
   those four are wrong") was stale: both defects (`docs/scenarios/io.md`, 1
   and 3) are fixed; it now says so.
-- **`17e20c1` docs(guide): the latency session.** `GUIDE.md`'s triage
+- **`17e20c1` docs(guide): the latency session.** `docs/GUIDE.md`'s triage
   section says which four sources the session asks, that `sched.mutex` is
   only in a second pass when the verdict reads a futex sleep, that the
   verdict follows a wait into a child or the busiest thread (`followed`),
@@ -75,7 +75,7 @@ Items 10 (the documents that lag the code, the part this row owns) and 11
 ## Shown versus reasoned
 
 - Shown: the cost column against the YAML (a script over `catalog/*.yaml`
-  and `CATALOG.md`, every row that names its metrics compared;
+  and `docs/CATALOG.md`, every row that names its metrics compared;
   `mem.cache_*` fixed by hand). `proc-not-built.yml` exiting 1 here, naming
   the unreadable tracefs for each of the four (built binary, no
   capabilities, then the same with them). `omn latency --objective latency
@@ -140,7 +140,7 @@ on the machine: `make && cargo test --test cases -- --nocapture`.
 
 ## Decision lines
 
-- **`CATALOG.md`'s Cost column is the YAML's chain, written out.** It lists
+- **`docs/CATALOG.md`'s Cost column is the YAML's chain, written out.** It lists
   the tiers each chain declares, in order. If it is left open, the column
   drifts again, as it did after wave 18. The next step is a test reading the
   column against the catalog (filed below).
@@ -151,15 +151,15 @@ on the machine: `make && cargo test --test cases -- --nocapture`.
 ## Needs from another stream
 
 - **shared (`tests/cli.rs`, beside the index tests)**: a test that reads
-  each family table's Cost cell in `CATALOG.md` and holds it to the
+  each family table's Cost cell in `docs/CATALOG.md` and holds it to the
   catalog's chain (the rule above; `mem.cache_l1` / `.llc` / `.tlb` is the
   one grouped row whose ids do not share a prefix).
 - **Coordinator (`docs/scenarios/proc.md:36,161,182`, `docs/families/proc.md`)**:
   `proc-not-built.yml` is exit 3, or 1 where tracefs is root-only (as
-  `GUIDE.md` now says).
+  `docs/GUIDE.md` now says).
 - **Coordinator (`docs/open-findings.md`)**: the tally entries above for
   `scenario_mem` and `page_faults` are fixed by `77d5205`; `scenario_runtime`
   and `cases` stay, with what this handoff found.
-- **Coordinator (`CATALOG.md` has no `net.request` row)**: section 5 does not
+- **Coordinator (`docs/CATALOG.md` has no `net.request` row)**: section 5 does not
   list `net.request`; the runtime section lists only USDT probes. Adding the
   row is a one-line change I left alone because its wording belongs to net.

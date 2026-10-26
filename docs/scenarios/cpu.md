@@ -563,7 +563,7 @@ pub fn sampled_threads(&self) -> &'static str {
 
 `grep -rn sampled_threads src/` finds the definition and no caller. The same
 applies to `mem.faults` and `sched.switches`, which open sampling events the
-same way. `STATE.md` says `mem.faults` "states that it sees the target task
+same way. `docs/dev/STATE.md` says `mem.faults` "states that it sees the target task
 only"; neither its catalog entry nor a run of it says so on this build.
 
 Two shapes of fix, and the second is the one that would make the source
@@ -675,7 +675,7 @@ consumed; the `bpf:tp` backend is the one that resolves below a tick
 ```
 
 Two readers of the same kernel tick with two conventions, which is the shape
-`STATE.md` already records for the closing read of a polled counter. The
+`docs/dev/STATE.md` already records for the closing read of a polled counter. The
 cheapest fix is `cpu.util` borrowing that sentence; the honest one is the poll
 layer refusing, or reporting, an interval below what the source can resolve.
 
@@ -703,7 +703,7 @@ $ echo $?
 ```
 
 The request is valid and the machine has the counter; what is missing is a
-collector, which is the statement `NoCollector` makes and exits 3 for. `STATE.md`
+collector, which is the statement `NoCollector` makes and exits 3 for. `docs/dev/STATE.md`
 has this as an open item. It affects all seven counting sources of this family,
 and a mode the catalog declares with no collector behind it is why fourteen of
 the eighteen unreachable (source, emit) pairs above are unreachable — twelve of
@@ -757,7 +757,7 @@ seconds and `cpu-per-core.yml` is one.
 > `each_refusal_names_the_thing_that_is_missing` now asserts the code beside the
 > message it was already pinning.
 
-`BRIEF.md` gives three answers with three exit codes. The build has three
+`docs/dev/BRIEF.md` gives three answers with three exit codes. The build has three
 answers and two codes:
 
 ```console

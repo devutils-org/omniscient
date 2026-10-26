@@ -1,7 +1,7 @@
 //! The escalation: a run that decides, from its own cheap numbers, which
 //! layer's detailed sources to pay for.
 //!
-//! `ROADMAP.md` phase 10, item 3. `omn latency` pays for every detailed layer
+//! `docs/ROADMAP.md` phase 10, item 3. `omn latency` pays for every detailed layer
 //! for the whole run -- the on-cpu profile, the blocking stacks, the lock
 //! sources -- because it does not know in advance where the time will go. An
 //! escalation runs a cheap pass instead, and once the cheap pass names the

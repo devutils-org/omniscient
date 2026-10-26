@@ -242,7 +242,7 @@ privilege".
   delete) is what a human can remove so the build links again; the safety
   check refused that removal to this agent.
 
-## For DECISIONS.md
+## For docs/DECISIONS.md
 
 - **Settled: a drained row's window is the rule's to name.** An `overlap` rule
   names `enclosing: <attr>`, the attribute holding a window, from the row's
@@ -259,7 +259,7 @@ privilege".
   when a producer has only the name; the name is what a row prints. A
   sub-series after `/` is not part of the interface. **Open**: the namespace
   beside the index, for the kernel-side producers that read every namespace.
-- **Settled: `proc` stays as vocabulary** with no producer, by `CATALOG.md`'s
+- **Settled: `proc` stays as vocabulary** with no producer, by `docs/CATALOG.md`'s
   container trap; a join on it is refused by name until a source declares it.
 - **Settled: the engine's memory is bounded by its map and its `top`**, plus
   an index of any input stream that is not in order; a run's collections are
@@ -279,7 +279,7 @@ three lines); the network namespace beside the index
 
 ## Session index rows
 
-`examples/README.md` and `GUIDE.md` (the coordinator's; `cli::the_session_indexes_hold_exactly_the_sessions_on_disk`
+`examples/README.md` and `docs/GUIDE.md` (the coordinator's; `cli::the_session_indexes_hold_exactly_the_sessions_on_disk`
 is red for them until then):
 
 ```

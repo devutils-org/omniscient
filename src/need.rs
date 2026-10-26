@@ -2,7 +2,7 @@
 //! strings once, at load.
 //!
 //! The catalog stays data: a requirement is still written as the string
-//! `CATALOG.md` documents, and `omn list` still shows that string. What moves
+//! `docs/CATALOG.md` documents, and `omn list` still shows that string. What moves
 //! here is the reading. A string no rule below reads is refused when the
 //! catalog loads, not answered `unknown` on the machine that runs it, and the
 //! probe (`Capabilities::probe_need`) is one `match` over [`Need`] that the
@@ -219,7 +219,7 @@ impl FromStr for Need {
             return Ok(Need::Unprobed(text.to_owned()));
         }
         Err(format!(
-            "`{text}` is not a requirement this build can read: `CATALOG.md`, \"Requirements\", \
+            "`{text}` is not a requirement this build can read: `docs/CATALOG.md`, \"Requirements\", \
              lists the forms"
         ))
     }

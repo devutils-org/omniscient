@@ -1,7 +1,7 @@
 # The twentieth wave, stream io
 
-Branch `feat/w20-io`, from `main` at `444900b`. `BRIEF.md`, "io -- the
-storage sources the views found short" (`STATE.md` items 8, 11 and 2): a
+Branch `feat/w20-io`, from `main` at `444900b`. `docs/dev/BRIEF.md`, "io -- the
+storage sources the views found short" (`docs/dev/STATE.md` items 8, 11 and 2): a
 filesystem's superblock device mapped to the block devices under it;
 `io.bytes` split by direction; `raw` on `io.bytes` and `io.syscall`; a known
 number of merges; `io.inflight`'s cause on 6.17; optionally one program for
@@ -118,7 +118,7 @@ in its output.
   can now draw the file -> device edge by matching `io.fs`'s `blk_devs`
   against `io.bytes`' series keys, and `docs/view/flows.md`'s "It does not
   draw ... file -> device" paragraph can say so.
-- **Coordinator (`STATE.md`)**: item 11's "`io.inflight`'s cause on 6.17"
+- **Coordinator (`docs/dev/STATE.md`)**: item 11's "`io.inflight`'s cause on 6.17"
   is settled (defect 20); item 8's "a filesystem's superblock device mapped
   to the block devices under it" is done for `io.fs`, `io.fsync` and
   `io.pagecache`.

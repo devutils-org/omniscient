@@ -1047,7 +1047,7 @@ impl Capabilities {
                  before it runs"
                 ))
             }
-            // `net.xdp` stays vocabulary (`DECISIONS.md`): an XDP program can
+            // `net.xdp` stays vocabulary (`docs/DECISIONS.md`): an XDP program can
             // drop packets, not only count them.
             Need::Unprobed(text) => Probe::Unknown(format!(
                 "no probe is written for `{text}`: the source it serves is declared and \

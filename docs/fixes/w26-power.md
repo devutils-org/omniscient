@@ -1,6 +1,6 @@
 # w26 power — idle periods through the tracepoint, and the frequency tracepoint asked whether it fires
 
-Phase 1 of the twenty-sixth wave (`BRIEF.md`, "power").
+Phase 1 of the twenty-sixth wave (`docs/dev/BRIEF.md`, "power").
 
 ## Landed
 

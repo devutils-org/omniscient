@@ -22,7 +22,7 @@
 # the word per frame of any callchain and the three or four words of
 # registers; `docs/unwind.md` has what each costs, measured.
 #
-# Not in `CATALOG.md`'s entry schema, and not in `catalog/`: `Catalog::load_dir`
+# Not in `docs/CATALOG.md`'s entry schema, and not in `catalog/`: `Catalog::load_dir`
 # reads every YAML file there as catalog entries (see docs/unwind.md).
 
 - mode: sframe

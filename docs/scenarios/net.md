@@ -877,7 +877,7 @@ alone or the caveat should say what it holds.
 >
 > The same mode of a launched program resolves onto `so_timestamping`, which
 > nobody has written: exit 3, *"no collector is written for `net.hwts` on
-> backend `so_timestamping` yet"*, as `DECISIONS.md` settled for "valid, and
+> backend `so_timestamping` yet"*, as `docs/DECISIONS.md` settled for "valid, and
 > not built, wherever it is discovered". Where no interface's PTP clock can be
 > read -- the CI's runners keep `/dev/ptp1`, root's alone -- the machine is the
 > first answer and it is exit 1, `so_timestamping: phc: missing` in the chain.
@@ -886,7 +886,7 @@ alone or the caveat should say what it holds.
 > which decides which machine it is on by opening the interfaces' clocks
 > itself. What follows is the defect as found.
 
-`DECISIONS.md` settled that *"valid, and not built is exit 3, wherever it is
+`docs/DECISIONS.md` settled that *"valid, and not built is exit 3, wherever it is
 discovered"*, and `UnsupportedTarget` joined `NoCollector` there. A mode is the
 same answer and was not moved:
 

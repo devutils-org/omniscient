@@ -110,7 +110,7 @@ run above.
   `!entry.device_stacks()` in place of
   `!crate::collect::gpu::DEVICE_STACKS.contains(&request.source.as_str())`.
 - **coordinator** (`docs/unwind.md`): the exec re-read (`Cfi::reread_for`)
-  and `CALLTREE`'s pad; `STATE.md`'s "unwind share tests' aliasing" and
+  and `CALLTREE`'s pad; `docs/dev/STATE.md`'s "unwind share tests' aliasing" and
   `Unwinder::symbolizer` lines are answered by this branch.
 
 ## Tests run
@@ -147,7 +147,7 @@ justified. The fix round leaves them as they are, for these reasons:
   one accessor. The accessor exists (`b073113`) and is tested
   (`tests/stack_capture.rs`). The consumer half stays open until cpu lands
   the `provenance()` change above. The coordinator should note it that way
-  when it updates `docs/open-findings.md` and `STATE.md` (neither file is in
+  when it updates `docs/open-findings.md` and `docs/dev/STATE.md` (neither file is in
   this row): "accessor landed in the twenty-fourth wave (unwind); `perf_maps`
   in `cpu.profile`'s provenance still wanted from cpu". `DEVICE_STACKS` as
   data stays on the list, with the owners named above.

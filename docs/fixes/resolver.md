@@ -330,7 +330,7 @@ The six W test files, alone, with the capabilities and without: all green.
 
 None: this stream adds no session to `examples/`.
 
-## For `DECISIONS.md`
+## For `docs/DECISIONS.md`
 
 - **A backend may declare the modes it serves**, as it may declare its
   targets: the list replaces the entry's for that backend, the loader checks it

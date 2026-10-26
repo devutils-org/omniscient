@@ -452,7 +452,7 @@ pub struct Point {
 /// that bias a distribution, and both were already counted.
 ///
 /// Two of the five are deliberately not here. `late_ticks` and `failed_reads`
-/// belong to `poll`, and `poll` cannot produce `hist` at all -- `CATALOG.md`
+/// belong to `poll`, and `poll` cannot produce `hist` at all -- `docs/CATALOG.md`
 /// §12 refuses it, because a histogram of a polled gauge is a histogram of
 /// when the poller happened to look, which is the same argument under another
 /// name. `undecoded` is a record shape this build does not parse, and there is
@@ -463,7 +463,7 @@ pub struct Shortfall {
     pub dropped: u64,
     /// Windows in which the kernel declined to deliver, which is not a count
     /// of events: how many happened inside one is not recorded anywhere, and
-    /// `DECISIONS.md` chose to say so rather than to estimate it.
+    /// `docs/DECISIONS.md` chose to say so rather than to estimate it.
     pub throttled: u64,
     /// Records the distribution was actually built from. Run-wide, like the
     /// losses it is weighed against: a ring drops without regard to which
@@ -2875,7 +2875,7 @@ mod tests {
     ///
     /// The three losses that are *not* a reason to mark are checked here too,
     /// and each for its own reason. `late_ticks` and `failed_reads` belong to
-    /// `poll`, and `poll` cannot produce `hist` at all -- `CATALOG.md` §12
+    /// `poll`, and `poll` cannot produce `hist` at all -- `docs/CATALOG.md` §12
     /// refuses it because a histogram of a polled gauge is a histogram of when
     /// the poller looked, which is the coordinated-omission argument under
     /// another name. `undecoded` is a record shape this build cannot parse,
@@ -2944,7 +2944,7 @@ mod tests {
     }
 
     /// The throttled case, where the honest answer is that the number is not
-    /// knowable -- which is the answer `DECISIONS.md` already chose for the
+    /// knowable -- which is the answer `docs/DECISIONS.md` already chose for the
     /// loss line.
     ///
     /// A throttle is the kernel declining to deliver for a while. How many

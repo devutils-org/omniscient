@@ -5,7 +5,7 @@ whose results carry the program's `lifetime`): one page that shows, at a
 glance, what one process consumes of everything, one line per resource; the
 detail lives in the dedicated pages, which a line opens.
 `view/src/views/process.rs`; its snapshots are `docs/view/gallery/process--*`.
-Redrawn in the twenty-first wave from the sketch in `BRIEF.md` ("Decided
+Redrawn in the twenty-first wave from the sketch in `docs/dev/BRIEF.md` ("Decided
 before this wave"); the twentieth wave's tile grid is gone.
 
 ```console

@@ -1,6 +1,6 @@
 # w26 kinds — the backend kind as a type, and the runner naming events
 
-Phase 0a of the twenty-sixth wave (`BRIEF.md`, "0a · `kinds`").
+Phase 0a of the twenty-sixth wave (`docs/dev/BRIEF.md`, "0a · `kinds`").
 
 ## Landed
 
