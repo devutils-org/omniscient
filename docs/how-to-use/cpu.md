@@ -79,4 +79,9 @@ and the run says so.
 - High IPC can be a spin loop doing nothing.
 - A time-based profile at a high rate includes its own interrupts.
 - `omn diff before/ after/` subtracts two profiles and names the function that
-  changed.
+  changed, among the ones whose name is the same code in both runs; addresses
+  with no stable name (a withheld kernel's, a JIT's) are counted apart. For a
+  confidence across processes, give each side several runs (`-r 3 -o DIR`, or
+  `--before`/`--after`): one run's sample counts say how precisely it was
+  sampled, not how much two runs differ. A profile's counts are on-cpu time,
+  not wall clock: validate a speed-up on the wall clock without the profiler.

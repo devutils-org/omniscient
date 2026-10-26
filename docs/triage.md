@@ -9,7 +9,7 @@ files it does not own, and the rows the coordinator pastes.
 ```console
 omn latency  --objective latency|tail        [--runs N] [--pid PID -d DUR | -- PROGRAM]
 omn saturate --objective throughput|tail|energy          [--pid PID -d DUR | -- PROGRAM]
-omn diff BEFORE AFTER [--format text|json|folded]
+omn diff BEFORE AFTER [--before RUN]... [--after RUN]... [--format text|json|folded]
 omn -f SESSION          # a session with `escalate:` decides which layer to pay for
 omn SOURCE --window START..STOP ...
 ```
@@ -266,6 +266,48 @@ are one format by construction; the differential file is the three-column
   standard deviations, `|b − a| / sqrt(a + b)`.
 - **With both runs' losses**: a `Shortfall` on either side is named; a folded
   file carries none and the answer says it could not check.
+
+Since the twenty-eighth wave (`docs/dev/briefs/wave-28-diff.md`), from a
+campaign's request (ZML's, whose real Qwen profiles put a withheld kernel
+address first and rows of JIT addresses that changed between processes):
+
+- **What a name allows** (`Identity`): a symbol is the same function in two
+  runs; an offset into a file (`libc.so.6+0x176529`) is the same code only if
+  both runs mapped the same build, which each run's `build_ids` now records
+  (`stack::Provenance`); an anonymous mapping's address, a withheld kernel
+  address and an unmapped one are not. Only comparable rows are in the
+  verdict; the rest are summed by what they lack in `unnamed`, with what would
+  name them (`--symbols debuginfod`, a perf map, CAP_SYSLOG), and the share of
+  the profile they hold is said.
+- **Runs, not one run's samples**: a side is a run, a repeated run's
+  directory (`-r N`, now accepted for a session whose requests emit stacks)
+  or several (`--before`, `--after`). With two or more a side, a difference is
+  weighed against how much each side's runs differ (Welch's standard error,
+  floored at the counts' own noise: `confidence: between_runs`); with one it
+  is the counts' Poisson noise, and the sentence says that is how precisely
+  one run was sampled, not how much two processes differ.
+- **Units and denominators**: each row carries its share of its side's
+  samples beside its absolute weight, the on-cpu time its samples stand for
+  where the rate is known, and the spread across runs; `denominator` says a
+  sample is on-cpu time summed over the target's threads -- not wall clock,
+  not GPU -- and that inclusive costs do not add up. A function sampled fewer
+  than ten times a run on both sides is listed, flagged, and not ranked.
+- **Each run's frame of reference**: the `--window` it was profiled over
+  (from `resolved.json`; two different windows are said), and what its
+  collector cost the target (from `cost.json`).
+
+Measured on the fixture with its `diff` mode, which now ends with `waits`,
+a function that sleeps as long as each of the others runs: `waits` is charged
+no cpu; stripped (`strip -s`), the program's functions are offsets compared by
+its build id, and `beta`'s two hottest instructions are the difference (x2.86
+for a factor of 3); three runs a side through `-r 3` give `between_runs` and
+`beta` alone (`tests/triage.rs`). On ZML's two Qwen profiles the verdict moved
+from the withheld kernel address to `ynn::dot_bf16_bf16_fp32_5x16x1...`, with
+85.6 % and 80.9 % of the samples said to be code with no stable name.
+
+What this does not do: time a call. Sampling counts how often a function was
+on a cpu; a duration per call is an entry and an exit -- USDT, uprobes, a span
+-- with its own losses, recursion and cost, and a different source.
 
 **Measured here**, the fixture's four functions of equal cost with `beta` run
 once, then twice:

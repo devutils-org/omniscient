@@ -135,15 +135,24 @@ pub(crate) fn saturate(args: SaturateArgs) -> anyhow::Result<ExitCode> {
 pub(crate) fn diff(args: DiffArgs) -> anyhow::Result<ExitCode> {
     use crate::triage::diff::{self, Profile};
 
-    let load = |path: &Path| Profile::load(path);
-    let (before, after) = match (load(&args.before), load(&args.after)) {
+    let side = |first: &Path, more: &[PathBuf]| -> Result<Vec<Profile>, String> {
+        let mut runs = Profile::load_runs(first)?;
+        for path in more {
+            runs.extend(Profile::load_runs(path)?);
+        }
+        Ok(runs)
+    };
+    let (before, after) = match (
+        side(&args.before, &args.more_before),
+        side(&args.after, &args.more_after),
+    ) {
         (Ok(before), Ok(after)) => (before, after),
         (Err(error), _) | (_, Err(error)) => {
             eprintln!("error: {error}");
             return Ok(ExitCode::from(EXIT_REJECTED));
         }
     };
-    let result = diff::diff(before, after);
+    let result = diff::diff_runs(before, after);
     match args.format {
         OutputFormat::Folded => print!("{}", result.folded()),
         format => print_answer(format, &result, || result.text(args.top))?,

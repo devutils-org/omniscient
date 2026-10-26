@@ -670,6 +670,7 @@ impl Collector for OffCpuCollector {
             perf_maps,
             executables,
             objects: self.objects.clone(),
+            build_ids: BTreeMap::new(),
         }
     }
 

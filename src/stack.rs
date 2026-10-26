@@ -33,7 +33,7 @@
 #[path = "unwind.rs"]
 pub mod unwind;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -265,6 +265,11 @@ pub struct Provenance {
         deserialize_with = "stack_ids"
     )]
     pub objects: BTreeMap<u64, Vec<Option<String>>>,
+    /// Each object's GNU build id, by the name `objects` gives it: what says
+    /// two runs ran the same file, so an offset in it is the same code in
+    /// both. Absent for an object with none, the kernel's included.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub build_ids: BTreeMap<String, String>,
 }
 
 /// A map keyed by stack id, read back from JSON's string keys.
@@ -296,6 +301,7 @@ impl Provenance {
             && self.perf_maps.is_empty()
             && self.executables.is_empty()
             && self.objects.is_empty()
+            && self.build_ids.is_empty()
     }
 
     /// Only the stacks a result kept: a collector's table can hold stacks
@@ -303,6 +309,8 @@ impl Provenance {
     pub fn keep_stacks(&mut self, stacks: &BTreeMap<u64, Vec<String>>) {
         self.named_by.retain(|id, _| stacks.contains_key(id));
         self.objects.retain(|id, _| stacks.contains_key(id));
+        let cited: BTreeSet<&String> = self.objects.values().flatten().flatten().collect();
+        self.build_ids.retain(|object, _| cited.contains(object));
     }
 }
 
@@ -2192,6 +2200,15 @@ fn read_u32(bytes: &[u8], at: usize) -> Option<u32> {
 
 fn read_u64(bytes: &[u8], at: usize) -> Option<u64> {
     Some(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
+}
+
+/// The GNU build id of the ELF file at `path`, in hex: what a debuginfod
+/// server indexes it by, and what says two runs mapped the same file.
+pub fn build_id_of(path: &Path) -> Option<String> {
+    let mapped = Mapped::of(path)?;
+    Elf::parse(mapped.bytes())?
+        .build_id()
+        .map(|id| unwind::hex(&id))
 }
 
 /// The file offset of the function `name` in the ELF at `path`, by its

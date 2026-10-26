@@ -1540,6 +1540,19 @@ Ubuntu 20.04's 5.4, which have no kernel BTF (4.19) or no `btf_trace_*` types
 | A program that publishes | **Through `bpf::transport`**, the USDT and `io.fsync` programs too. | Both created a ring buffer they did not declare, and failed at the start where there is none. |
 | What stays without a classic road | **`net.qdisc`** (`qdisc_enqueue` is 5.15), **`sched.lock`'s and `io.pagecache`'s and `io.readahead`'s tracepoints** (5.19 and 6.x), **`sched.slices`** (it reads the kernel's `sched_info` stamps, which only BTF reaches), **`power.freq`, `power.throttle`** (no ground truth in a guest). | Each is a kernel these cells do not run, or a measurement the record cannot make. |
 
+## Settled in the twenty-eighth wave: what a difference between profiles may claim
+
+From a campaign's request (`docs/dev/briefs/wave-28-diff.md`).
+
+| Question | Decision | Why, and where it stands |
+|---|---|---|
+| Which rows a verdict may name | **Only a row that is the same code in both runs**: a symbol, or an offset into a file both mapped in the same build (by the build id each run records). | ZML's real diff named a withheld kernel address first, and JIT addresses that move between processes as functions that vanished. An address names nothing another process holds. |
+| What happens to the rest | **Summed apart by what they lack, with the share they hold and what would name them** (`unnamed`). | Hidden, a profile 85 % unnamed would read as a profile of its named 15 %. |
+| The confidence of a difference | **Between runs with two or more a side** (Welch, floored at the counts' noise); **within one run otherwise, and said to be that**. | Samples of one run are correlated; their count says how precisely it was sampled, not how much two processes of the program differ. |
+| A function sampled a handful of times | **Listed, flagged, not ranked**, under ten samples a run on both sides. | A count of ten is known to a third. |
+| What the numbers are said to be | **On-cpu time summed over the target's threads**, with each row's share beside its weight, and inclusive costs said not to add up. | Not wall clock, not GPU, not a duration per call: a speed-up is validated on the wall clock without the profiler. |
+| `-r N` on a profile | **Accepted when a request emits stacks**: the runs' profiles are what `omn diff` compares. | It required a summary, which a profile has none of. |
+
 ## Open
 
 Nothing is open since 2026-10-19 (above).

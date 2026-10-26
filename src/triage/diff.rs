@@ -69,6 +69,22 @@ pub struct Profile {
     /// sample's own function is then the innermost of them, not its leaf.
     #[serde(default, skip_serializing_if = "is_unread")]
     pub perf_map: PerfMapNames,
+    /// The object each frame's label is in (`libc.so.6`, `[kernel]`), when
+    /// the run's provenance says: what names the file a function belongs to.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub objects: BTreeMap<String, String>,
+    /// Each object's GNU build id, when the run read one: an offset in a file
+    /// is the same code in two runs only if both mapped the same build.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub build_ids: BTreeMap<String, String>,
+    /// The window the profile was attached for (`--window`), when the run's
+    /// `resolved.json` names one: a profile of a phase is compared with a
+    /// profile of the same phase, and says which.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<String>,
+    /// What the collector cost the target, from the run's `cost.json`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collector_cost: Option<String>,
 }
 
 fn is_unread(names: &PerfMapNames) -> bool {
@@ -117,12 +133,67 @@ impl Profile {
             .map_err(|error| format!("cannot read {}: {error}", results.display()))?;
         let run: RunOutput = serde_json::from_str(&text)
             .map_err(|error| format!("{} is not a run's results: {error}", results.display()))?;
-        Self::from_run(
+        let mut profile = Self::from_run(
             dir.display().to_string(),
             &run,
             period_in(dir),
             modified(&results),
-        )
+        )?;
+        profile.window = window_in(dir);
+        profile.collector_cost = cost_in(dir);
+        Ok(profile)
+    }
+
+    /// One side of a comparison: a run (`-o DIR`, its `results.json`, a
+    /// folded file), or every run of a repeated one -- `-r N`'s directory,
+    /// whose `repeat.json` sits beside `run-1` ... `run-N`, or that document
+    /// itself.
+    pub fn load_runs(path: &Path) -> Result<Vec<Self>, String> {
+        if path.is_dir() && path.join("repeat.json").exists() {
+            let mut runs: Vec<(u32, PathBuf)> = std::fs::read_dir(path)
+                .map_err(|error| format!("cannot read {}: {error}", path.display()))?
+                .flatten()
+                .filter_map(|entry| {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    let index = name.strip_prefix("run-")?.parse().ok()?;
+                    Some((index, entry.path()))
+                })
+                .collect();
+            runs.sort();
+            if runs.is_empty() {
+                return Err(format!(
+                    "{} holds a repeat.json and no run-<i> directory to read each run from",
+                    path.display()
+                ));
+            }
+            return runs.iter().map(|(_, dir)| Self::load(dir)).collect();
+        }
+        if path.is_file() {
+            let text = std::fs::read_to_string(path)
+                .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+            if text.trim_start().starts_with('{') {
+                #[derive(Deserialize)]
+                struct Repeated {
+                    runs: Vec<RunOutput>,
+                }
+                if let Ok(repeated) = serde_json::from_str::<Repeated>(&text) {
+                    return repeated
+                        .runs
+                        .iter()
+                        .enumerate()
+                        .map(|(index, run)| {
+                            Self::from_run(
+                                format!("{} run {}", path.display(), index + 1),
+                                run,
+                                None,
+                                modified(path),
+                            )
+                        })
+                        .collect();
+                }
+            }
+        }
+        Ok(vec![Self::load(path)?])
     }
 
     /// A profile out of a run's results, through the same `folded` encoder a
@@ -205,6 +276,20 @@ impl Profile {
             ));
         }
         profile.notes.extend(chosen.degradations.iter().cloned());
+        for (id, objects) in &chosen.provenance.objects {
+            let Some(labels) = chosen.stacks.get(id) else {
+                continue;
+            };
+            for (label, object) in labels.iter().zip(objects) {
+                if let Some(object) = object {
+                    profile
+                        .objects
+                        .entry(label.clone())
+                        .or_insert_with(|| object.clone());
+                }
+            }
+        }
+        profile.build_ids = chosen.provenance.build_ids.clone();
         profile.perf_map = PerfMapNames::of_run(std::slice::from_ref(chosen));
         if let Some(written) = written {
             profile.perf_map.written_after(written);
@@ -242,6 +327,10 @@ impl Profile {
             losses_known: false,
             notes: Vec::new(),
             perf_map: PerfMapNames::default(),
+            objects: BTreeMap::new(),
+            build_ids: BTreeMap::new(),
+            window: None,
+            collector_cost: None,
         })
     }
 }
@@ -251,6 +340,37 @@ fn modified(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path)
         .and_then(|meta| meta.modified())
         .ok()
+}
+
+/// The window of the profile request in a run's `resolved.json`, when it
+/// was held to one.
+fn window_in(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join("resolved.json")).ok()?;
+    let resolved: Vec<ResolvedRequest> = serde_json::from_str(&text).ok()?;
+    resolved
+        .iter()
+        .find(|one| matches!(one.request.mode, Mode::Sample { .. }))
+        .and_then(|one| one.request.window.as_ref())
+        .map(ToString::to_string)
+}
+
+/// What the profile's collector cost the target, from a run's `cost.json`:
+/// its share of the target's cpu as measured, and the band it declares.
+fn cost_in(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join("cost.json")).ok()?;
+    let costs: Vec<serde_json::Value> = serde_json::from_str(&text).ok()?;
+    let cost = costs.iter().find(|cost| {
+        cost["mode"]
+            .as_str()
+            .is_some_and(|mode| mode.starts_with("sample"))
+    })?;
+    let declared = cost["declared"].as_str().unwrap_or("unknown");
+    Some(match cost["measured_percent"].as_f64() {
+        Some(percent) => {
+            format!("{percent:.2} % of the target's cpu, measured (declared `{declared}`)")
+        }
+        None => format!("not measured (declared `{declared}`)"),
+    })
 }
 
 /// The sampling period of the profile request in a run's `resolved.json`.
@@ -270,10 +390,136 @@ fn period_in(dir: &Path) -> Option<f64> {
     })
 }
 
+/// Below this many samples a run, on average, a function's cost is not
+/// ranked: a count of ten is known to a third, and a verdict that named it
+/// would give a rarely sampled function a precision it does not have.
+pub const FEW_SAMPLES: f64 = 10.0;
+
+/// What a function's name says about whether another run can hold the same
+/// function: the difference between a cost that can be compared and an
+/// address that cannot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Identity {
+    /// A name: an ELF symbol, debuginfod's, `/proc/kallsyms`', a perf map's.
+    Symbol,
+    /// An offset into a file no symbol covered (`libc.so.6+0x176529`): one
+    /// instruction rather than a function, and the same code in another run
+    /// only if that run mapped the same build of the file.
+    Offset,
+    /// Code no file holds and nothing named (`0x7f0ebc090000+0x60`, a JIT's
+    /// without a perf map): an address in one process, which the next
+    /// process puts elsewhere.
+    Anonymous,
+    /// A kernel address whose name was withheld (`kptr_restrict`).
+    KernelHidden,
+    /// An address no mapping covered.
+    Unmapped,
+}
+
+impl Identity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Identity::Symbol => "symbol",
+            Identity::Offset => "offset",
+            Identity::Anonymous => "anonymous",
+            Identity::KernelHidden => "kernel, name withheld",
+            Identity::Unmapped => "unmapped",
+        }
+    }
+
+    /// What it would take to name it.
+    fn remedy(self) -> &'static str {
+        match self {
+            Identity::Symbol => "",
+            Identity::Offset => {
+                "a file with no symbol for these addresses: `--symbols debuginfod` names them \
+                 where the distribution publishes debug files"
+            }
+            Identity::Anonymous => {
+                "code in no file: a JIT's or an interpreter's, named only when the runtime \
+                 writes a perf map (`/tmp/perf-<pid>.map`)"
+            }
+            Identity::KernelHidden => {
+                "kernel addresses withheld by `kernel.kptr_restrict`: CAP_SYSLOG, or the sysctl \
+                 at 0, names them"
+            }
+            Identity::Unmapped => "addresses in no mapping the run read",
+        }
+    }
+}
+
+/// The identity of a frame's label, as `stack::Frame::label` writes it: a
+/// name, `module+0xOFF`, `0xBASE+0xOFF` for an unnamed anonymous mapping,
+/// `0xADDR` for an address in none.
+pub fn identity_of(label: &str) -> Identity {
+    let label = label.trim_end_matches(RECOVERED);
+    if let Some(hex) = label.strip_prefix("0x") {
+        if hex.contains("+0x") {
+            return Identity::Anonymous;
+        }
+        return match u64::from_str_radix(hex, 16) {
+            Ok(addr) if addr >= 0xffff_8000_0000_0000 => Identity::KernelHidden,
+            _ => Identity::Unmapped,
+        };
+    }
+    if let Some((module, offset)) = label.rsplit_once("+0x") {
+        let hex = !offset.is_empty() && offset.chars().all(|c| c.is_ascii_hexdigit());
+        let plain = !module.is_empty() && !module.contains([' ', '(', ')', ':', ',']);
+        if hex && module.starts_with("[anon") {
+            return Identity::Anonymous;
+        }
+        if hex && plain {
+            return Identity::Offset;
+        }
+    }
+    Identity::Symbol
+}
+
+/// How a difference was weighed against the noise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Confidence {
+    /// Two or more runs on each side: against how much the runs of each
+    /// side differ from one another.
+    BetweenRuns,
+    /// One run on a side: against the Poisson noise of each count, which
+    /// says how precisely one run was sampled and nothing of how a second
+    /// process of the same program would differ.
+    WithinOneRun,
+}
+
+impl Confidence {
+    fn says(self) -> &'static str {
+        match self {
+            Confidence::BetweenRuns => "standard errors of the difference between the runs",
+            Confidence::WithinOneRun => {
+                "standard deviations of one run's sample counts -- how precisely that run was \
+                 sampled, not how much two runs of the program differ"
+            }
+        }
+    }
+}
+
 /// One function's cost in both profiles.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Change {
     pub function: String,
+    /// What its name allows: only a symbol, or an offset into the same build
+    /// on both sides, names the same code in two runs.
+    #[serde(default = "symbol")]
+    pub identity: Identity,
+    /// Whether this row is the same code in both: a row that is not is in no
+    /// verdict.
+    #[serde(default = "yes")]
+    pub comparable: bool,
+    /// The file it is in, when the runs said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object: Option<String>,
+    /// That file's build id, when the runs read one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_id: Option<String>,
+    /// The mean per run, in the unit the comparison is in.
     pub before: f64,
     pub after: f64,
     /// `after - before`, in the unit the comparison is in.
@@ -281,100 +527,607 @@ pub struct Change {
     /// `after / before`, absent when it was not there before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ratio: Option<f64>,
-    /// How far a difference this size is from zero in Poisson standard
-    /// deviations.
+    /// Its part of each side's samples, as a fraction: a share that grew is
+    /// not a cost that grew, when another function's shrank.
+    #[serde(default)]
+    pub before_share: f64,
+    #[serde(default)]
+    pub after_share: f64,
+    /// The on-cpu time the samples stand for, per run, where the sampling
+    /// period is known: an estimate, one period per sample.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_ns: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_ns: Option<f64>,
+    /// The standard deviation across each side's runs, with two or more.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_spread: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_spread: Option<f64>,
+    /// How far the difference is from zero, in the unit [`Diff::confidence`]
+    /// names.
     pub sigmas: f64,
     pub significant: bool,
+    /// Fewer than [`FEW_SAMPLES`] samples a run on both sides: listed, not
+    /// ranked.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub few_samples: bool,
 }
 
-/// Two profiles, subtracted.
+fn symbol() -> Identity {
+    Identity::Symbol
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// The self cost of code that has no stable name, by what it lacks and the
+/// file it is in: in no verdict, and counted so its weight is seen.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Unnamed {
+    pub identity: Identity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object: Option<String>,
+    /// How many rows it is: an offset is one instruction, so one function
+    /// with no symbol is many rows.
+    pub rows: usize,
+    pub before: f64,
+    pub after: f64,
+    pub before_share: f64,
+    pub after_share: f64,
+    pub remedy: String,
+}
+
+/// Two profiles, or two groups of runs, subtracted.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Diff {
+    /// Each side's runs, their stacks the mean per run.
     pub before: Profile,
     pub after: Profile,
-    /// What the numbers are in: `samples`, or `ns` when the two rates differ.
+    /// How many runs each side is.
+    #[serde(default = "one")]
+    pub runs_before: usize,
+    #[serde(default = "one")]
+    pub runs_after: usize,
+    /// What the numbers are in: `samples`, or `ns` when the rates differ.
     pub unit: String,
+    /// What a sample is a sample of, and what a share is a share of.
+    #[serde(default)]
+    pub denominator: String,
     /// What the after profile's samples were multiplied by to be comparable.
     pub scale: f64,
+    /// How the differences were weighed against the noise.
+    #[serde(default = "within")]
+    pub confidence: Confidence,
     /// By the function each sample is charged to ([`charged_to`]): its leaf,
     /// or the innermost frame a perf map named. Largest movement first.
     pub own: Vec<Change>,
-    /// By every frame a stack passes through, largest movement first.
+    /// By every frame a stack passes through, largest movement first. Not
+    /// additive: a caller's includes its callees'.
     pub inclusive: Vec<Change>,
-    /// The functions whose own cost moved beyond the noise, heaviest first.
+    /// The own cost of code with no stable name, which no verdict names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unnamed: Vec<Unnamed>,
+    /// The comparable functions whose own cost moved beyond the noise,
+    /// heaviest first.
     pub difference: Vec<String>,
     pub sentence: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
 }
 
+fn one() -> usize {
+    1
+}
+
+fn within() -> Confidence {
+    Confidence::WithinOneRun
+}
+
 /// Subtracts `before` from `after`.
 pub fn diff(before: Profile, after: Profile) -> Diff {
-    let mut notes = Vec::new();
-    // Samples are comparable only at one rate; at two, each is worth its own
-    // period and the comparison is in time.
-    let (unit, scale_before, scale_after) = match (before.period_ns, after.period_ns) {
-        (Some(a), Some(b)) if (a - b).abs() / a.max(b) < 1e-9 => ("samples".to_owned(), 1.0, 1.0),
-        (Some(a), Some(b)) => {
-            notes.push(format!(
-                "the two profiles were sampled at different rates ({:.0} Hz and {:.0} Hz), so \
-                 they are compared in time: each sample is worth its own period",
-                1e9 / a,
-                1e9 / b
-            ));
-            ("ns".to_owned(), a, b)
-        }
-        _ => {
-            notes.push(
-                "the sampling rate of at least one profile is unknown -- a folded file does not \
-                 carry it -- so both are assumed to have been taken at the same rate and are \
-                 compared in samples"
-                    .to_owned(),
-            );
-            ("samples".to_owned(), 1.0, 1.0)
-        }
-    };
-    for (which, profile) in [("before", &before), ("after", &after)] {
-        if !profile.losses_known {
-            notes.push(format!(
-                "{which} ({}) is a folded file, which carries no loss accounting: whether it \
-                 lost samples could not be checked",
-                profile.origin
-            ));
-        } else if let Some(short) = &profile.short {
-            notes.push(format!(
-                "{which} ({}) is short: {}. A difference between it and the other is partly a \
-                 difference in what each lost",
-                profile.origin, short.note
-            ));
+    diff_runs(vec![before], vec![after])
+}
+
+/// One side's runs, each in samples by the function a frame or a sample is
+/// charged to, with its scale into the comparison's unit.
+struct Side {
+    runs: Vec<Profile>,
+    scales: Vec<f64>,
+    own: Vec<BTreeMap<String, f64>>,
+    every: Vec<BTreeMap<String, f64>>,
+    totals: Vec<f64>,
+}
+
+impl Side {
+    fn new(runs: Vec<Profile>, scales: Vec<f64>) -> Self {
+        let own = runs
+            .iter()
+            .map(|run| frames_by(run, 1.0, Frames::Leaf))
+            .collect();
+        let every = runs
+            .iter()
+            .map(|run| frames_by(run, 1.0, Frames::Every))
+            .collect();
+        let totals = runs.iter().map(Profile::total).collect();
+        Self {
+            runs,
+            scales,
+            own,
+            every,
+            totals,
         }
     }
 
-    let own = changes(
-        &frames_by(&before, scale_before, Frames::Leaf),
-        &frames_by(&after, scale_after, Frames::Leaf),
-        scale_before,
-        scale_after,
+    fn len(&self) -> usize {
+        self.runs.len()
+    }
+
+    /// The runs merged: each stack's mean per run, every note once.
+    fn merged(&self) -> Profile {
+        let n = self.len() as f64;
+        let mut merged = self.runs[0].clone();
+        if self.len() > 1 {
+            merged.origin = self
+                .runs
+                .iter()
+                .map(|run| run.origin.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            merged.stacks = BTreeMap::new();
+            for run in &self.runs {
+                for (stack, weight) in &run.stacks {
+                    *merged.stacks.entry(stack.clone()).or_default() += weight / n;
+                }
+                for note in &run.notes {
+                    if !merged.notes.contains(note) {
+                        merged.notes.push(note.clone());
+                    }
+                }
+                for (label, object) in &run.objects {
+                    merged
+                        .objects
+                        .entry(label.clone())
+                        .or_insert_with(|| object.clone());
+                }
+                for (object, id) in &run.build_ids {
+                    // Two builds of one file across a side's runs: no build
+                    // id says which, and an offset in it is in no verdict.
+                    if merged
+                        .build_ids
+                        .get(object)
+                        .is_some_and(|known| known != id)
+                    {
+                        merged.build_ids.insert(object.clone(), String::new());
+                    } else {
+                        merged
+                            .build_ids
+                            .entry(object.clone())
+                            .or_insert_with(|| id.clone());
+                    }
+                }
+            }
+        }
+        merged
+    }
+
+    /// One function's value per run, in the comparison's unit.
+    fn values(&self, by: &[BTreeMap<String, f64>], name: &str) -> Vec<f64> {
+        by.iter()
+            .zip(&self.scales)
+            .map(|(run, scale)| run.get(name).copied().unwrap_or(0.0) * scale)
+            .collect()
+    }
+
+    /// One function's samples per run.
+    fn samples(&self, by: &[BTreeMap<String, f64>], name: &str) -> Vec<f64> {
+        by.iter()
+            .map(|run| run.get(name).copied().unwrap_or(0.0))
+            .collect()
+    }
+
+    /// Its mean share of each run's samples.
+    fn share(&self, by: &[BTreeMap<String, f64>], name: &str) -> f64 {
+        self.samples(by, name)
+            .iter()
+            .zip(&self.totals)
+            .map(|(samples, total)| if *total > 0.0 { samples / total } else { 0.0 })
+            .sum::<f64>()
+            / self.len() as f64
+    }
+
+    /// The on-cpu time its samples stand for, per run, where every run's
+    /// period is known.
+    fn time(&self, by: &[BTreeMap<String, f64>], name: &str) -> Option<f64> {
+        let periods: Option<Vec<f64>> = self.runs.iter().map(|run| run.period_ns).collect();
+        let periods = periods?;
+        Some(
+            self.samples(by, name)
+                .iter()
+                .zip(&periods)
+                .map(|(samples, period)| samples * period)
+                .sum::<f64>()
+                / self.len() as f64,
+        )
+    }
+
+    /// The Poisson variance of its mean in the comparison's unit: each run's
+    /// count is its own variance, times its scale squared.
+    fn poisson_variance(&self, by: &[BTreeMap<String, f64>], name: &str) -> f64 {
+        let n = self.len() as f64;
+        self.samples(by, name)
+            .iter()
+            .zip(&self.scales)
+            .map(|(samples, scale)| samples * scale * scale)
+            .sum::<f64>()
+            / (n * n)
+    }
+}
+
+fn mean(values: &[f64]) -> f64 {
+    values.iter().sum::<f64>() / values.len().max(1) as f64
+}
+
+/// The sample standard deviation (n - 1); `None` below two values.
+fn spread(values: &[f64]) -> Option<f64> {
+    if values.len() < 2 {
+        return None;
+    }
+    let m = mean(values);
+    let sum: f64 = values.iter().map(|value| (value - m).powi(2)).sum();
+    Some((sum / (values.len() - 1) as f64).sqrt())
+}
+
+/// Subtracts the `before` runs from the `after` runs.
+///
+/// With one run a side, a difference is weighed against the Poisson noise of
+/// each count, as it always was: how precisely each run was sampled. With two
+/// or more on each side it is weighed against how much each side's runs
+/// differ from one another (floored at the counts' own noise), which is the
+/// question a second process of the program asks: samples of one run are
+/// correlated, and their count is no confidence across processes.
+pub fn diff_runs(before: Vec<Profile>, after: Vec<Profile>) -> Diff {
+    assert!(
+        !before.is_empty() && !after.is_empty(),
+        "a side of a difference holds a run"
     );
-    let inclusive = changes(
-        &frames_by(&before, scale_before, Frames::Every),
-        &frames_by(&after, scale_after, Frames::Every),
-        scale_before,
-        scale_after,
-    );
+    let mut notes = Vec::new();
+    // Samples are comparable only at one rate; at several, each is worth its
+    // own period and the comparison is in time.
+    let periods: Vec<Option<f64>> = before
+        .iter()
+        .chain(&after)
+        .map(|run| run.period_ns)
+        .collect();
+    let known: Option<Vec<f64>> = periods.iter().copied().collect();
+    let in_time = match &known {
+        Some(all) => all
+            .iter()
+            .any(|period| (period - all[0]).abs() / period.max(all[0]) >= 1e-9),
+        None => {
+            notes.push(
+                "the sampling rate of at least one profile is unknown -- a folded file does not \
+                 carry it -- so all are assumed to have been taken at the same rate and are \
+                 compared in samples, with no time beside them"
+                    .to_owned(),
+            );
+            false
+        }
+    };
+    let unit = if in_time {
+        notes.push(
+            "the profiles were sampled at different rates, so they are compared in time: each \
+             sample is worth its own period"
+                .to_owned(),
+        );
+        "ns"
+    } else {
+        "samples"
+    };
+    let scale_of = |run: &Profile| {
+        if in_time {
+            run.period_ns.unwrap_or(1.0)
+        } else {
+            1.0
+        }
+    };
+    let before = Side::new(before.clone(), before.iter().map(scale_of).collect());
+    let after = Side::new(after.clone(), after.iter().map(scale_of).collect());
+    for (which, side) in [("before", &before), ("after", &after)] {
+        for run in &side.runs {
+            if !run.losses_known {
+                notes.push(format!(
+                    "{which} ({}) is a folded file, which carries no loss accounting: whether it \
+                     lost samples could not be checked",
+                    run.origin
+                ));
+            } else if let Some(short) = &run.short {
+                notes.push(format!(
+                    "{which} ({}) is short: {}. A difference between it and the other is \
+                     partly a difference in what each lost",
+                    run.origin, short.note
+                ));
+            }
+        }
+    }
+    let windows = |side: &Side| {
+        let mut windows: Vec<String> = side
+            .runs
+            .iter()
+            .map(|run| {
+                run.window
+                    .clone()
+                    .unwrap_or_else(|| "the whole run".to_owned())
+            })
+            .collect();
+        windows.dedup();
+        windows
+    };
+    let (window_before, window_after) = (windows(&before), windows(&after));
+    if window_before != ["the whole run"] || window_after != ["the whole run"] {
+        notes.push(format!(
+            "profiled over {} before and {} after{}",
+            window_before.join(" / "),
+            window_after.join(" / "),
+            if window_before == window_after {
+                ""
+            } else {
+                ": not the same part of the runs, so a difference is partly a difference in \
+                 what each covered"
+            }
+        ));
+    }
+
+    let confidence = if before.len() >= 2 && after.len() >= 2 {
+        Confidence::BetweenRuns
+    } else {
+        if before.len() >= 2 || after.len() >= 2 {
+            notes.push(format!(
+                "{} run(s) before and {} after: the between-runs test needs two on each side, so \
+                 the counts are weighed against their own noise",
+                before.len(),
+                after.len()
+            ));
+        }
+        Confidence::WithinOneRun
+    };
+    let (merged_before, merged_after) = (before.merged(), after.merged());
+    let comparable = |name: &str, identity: Identity| -> (bool, Option<String>, Option<String>) {
+        // An anonymous mapping's "object" is its base address, which the next
+        // process puts elsewhere: no file to name.
+        if identity == Identity::Anonymous {
+            return (false, None, None);
+        }
+        let object = merged_after
+            .objects
+            .get(name)
+            .or_else(|| merged_before.objects.get(name))
+            .cloned()
+            .or_else(|| {
+                (identity == Identity::Offset)
+                    .then(|| name.trim_end_matches(RECOVERED).rsplit_once("+0x"))
+                    .flatten()
+                    .map(|(module, _)| module.to_owned())
+            });
+        let ids = object.as_ref().map(|object| {
+            (
+                merged_before
+                    .build_ids
+                    .get(object)
+                    .filter(|id| !id.is_empty()),
+                merged_after
+                    .build_ids
+                    .get(object)
+                    .filter(|id| !id.is_empty()),
+            )
+        });
+        let build_id = ids.and_then(|(before, after)| after.or(before)).cloned();
+        let same_build = matches!(ids, Some((Some(a), Some(b))) if a == b);
+        let comparable = match identity {
+            Identity::Symbol => true,
+            Identity::Offset => same_build,
+            _ => false,
+        };
+        (comparable, object, build_id)
+    };
+    let changes_of = |by_before: &[BTreeMap<String, f64>], by_after: &[BTreeMap<String, f64>]| {
+        let names: BTreeSet<&String> = by_before
+            .iter()
+            .chain(by_after)
+            .flat_map(BTreeMap::keys)
+            .collect();
+        let mut changes: Vec<Change> = names
+            .into_iter()
+            .map(|name| {
+                let (a_values, b_values) =
+                    (before.values(by_before, name), after.values(by_after, name));
+                let (a, b) = (mean(&a_values), mean(&b_values));
+                let poisson = (before.poisson_variance(by_before, name)
+                    + after.poisson_variance(by_after, name))
+                .sqrt();
+                let error = match confidence {
+                    Confidence::BetweenRuns => {
+                        let (sa, sb) = (
+                            spread(&a_values).unwrap_or(0.0),
+                            spread(&b_values).unwrap_or(0.0),
+                        );
+                        (sa * sa / a_values.len() as f64 + sb * sb / b_values.len() as f64)
+                            .sqrt()
+                            .max(poisson)
+                    }
+                    Confidence::WithinOneRun => poisson,
+                };
+                let sigmas = if error > 0.0 {
+                    (b - a).abs() / error
+                } else {
+                    0.0
+                };
+                let identity = identity_of(name);
+                let (comparable, object, build_id) = comparable(name, identity);
+                let few_samples = mean(&before.samples(by_before, name)) < FEW_SAMPLES
+                    && mean(&after.samples(by_after, name)) < FEW_SAMPLES;
+                Change {
+                    function: name.clone(),
+                    identity,
+                    comparable,
+                    object,
+                    build_id,
+                    before: a,
+                    after: b,
+                    delta: b - a,
+                    ratio: (a > 0.0).then(|| b / a),
+                    before_share: before.share(by_before, name),
+                    after_share: after.share(by_after, name),
+                    before_ns: before.time(by_before, name),
+                    after_ns: after.time(by_after, name),
+                    before_spread: spread(&a_values),
+                    after_spread: spread(&b_values),
+                    sigmas,
+                    significant: sigmas > SIGMAS,
+                    few_samples,
+                }
+            })
+            .collect();
+        changes.sort_by(|x, y| {
+            y.delta
+                .abs()
+                .total_cmp(&x.delta.abs())
+                .then_with(|| x.function.cmp(&y.function))
+        });
+        changes
+    };
+    let own = changes_of(&before.own, &after.own);
+    let inclusive = changes_of(&before.every, &after.every);
+
+    let mut unnamed: BTreeMap<(Identity, Option<String>), Unnamed> = BTreeMap::new();
+    for change in own.iter().filter(|change| !change.comparable) {
+        let entry = unnamed
+            .entry((change.identity, change.object.clone()))
+            .or_insert_with(|| Unnamed {
+                identity: change.identity,
+                object: change.object.clone(),
+                rows: 0,
+                before: 0.0,
+                after: 0.0,
+                before_share: 0.0,
+                after_share: 0.0,
+                remedy: match change.identity {
+                    Identity::Offset => {
+                        let id = |profile: &Profile| -> Option<String> {
+                            change
+                                .object
+                                .as_ref()
+                                .and_then(|object| profile.build_ids.get(object))
+                                .filter(|id| !id.is_empty())
+                                .cloned()
+                        };
+                        match (id(&merged_before), id(&merged_after)) {
+                            (Some(_), Some(_)) => "the two sides mapped two builds of the \
+                                                   file, so an offset in it is not the same \
+                                                   code in both"
+                                .to_owned(),
+                            _ => format!(
+                                "an offset into a file with no build id recorded on both sides \
+                                 (a run written before omn recorded them, or a file it could not \
+                                 read): whether it is the same code in both is not known; {}",
+                                Identity::Offset.remedy()
+                            ),
+                        }
+                    }
+                    identity => identity.remedy().to_owned(),
+                },
+            });
+        entry.rows += 1;
+        entry.before += change.before;
+        entry.after += change.after;
+        entry.before_share += change.before_share;
+        entry.after_share += change.after_share;
+    }
+    let mut unnamed: Vec<Unnamed> = unnamed.into_values().collect();
+    unnamed.sort_by(|x, y| {
+        (y.before + y.after)
+            .total_cmp(&(x.before + x.after))
+            .then_with(|| x.identity.cmp(&y.identity))
+    });
+    let offsets: usize = own
+        .iter()
+        .filter(|change| change.comparable && change.identity == Identity::Offset)
+        .count();
+    if offsets > 0 {
+        notes.push(format!(
+            "{offsets} row(s) are offsets into a file with no symbol for them, the same build on \
+             both sides: comparable, but each is one instruction, and one function with no \
+             symbol is several rows; `--symbols debuginfod` names them where the distribution \
+             publishes debug files"
+        ));
+    }
+    let hidden_before: f64 = unnamed.iter().map(|one| one.before_share).sum();
+    let hidden_after: f64 = unnamed.iter().map(|one| one.after_share).sum();
+    if hidden_before > 0.0 || hidden_after > 0.0 {
+        notes.push(format!(
+            "{:.1} % of the samples before and {:.1} % after are charged to code with no stable \
+             name ({}): their rows are listed and in no verdict, since an address names nothing \
+             another process holds",
+            hidden_before * 100.0,
+            hidden_after * 100.0,
+            unnamed
+                .iter()
+                .map(|one| one.identity.as_str())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    let rare: usize = own
+        .iter()
+        .filter(|change| change.comparable && change.significant && change.few_samples)
+        .count();
+    if rare > 0 {
+        notes.push(format!(
+            "{rare} function(s) moved beyond the noise with fewer than {FEW_SAMPLES:.0} samples a \
+             run on both sides: listed, and in no verdict, since a count that small is known to \
+             a third at best"
+        ));
+    }
     let difference: Vec<String> = own
         .iter()
-        .filter(|change| change.significant)
+        .filter(|change| change.significant && change.comparable && !change.few_samples)
         .map(|change| change.function.clone())
         .collect();
-    let sentence = describe(&own, &difference, &unit);
-    Diff {
-        before,
-        after,
+    let sentence = describe(
+        &own,
+        &difference,
         unit,
-        scale: scale_after / scale_before,
+        confidence,
+        before.len(),
+        after.len(),
+    );
+    let denominator = format!(
+        "a sample is a period of on-cpu time of one of the target's threads, so the totals are \
+         cpu summed over every sampled thread -- not wall-clock time, not GPU time -- and a \
+         share is of the profile's samples{}. Own cost is the sample's function's alone; an \
+         inclusive cost includes its callees' and does not add up across callers and callees. \
+         Sampling counts how often a function was on the cpu, not how long one call took",
+        if unit == "ns" || known.is_some() {
+            ""
+        } else {
+            "; with no sampling rate known, no time is estimated"
+        }
+    );
+    Diff {
+        scale: after.scales[0] / before.scales[0],
+        runs_before: before.len(),
+        runs_after: after.len(),
+        before: merged_before,
+        after: merged_after,
+        unit: unit.to_owned(),
+        denominator,
+        confidence,
         own,
         inclusive,
+        unnamed,
         difference,
         sentence,
         notes,
@@ -408,55 +1161,34 @@ fn frames_by(profile: &Profile, scale: f64, frames: Frames) -> BTreeMap<String, 
     by
 }
 
-fn changes(
-    before: &BTreeMap<String, f64>,
-    after: &BTreeMap<String, f64>,
-    scale_before: f64,
-    scale_after: f64,
-) -> Vec<Change> {
-    let names: BTreeSet<&String> = before.keys().chain(after.keys()).collect();
-    let mut changes: Vec<Change> = names
-        .into_iter()
-        .map(|name| {
-            let a = before.get(name).copied().unwrap_or(0.0);
-            let b = after.get(name).copied().unwrap_or(0.0);
-            // The variance of a count is the count; of a count times a
-            // period, the count times the period squared.
-            let variance = a * scale_before + b * scale_after;
-            let sigmas = if variance > 0.0 {
-                (b - a).abs() / variance.sqrt()
-            } else {
-                0.0
-            };
-            Change {
-                function: name.clone(),
-                before: a,
-                after: b,
-                delta: b - a,
-                ratio: (a > 0.0).then(|| b / a),
-                sigmas,
-                significant: sigmas > SIGMAS,
-            }
-        })
-        .collect();
-    changes.sort_by(|x, y| {
-        y.delta
-            .abs()
-            .total_cmp(&x.delta.abs())
-            .then_with(|| x.function.cmp(&y.function))
-    });
-    changes
-}
-
-fn describe(own: &[Change], difference: &[String], unit: &str) -> String {
+fn describe(
+    own: &[Change],
+    difference: &[String],
+    unit: &str,
+    confidence: Confidence,
+    runs_before: usize,
+    runs_after: usize,
+) -> String {
     let amount = |value: f64| match unit {
         "ns" => super::span(value),
         _ => format!("{value:+.0} samples"),
     };
+    let against = match confidence {
+        Confidence::BetweenRuns => format!(
+            "across {runs_before} run(s) before and {runs_after} after, weighed against how \
+             much the runs differ"
+        ),
+        Confidence::WithinOneRun => {
+            "within one run a side: a count's own noise, not how much two runs of the program \
+             differ"
+                .to_owned()
+        }
+    };
     match difference {
         [] => format!(
-            "no function's own cost moved beyond {SIGMAS} standard deviations of the noise a \
-             sample count has: the two profiles are the same program, as far as this can tell"
+            "no comparable function's own cost moved beyond {SIGMAS} {} ({against}): the two \
+             profiles are the same program, as far as this can tell",
+            confidence.says()
         ),
         names => {
             let first = own
@@ -467,18 +1199,26 @@ fn describe(own: &[Change], difference: &[String], unit: &str) -> String {
                 .ratio
                 .map_or("new".to_owned(), |ratio| format!("x{ratio:.2}"));
             let rest = match names.len() {
-                1 => "; every other function moved within its noise".to_owned(),
+                1 => "; every other comparable function moved within its noise".to_owned(),
                 n => format!(
                     "; {} other function(s) moved beyond the noise as well: {}",
                     n - 1,
-                    names[1..].join(", ")
+                    names[1..]
+                        .iter()
+                        .map(|name| format!("`{}`", short_name(name)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ),
             };
             format!(
-                "the difference is `{}`: {} of its own ({ratio}, {:.1} standard deviations){rest}",
-                first.function,
+                "the difference is `{}`: {} of its own a run ({ratio}, {:.1} {}; {against}){rest}",
+                short_name(&first.function),
                 amount(first.delta),
-                first.sigmas
+                first.sigmas,
+                match confidence {
+                    Confidence::BetweenRuns => "standard errors",
+                    Confidence::WithinOneRun => "standard deviations",
+                },
             )
         }
     }
@@ -486,7 +1226,7 @@ fn describe(own: &[Change], difference: &[String], unit: &str) -> String {
 
 impl Diff {
     /// The three-column collapsed file differential flame graphs are drawn
-    /// from: `root;...;leaf before after`.
+    /// from: `root;...;leaf before after`, each a mean per run.
     pub fn folded(&self) -> String {
         let names: BTreeSet<&String> = self
             .before
@@ -513,12 +1253,23 @@ impl Diff {
         );
         let _ = writeln!(
             out,
-            "  {} samples before, {} after, compared in {}",
+            "  {} run(s) before, {} after; {} samples a run before, {} after, compared in {}",
+            self.runs_before,
+            self.runs_after,
             self.before.total().round(),
             self.after.total().round(),
             self.unit
         );
+        for (which, profile) in [("before", &self.before), ("after", &self.after)] {
+            if let Some(cost) = &profile.collector_cost {
+                let _ = writeln!(out, "  collector, {which}: {cost}");
+            }
+        }
         let _ = writeln!(out, "\n  {}\n", self.sentence);
+        let timed = self
+            .own
+            .iter()
+            .any(|change| change.before_ns.is_some() || change.after_ns.is_some());
         for (title, changes) in [
             (
                 if self.before.perf_map.symbols.is_empty() && self.after.perf_map.symbols.is_empty()
@@ -529,27 +1280,49 @@ impl Diff {
                 },
                 &self.own,
             ),
-            ("inclusive", &self.inclusive),
+            ("inclusive (not additive)", &self.inclusive),
         ] {
             let _ = writeln!(out, "  {title}");
             let _ = writeln!(
                 out,
-                "    {:<40} {:>10} {:>10} {:>10} {:>7} {:>7}",
-                "FUNCTION", "BEFORE", "AFTER", "DELTA", "RATIO", "SIGMA"
+                "    {:<40} {:>9} {:>9} {:>9} {:>13} {:>10} {:>6} {:>6}",
+                "FUNCTION",
+                "BEFORE",
+                "AFTER",
+                "DELTA",
+                "SHARE",
+                if timed { "CPU AFTER" } else { "" },
+                "RATIO",
+                "SIGMA"
             );
             for change in changes.iter().take(top) {
+                let flags = format!(
+                    "{}{}{}",
+                    if change.significant && change.comparable && !change.few_samples {
+                        " *"
+                    } else {
+                        ""
+                    },
+                    if change.few_samples { " ~" } else { "" },
+                    if change.comparable { "" } else { " ?" },
+                );
                 let _ = writeln!(
                     out,
-                    "    {:<40} {:>10.0} {:>10.0} {:>+10.0} {:>7} {:>6.1}{}",
+                    "    {:<40} {:>9.0} {:>9.0} {:>+9.0} {:>13} {:>10} {:>6} {:>6.1}{flags}",
                     truncate(&change.function, 40),
                     change.before,
                     change.after,
                     change.delta,
+                    format!(
+                        "{:.1}%->{:.1}%",
+                        change.before_share * 100.0,
+                        change.after_share * 100.0
+                    ),
+                    change.after_ns.map_or(String::new(), super::span),
                     change
                         .ratio
                         .map_or("new".to_owned(), |ratio| format!("{ratio:.2}")),
                     change.sigmas,
-                    if change.significant { " *" } else { "" }
                 );
             }
             if changes.len() > top {
@@ -557,20 +1330,77 @@ impl Diff {
             }
             let _ = writeln!(out);
         }
+        if !self.unnamed.is_empty() {
+            let _ = writeln!(out, "  code with no stable name (in no verdict)");
+            let _ = writeln!(
+                out,
+                "    {:<24} {:<22} {:>5} {:>9} {:>9} {:>13}",
+                "WHAT", "OBJECT", "ROWS", "BEFORE", "AFTER", "SHARE"
+            );
+            for one in self.unnamed.iter().take(top) {
+                let _ = writeln!(
+                    out,
+                    "    {:<24} {:<22} {:>5} {:>9.0} {:>9.0} {:>13}",
+                    one.identity.as_str(),
+                    truncate(one.object.as_deref().unwrap_or("-"), 22),
+                    one.rows,
+                    one.before,
+                    one.after,
+                    format!(
+                        "{:.1}%->{:.1}%",
+                        one.before_share * 100.0,
+                        one.after_share * 100.0
+                    ),
+                );
+            }
+            for remedy in self
+                .unnamed
+                .iter()
+                .map(|one| one.remedy.as_str())
+                .collect::<BTreeSet<_>>()
+            {
+                let _ = writeln!(out, "    - {remedy}");
+            }
+            let _ = writeln!(out);
+        }
+        let _ = writeln!(out, "  * beyond {SIGMAS} {}", self.confidence.says());
         let _ = writeln!(
             out,
-            "  * beyond {SIGMAS} standard deviations of the noise a sample count has"
+            "  ~ fewer than {FEW_SAMPLES:.0} samples a run on both sides: listed, not ranked"
         );
-        for note in self
-            .notes
-            .iter()
-            .chain(&self.before.notes)
-            .chain(&self.after.notes)
-        {
+        let _ = writeln!(
+            out,
+            "  ? not the same code in both: an address or an offset with no stable name"
+        );
+        let _ = writeln!(out, "  what the numbers are: {}", self.denominator);
+        for note in &self.notes {
             let _ = writeln!(out, "  note: {note}");
+        }
+        // Each side's own notes, said once when both sides say the same.
+        for note in &self.before.notes {
+            if self.after.notes.contains(note) {
+                let _ = writeln!(out, "  note: {note}");
+            } else {
+                let _ = writeln!(out, "  note (before): {note}");
+            }
+        }
+        for note in &self.after.notes {
+            if !self.before.notes.contains(note) {
+                let _ = writeln!(out, "  note (after): {note}");
+            }
         }
         out
     }
+}
+
+/// A function's name as a sentence says it: cut, since a C++ template's
+/// can run to a page; the tables and the document keep it whole.
+fn short_name(name: &str) -> String {
+    const LONGEST: usize = 100;
+    if name.chars().count() <= LONGEST {
+        return name.to_owned();
+    }
+    truncate(name, LONGEST)
 }
 
 fn truncate(text: &str, width: usize) -> String {
@@ -1249,6 +2079,179 @@ mod tests {
         let diff = diff(before, after);
         assert_eq!(diff.unit, "ns");
         assert_eq!(diff.difference, ["b"], "{}", diff.sentence);
+    }
+
+    /// Each label's identity, as `stack::Frame::label` writes them.
+    #[test]
+    fn a_label_says_whether_another_run_can_hold_the_same_code() {
+        assert_eq!(identity_of("main"), Identity::Symbol);
+        assert_eq!(identity_of("py::score:/tmp/hot.py"), Identity::Symbol);
+        assert_eq!(identity_of("operator+(a, b)"), Identity::Symbol);
+        assert_eq!(identity_of("xla::Copy [recovered]"), Identity::Symbol);
+        assert_eq!(identity_of("libc.so.6+0x176529"), Identity::Offset);
+        assert_eq!(identity_of("[vdso]+0x9c0"), Identity::Offset);
+        assert_eq!(identity_of("0x7f0ebc090000+0x60"), Identity::Anonymous);
+        assert_eq!(identity_of("[anon:v8]+0x10"), Identity::Anonymous);
+        assert_eq!(identity_of("0xffffffffba9162b7"), Identity::KernelHidden);
+        assert_eq!(identity_of("0x55d0c0de"), Identity::Unmapped);
+    }
+
+    /// The Qwen investigation's diff: a withheld kernel address and an
+    /// anonymous JIT address moved most, and a named function moved too. The
+    /// verdict names the function; the addresses are counted apart.
+    #[test]
+    fn an_address_with_no_stable_name_is_in_no_verdict() {
+        let before = profile(
+            "main;0xffffffffba9162b7 6553\nmain;0x7f0ebc090000+0x60 480\nmain;copy 900\nmain;dot 2000\n",
+        );
+        let after = profile(
+            "main;0xffffffffba9162b7 4676\nmain;0x7fbfb0196000+0x60 392\nmain;copy 10\nmain;dot 2000\n",
+        );
+        let diff = diff(before, after);
+        assert_eq!(diff.difference, ["copy"], "{}", diff.sentence);
+        let kernel = diff
+            .own
+            .iter()
+            .find(|change| change.function == "0xffffffffba9162b7")
+            .unwrap();
+        assert!(!kernel.comparable && kernel.significant);
+        let identities: Vec<Identity> = diff.unnamed.iter().map(|one| one.identity).collect();
+        assert!(
+            identities.contains(&Identity::KernelHidden),
+            "{identities:?}"
+        );
+        assert!(identities.contains(&Identity::Anonymous), "{identities:?}");
+        assert!(
+            diff.notes
+                .iter()
+                .any(|note| note.contains("no stable name")),
+            "{:?}",
+            diff.notes
+        );
+    }
+
+    /// An offset is the same code in two runs when both mapped the same
+    /// build of its file, and not otherwise.
+    #[test]
+    fn an_offset_is_comparable_only_into_the_same_build() {
+        let lines_before = "main;libfoo.so+0x10 100\nmain;bar 100\n";
+        let lines_after = "main;libfoo.so+0x10 400\nmain;bar 100\n";
+        let built = |lines: &str, id: &str| {
+            let mut profile = profile(lines);
+            profile
+                .build_ids
+                .insert("libfoo.so".to_owned(), id.to_owned());
+            profile
+        };
+        let same = diff(built(lines_before, "aa"), built(lines_after, "aa"));
+        assert_eq!(same.difference, ["libfoo.so+0x10"], "{}", same.sentence);
+        let two = diff(built(lines_before, "aa"), built(lines_after, "bb"));
+        assert!(two.difference.is_empty(), "{}", two.sentence);
+        let none = diff(profile(lines_before), profile(lines_after));
+        assert!(none.difference.is_empty(), "{}", none.sentence);
+        assert!(
+            none.unnamed[0].remedy.contains("no build id"),
+            "{:?}",
+            none.unnamed
+        );
+    }
+
+    /// A function sampled a handful of times is listed and not ranked.
+    #[test]
+    fn a_rarely_sampled_function_is_not_given_a_precision_it_lacks() {
+        let diff = diff(profile("a 1000\nb 0\n"), profile("a 1000\nb 9.6\n"));
+        let b = diff
+            .own
+            .iter()
+            .find(|change| change.function == "b")
+            .unwrap();
+        assert!(b.few_samples && b.significant, "{b:?}");
+        assert!(diff.difference.is_empty(), "{}", diff.sentence);
+    }
+
+    /// Shares and absolute weights are both kept: a share that grew is not a
+    /// cost that grew.
+    #[test]
+    fn a_share_is_kept_beside_the_absolute_weight() {
+        let diff = diff(profile("a 100\nb 100\n"), profile("a 100\nb 300\n"));
+        let a = diff
+            .own
+            .iter()
+            .find(|change| change.function == "a")
+            .unwrap();
+        assert_eq!((a.before, a.after), (100.0, 100.0));
+        assert!((a.before_share - 0.5).abs() < 1e-9 && (a.after_share - 0.25).abs() < 1e-9);
+        assert!(!a.significant);
+        assert_eq!(diff.difference, ["b"]);
+    }
+
+    /// Where the period is known, each row says the on-cpu time its samples
+    /// stand for.
+    #[test]
+    fn a_known_rate_gives_each_row_its_time() {
+        let timed = |lines: &str| {
+            let mut profile = profile(lines);
+            profile.period_ns = Some(1e6);
+            profile
+        };
+        let diff = diff(timed("a 100\n"), timed("a 300\n"));
+        assert_eq!(diff.own[0].before_ns, Some(100e6));
+        assert_eq!(diff.own[0].after_ns, Some(300e6));
+    }
+
+    /// With two or more runs a side, a difference is weighed against how
+    /// much the runs differ: a function whose count swings run to run by more
+    /// than the change is not the difference, though each single pair of
+    /// runs would call it one.
+    #[test]
+    fn several_runs_a_side_are_weighed_against_their_own_spread() {
+        let runs = |counts: &[u32]| -> Vec<Profile> {
+            counts
+                .iter()
+                .map(|count| profile(&format!("main;steady 1000\nmain;noisy {count}\n")))
+                .collect()
+        };
+        let swinging = diff_runs(runs(&[200, 600, 300]), runs(&[700, 250, 650]));
+        assert_eq!(swinging.confidence, Confidence::BetweenRuns);
+        assert!(swinging.difference.is_empty(), "{}", swinging.sentence);
+        let noisy = swinging
+            .own
+            .iter()
+            .find(|change| change.function == "noisy")
+            .unwrap();
+        assert!(noisy.before_spread.is_some() && noisy.after_spread.is_some());
+        // The same means, one run a side: the counts' own noise calls it.
+        let single = diff(
+            profile("main;steady 1000\nmain;noisy 367\n"),
+            profile("main;steady 1000\nmain;noisy 533\n"),
+        );
+        assert_eq!(single.confidence, Confidence::WithinOneRun);
+        assert_eq!(single.difference, ["noisy"], "{}", single.sentence);
+        // And a change larger than the spread is one.
+        let grown = diff_runs(runs(&[300, 310, 295]), runs(&[600, 590, 610]));
+        assert_eq!(grown.difference, ["noisy"], "{}", grown.sentence);
+        assert!(
+            grown.sentence.contains("3 run(s) before"),
+            "{}",
+            grown.sentence
+        );
+    }
+
+    /// A side's runs are read from a repeated run's directory, `run-1` ...
+    #[test]
+    fn a_repeated_run_s_directory_is_one_side() {
+        let dir = std::env::temp_dir().join(format!("omn-diff-repeat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for (index, weight) in [(1, 100), (2, 110)] {
+            let run = dir.join(format!("run-{index}"));
+            std::fs::create_dir_all(&run).unwrap();
+            std::fs::write(run.join("results.folded"), format!("main;a {weight}\n")).unwrap();
+        }
+        std::fs::write(dir.join("repeat.json"), "{}").unwrap();
+        let runs = Profile::load_runs(&dir).unwrap();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[1].stacks["main;a"], 110.0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

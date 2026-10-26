@@ -1,59 +1,58 @@
-# Brief — the kernels without BTF: the classic tracepoints, through a perf event array
+# Brief — a profile's functions compared across runs, by what their names allow
 
-The twenty-seventh wave: **serve the two root cells the twenty-sixth wave left
-structural** (`docs/distroproof.md`, "After the twenty-sixth wave's
-follow-up"). Debian 10 runs 4.19, with no kernel BTF; Ubuntu 20.04 runs 5.4,
-whose BTF declares no `btf_trace_*` types, so no raw tracepoint can be checked
-or attached by type. Neither has the BPF ring buffer (5.8). As root, both load
-eBPF programs; every source whose only viable backend there was `bpf:tp` read
-"out of reach" for the build's reason, because no collector was written for
-the classic road.
+The twenty-eighth wave, from a request a campaign wrote (ZML's, 26 October
+2026, `NOTE-OMN-COUT-FONCTIONS.md` beside the checkouts): from a versioned
+session and two kept runs, answer *which functions cost most, which changed,
+and with what confidence*. `cpu.profile` and `omn diff` existed and had
+already found a real cost (`CopyThunk` in Qwen's decoding, a 16.5 % gain
+confirmed without the collector); what the campaign's real profiles showed
+was a restitution gap, not a profiler one:
 
-Run autonomously on 2026-10-26, after the user's *"va aussi loin que tu
-peux"*, in one worktree (`omniscient-claude`, branch `claude/w27`), one stream
-after another, each verified under `distroproof run` on both kernels before
-its commit. Not launched as parallel streams: each step needed the one before
-it.
+- the verdict's first row was a kernel address `kptr_restrict` withheld;
+- one libc function with no symbol was four rows, one per instruction;
+- a JIT's code, unnamed, was a set of addresses that changed between
+  processes, and read as functions that vanished and appeared;
+- the confidence was a Poisson count of one run's samples, read as if it
+  said something about two independent runs.
+
+Run autonomously on 2026-10-26, in one worktree (`claude/w28`).
 
 ## What it built
 
-1. **The transport** (`src/bpf/transport.rs`): the ring buffer where the
-   kernel creates one, a `BPF_MAP_TYPE_PERF_EVENT_ARRAY` with one mmap'd ring
-   per cpu otherwise, merged by the record's stamp at the drain.
-2. **The classic record** (`context::Record`): a tracepoint's fields at the
-   offsets `format` gives, read in place where aligned and through a probe
-   read otherwise; `__data_loc` strings.
-3. **The classic follower** (`sched_common::Descendants`): `task_newtask` and
-   `sched_process_free`, with a threads map, where the raw pair is missing.
-4. **The old kernels' walls**: `bpf_probe_read` in place of the `_kernel` and
-   `_user` read helpers before 5.5, `LOOKUP_AND_DELETE` on a hash before 5.14,
-   the memlock limit raised whenever a large map is refused, and a load
-   retried without a verifier log when 4.19's log fills.
-5. **The collectors**, by family: `proc` (calls, exec, exit, signals,
-   syscall), `sched` (wakeup, runqlat, offcpu with and without stacks, futex,
-   migrations, switches, irq, numa_balance), `io` (queue, size, latency,
-   writeback, syscall), `mem` (kmalloc, page_alloc, reclaim, compaction),
-   `net` (softirq, drops, retransmit, lifetime, connect), `power.cstate`,
-   `cpu.oncpu_time`.
-6. **The catalog**: each `bpf:tp` row equivalent or degraded by what its
-   record carries (`docs/DECISIONS.md`, "Settled in the twenty-seventh wave"),
-   the `follower` requirement, and the ring-buffer requirements no program had.
+1. **Identity** (`triage::diff::Identity`): symbol, offset, anonymous,
+   withheld kernel address, unmapped. A row is comparable when it is a symbol,
+   or an offset into a file both runs mapped in the same build -- which each
+   run now records, `stack::Provenance::build_ids`, filled by `cpu.profile`.
+   Only comparable rows are in the verdict; the others are summed by what they
+   lack (`Diff::unnamed`), with what would name them and the share they hold.
+2. **Runs, not one run** (`triage::diff::diff_runs`): a side is one run, a
+   repeated run (`-r N`'s directory or `repeat.json`), or several
+   (`--before`, `--after`). Two or more a side: Welch's standard error between
+   the runs, floored at the counts' own noise (`Confidence::BetweenRuns`).
+   `-r N` accepts a session whose requests emit stacks.
+3. **What the numbers are**: each row's share beside its absolute weight, the
+   on-cpu time its samples stand for (where the rate is known), the spread
+   across runs, `few_samples` under ten a run (listed, not ranked), and a
+   `denominator` sentence: on-cpu time summed over the target's threads, not
+   wall clock, not GPU; inclusive costs do not add up; sampling is not a
+   duration per call.
+4. **Each run's frame**: its `--window`, from `resolved.json` (two windows
+   said), and its collector's measured cost, from `cost.json`.
 
 ## What it measured
 
-Usable sources, of 123, as root under `distroproof run`: **Debian 10, 58 to
-74; Ubuntu 20.04, 64 to 86**. On this machine, 186 of 244 backends have a
-collector (152 of 242 before). Ground truth on both kernels: `net.softirq`'s
-runs are `/proc/softirqs`' to the run (72 of 72, 79 of 79); `cpu.oncpu_time`
-holds a launched spin to its reap within 20 us; `io.syscall` counts `dd`'s 300
-records as 606 calls; `net.tcp.connect` sees 3 established and 2 refused, as
-sent; `net.tcp.retransmit` sees the resends netem forced.
+The fixture's `diff` mode, with a new `waits` that sleeps as long as each
+function runs: `waits` is charged no cpu; `beta` doubled is the only
+difference; stripped, `beta`'s offsets are the difference, compared by the
+program's build id; three runs a side are weighed between runs. On ZML's two
+Qwen profiles, the verdict moved from `0xffffffffba9162b7` to
+`ynn::dot_bf16_bf16_fp32_5x16x1...`, and 85.6 % / 80.9 % of the samples are
+said to be code with no stable name (37.7 % withheld kernel, 34.7 % JIT, 13.2 %
+libc offsets with no build id in those older runs).
 
 ## Left, and why
 
-`net.qdisc`, `sched.lock`'s tracepoints, `io.pagecache` and `io.readahead`
-need tracepoints these kernels do not define; `sched.slices` reads the
-kernel's `sched_info` stamps, which only BTF reaches; `power.freq` and
-`power.throttle` have nothing to be checked against in a guest. The matrix
-sweep of every cell with this wave's binary is `docs/dev/STATE.md`'s first
-item after it.
+A duration per call is another source (USDT, uprobes, spans), with its own
+recursion, threads, lost calls and cost: not `cpu.profile`'s. Grouping an
+unsymbolized function's instructions into one row needs a symbol table the
+file does not have: `--symbols debuginfod` is the road, and the note says so.

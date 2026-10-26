@@ -1079,6 +1079,8 @@ impl Collector for ProfileCollector {
     fn provenance(&self) -> crate::stack::Provenance {
         let mut named_by = BTreeMap::new();
         let mut objects = BTreeMap::new();
+        let mut build_ids: BTreeMap<String, String> = BTreeMap::new();
+        let mut looked_up: BTreeSet<String> = BTreeSet::new();
         for (run_id, (pid, local)) in self.stack_origins.iter().enumerate() {
             let Some(stack) = self
                 .unwinders
@@ -1089,6 +1091,24 @@ impl Collector for ProfileCollector {
             };
             named_by.insert(run_id as u64, stack.named_by_root_first());
             objects.insert(run_id as u64, stack.objects_root_first());
+            // Each mapped file's build id, read once: through the process's
+            // own root first, which is the file it mapped where the two
+            // mount namespaces differ.
+            for frame in &stack.frames {
+                let (Some(module), Some(object)) = (&frame.module, frame.object()) else {
+                    continue;
+                };
+                if !module.starts_with('/') || !looked_up.insert(module.clone()) {
+                    continue;
+                }
+                let id = crate::stack::build_id_of(std::path::Path::new(&format!(
+                    "/proc/{pid}/root{module}"
+                )))
+                .or_else(|| crate::stack::build_id_of(std::path::Path::new(module)));
+                if let Some(id) = id {
+                    build_ids.entry(object).or_insert(id);
+                }
+            }
         }
         // The unwinders' own: the perf map each read, with the file's device
         // and inode, and the file each process executes as last read -- after
@@ -1111,6 +1131,7 @@ impl Collector for ProfileCollector {
             perf_maps,
             executables,
             objects,
+            build_ids,
         }
     }
 

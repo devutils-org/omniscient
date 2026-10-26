@@ -15,7 +15,8 @@
  *   workload tail COUNTER EVERY MS BLOCK_MS
  *                                      spin MS; every EVERY-th run also sleep BLOCK_MS
  *   workload queue THREADS MS          THREADS threads spin MS each, all on one cpu
- *   workload diff FACTOR               four functions of equal cost, `beta` FACTOR times
+ *   workload diff FACTOR               four functions of equal cost, `beta` FACTOR times,
+ *                                      and `waits`, which sleeps 150 ms
  *   workload phases MS N HOLD_US LOG   spin MS, then the lock mode's N acquisitions,
  *                                      each written to LOG as `start_ns wait_ns`
  *   workload child MS DEPTH            start a child and wait for it in waitpid; the
@@ -401,6 +402,13 @@ __attribute__((noinline)) static void alpha(void) { sink ^= work(UNITS); }
 __attribute__((noinline)) static void beta(void) { sink ^= work(UNITS); }
 __attribute__((noinline)) static void gamma_(void) { sink ^= work(UNITS); }
 __attribute__((noinline)) static void delta(void) { sink ^= work(UNITS); }
+/* And one that waits as long as one of them runs: off the cpu, so in no
+ * sample of a cpu profile, whatever its wall-clock time. */
+__attribute__((noinline)) static void waits(void)
+{
+	struct timespec pause = { .tv_sec = 0, .tv_nsec = 150 * 1000 * 1000 };
+	nanosleep(&pause, NULL);
+}
 
 static int mode_diff(int factor)
 {
@@ -410,6 +418,7 @@ static int mode_diff(int factor)
 		beta();
 	gamma_();
 	delta();
+	waits();
 	char extra[32];
 	snprintf(extra, sizeof extra, "beta_factor=%d", factor);
 	truth("diff", start, extra);

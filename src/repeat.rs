@@ -58,13 +58,15 @@ pub fn refusal(session: &crate::request::Session, repeat: u32) -> Option<String>
                 .to_owned(),
         );
     }
-    let summarized = session
-        .requests
-        .iter()
-        .any(|request| request.emit.contains(&crate::request::Emit::Summary));
-    (repeat > 1 && !summarized).then(|| {
+    // A profile is read across runs by `omn diff`, which takes a repeated
+    // run's directory as one side: its runs' stacks are what it compares.
+    let read_across = session.requests.iter().any(|request| {
+        request.emit.contains(&crate::request::Emit::Summary)
+            || request.emit.contains(&crate::request::Emit::Stack)
+    });
+    (repeat > 1 && !read_across).then(|| {
         "-r reports each summary value's mean and spread across the runs, and no request asks \
-         for a summary: add `-e summary`"
+         for a summary, nor for the stacks `omn diff` compares across runs: add `-e summary`"
             .to_owned()
     })
 }
@@ -179,6 +181,13 @@ pub fn text(repeat: u32, spread: &[Spread], lossy: &[usize]) -> String {
             number(one.stddev),
             number(one.min),
             number(one.max),
+        );
+    }
+    if spread.is_empty() {
+        let _ = writeln!(
+            out,
+            "  no request asked for a summary; each run's stacks are in its own results, and \
+             `omn diff` compares two repeated runs' directories run against run"
         );
     }
     if !lossy.is_empty() {

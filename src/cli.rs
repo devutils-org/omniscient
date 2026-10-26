@@ -583,13 +583,26 @@ pub struct SaturateArgs {
 /// `omn diff`: a differential profile.
 #[derive(Debug, Args)]
 pub struct DiffArgs {
-    /// The profile before: a run's `-o DIR`, its results.json, or a folded file.
+    /// The profile before: a run's `-o DIR`, its results.json, or a folded
+    /// file -- or a repeated run's (`-r N`) directory or `repeat.json`, whose
+    /// runs are then one side, weighed against how much they differ.
     #[arg(value_name = "BEFORE")]
     pub before: PathBuf,
 
-    /// The profile after, in any of the same three shapes.
+    /// The profile after, in any of the same shapes.
     #[arg(value_name = "AFTER")]
     pub after: PathBuf,
+
+    /// One more run on the before side, in any of the same shapes:
+    /// repeatable. With two or more runs a side, a difference is weighed
+    /// against how much each side's runs differ, not against one run's
+    /// sample counts.
+    #[arg(long = "before", value_name = "RUN")]
+    pub more_before: Vec<PathBuf>,
+
+    /// One more run on the after side: repeatable, as `--before`.
+    #[arg(long = "after", value_name = "RUN")]
+    pub more_after: Vec<PathBuf>,
 
     /// Output format: text, json, or folded -- the three-column
     /// `stack before after` file differential flame graphs are drawn from.

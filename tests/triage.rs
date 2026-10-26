@@ -1438,6 +1438,29 @@ fn the_function_whose_cost_doubled_is_the_only_difference() {
         "beta's cost should double: x{ratio}"
     );
 
+    // `waits` sleeps as long as each of the four runs, and a cpu profile
+    // charges it nothing: the time it spent was not on a cpu.
+    let waits = doubled["own"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|change| change["function"] == "waits");
+    assert!(
+        waits.is_none_or(|waits| {
+            waits["before"].as_f64().unwrap() < 10.0 && waits["after"].as_f64().unwrap() < 10.0
+        }),
+        "a function that sleeps is charged cpu: {waits:?}"
+    );
+    // Each row says its share, its time and what its name allows.
+    assert!(beta["after_share"].as_f64().unwrap() > beta["before_share"].as_f64().unwrap());
+    assert!(beta["after_ns"].as_f64().is_some(), "{beta:#}");
+    assert_eq!(beta["identity"], "symbol");
+    assert!(doubled["denominator"]
+        .as_str()
+        .unwrap()
+        .contains("not wall-clock time"));
+    assert_eq!(doubled["confidence"], "within_one_run");
+
     let unchanged = diff(&once, &again);
     assert_eq!(
         unchanged["difference"],
@@ -1469,6 +1492,140 @@ fn the_function_whose_cost_doubled_is_the_only_difference() {
         .map(|w| w.parse().unwrap())
         .collect();
     assert!(weights[0] > weights[1] * 1.5, "{line}");
+}
+
+/// Profiles `workload` at 997 Hz with `extra` arguments, into `out`; `None`,
+/// having said why, where this machine does not profile.
+fn profiled(workload: &Path, out: &Path, extra: &[&str], program: &[&str]) -> Option<()> {
+    let mut args = vec![
+        "cpu.profile",
+        "-m",
+        "sample@997hz",
+        "-e",
+        "stack",
+        "--stack",
+        "fp",
+        "--format",
+        "json",
+        "-o",
+        out.to_str().unwrap(),
+    ];
+    args.extend_from_slice(extra);
+    args.push("--");
+    args.push(workload.to_str().unwrap());
+    args.extend_from_slice(program);
+    let output = omn(&args);
+    let text = spoken(&output);
+    if !output.status.success()
+        && (text.contains("CAP_PERFMON") || text.contains("has no viable backend on this machine"))
+    {
+        eprintln!("skipped: this machine does not profile here: {text}");
+        return None;
+    }
+    assert!(output.status.success(), "{text}");
+    Some(())
+}
+
+fn diffed(args: &[&str]) -> Value {
+    let mut all = vec!["diff", "--format", "json"];
+    all.extend_from_slice(args);
+    let output = omn(&all);
+    assert!(output.status.success(), "{}", spoken(&output));
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+/// A program with no symbols: each function is an offset into its file,
+/// one instruction a row. The two runs mapped the same build -- the build id
+/// each recorded says so -- so the offsets are the same code in both, and the
+/// difference is offsets into the program, compared and named by its file.
+#[test]
+fn a_stripped_program_s_offsets_are_compared_by_its_build_id() {
+    let workload = needs_fixture!();
+    let _alone = one_at_a_time();
+    let dir = scratch("diff-stripped");
+    let stripped = dir.join("workload-stripped");
+    let status = Command::new("strip")
+        .arg("-s")
+        .arg("-o")
+        .arg(&stripped)
+        .arg(&workload)
+        .status();
+    if !status.is_ok_and(|status| status.success()) {
+        eprintln!("skipped: no `strip` to make a program with no symbols");
+        return;
+    }
+    let (once, twice) = (dir.join("once"), dir.join("twice"));
+    if profiled(&stripped, &once, &[], &["diff", "1"]).is_none()
+        || profiled(&stripped, &twice, &[], &["diff", "3"]).is_none()
+    {
+        return;
+    }
+    let doubled = diffed(&[once.to_str().unwrap(), twice.to_str().unwrap()]);
+    let difference = doubled["difference"].as_array().unwrap();
+    assert!(!difference.is_empty(), "{doubled:#}");
+    for name in difference {
+        let change = doubled["own"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|change| &change["function"] == name)
+            .unwrap();
+        assert_eq!(change["identity"], "offset", "{change:#}");
+        assert_eq!(change["object"], "workload-stripped", "{change:#}");
+        assert!(change["build_id"].as_str().is_some(), "{change:#}");
+        assert_eq!(change["comparable"], true, "{change:#}");
+    }
+    assert!(
+        doubled["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|note| note.as_str().unwrap().contains("debuginfod")),
+        "{doubled:#}"
+    );
+}
+
+/// Three runs a side, through `-r 3`: a difference is weighed against how
+/// much each side's runs differ, and the program run three times unchanged
+/// on both sides has none.
+#[test]
+fn repeated_runs_are_weighed_against_their_own_spread() {
+    let workload = needs_fixture!();
+    let _alone = one_at_a_time();
+    let dir = scratch("diff-repeated");
+    let (once, twice, again) = (dir.join("once"), dir.join("twice"), dir.join("again"));
+    for (out, factor) in [(&once, "1"), (&twice, "2"), (&again, "1")] {
+        if profiled(&workload, out, &["-r", "3"], &["diff", factor]).is_none() {
+            return;
+        }
+    }
+    let doubled = diffed(&[once.to_str().unwrap(), twice.to_str().unwrap()]);
+    assert_eq!(doubled["confidence"], "between_runs", "{doubled:#}");
+    assert_eq!(
+        (
+            doubled["runs_before"].as_u64(),
+            doubled["runs_after"].as_u64()
+        ),
+        (Some(3), Some(3))
+    );
+    assert_eq!(
+        doubled["difference"],
+        serde_json::json!(["beta"]),
+        "{doubled:#}"
+    );
+    let beta = doubled["own"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|change| change["function"] == "beta")
+        .unwrap();
+    assert!(beta["before_spread"].as_f64().is_some(), "{beta:#}");
+    let unchanged = diffed(&[once.to_str().unwrap(), again.to_str().unwrap()]);
+    assert_eq!(
+        unchanged["difference"],
+        serde_json::json!([]),
+        "{unchanged:#}"
+    );
 }
 
 #[test]

@@ -2745,6 +2745,7 @@ mod tests {
             }],
             executables: BTreeMap::from([("task:7".to_owned(), "/usr/bin/python3.12".to_owned())]),
             objects: BTreeMap::from([(1, vec![Some("python3.12".to_owned())])]),
+            build_ids: BTreeMap::from([("python3.12".to_owned(), "ab12".to_owned())]),
         };
         let results = aggregate(&resolved, said, Unit::Bytes, "bytes").unwrap();
         let json = serde_json::to_value(&results).unwrap();

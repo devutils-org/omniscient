@@ -312,6 +312,16 @@ join what-released-the-block  sched.wakeup -> sched.offcpu  evidence WAKEUP
 `docs/dev/BRIEF.md` is the wave being run; there is no second brief for the one after it,
 because a plan kept in two documents drifted in both.
 
+### After the twenty-eighth wave
+
+The wave is `docs/dev/briefs/wave-28-diff.md`, its decisions
+`docs/DECISIONS.md`, "Settled in the twenty-eighth wave": `omn diff` compares
+functions by what their names allow and runs by how much they differ. What
+it leaves: a duration per call is another source (USDT, uprobes, spans), and
+an unsymbolized function's instructions stay several rows until something
+names them (`--symbols debuginfod`). The twenty-seventh wave's list below is
+otherwise unchanged.
+
 ### After the twenty-seventh wave
 
 The wave is `docs/dev/briefs/wave-27-no-btf.md`, its decisions
