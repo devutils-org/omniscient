@@ -1162,6 +1162,46 @@ impl Capabilities {
             Word::CpufreqTransitions => probe_cpufreq_transitions(Path::new(
                 "/sys/devices/system/cpu/cpu0/cpufreq/scaling_driver",
             )),
+            // Either pair, in the order the follower tries them.
+            Word::Follower => {
+                let pair = |needs: [&str; 2]| {
+                    let probes = needs.map(|need| self.probe(need, None));
+                    if probes.iter().all(Probe::is_available) {
+                        return Probe::Available;
+                    }
+                    let why = probes
+                        .iter()
+                        .zip(needs)
+                        .filter(|(probe, _)| !probe.is_available())
+                        .map(|(probe, need)| format!("{need}: {probe}"))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    if probes.iter().any(Probe::is_missing) {
+                        Probe::Missing(why)
+                    } else {
+                        Probe::Unknown(why)
+                    }
+                };
+                match (
+                    pair([
+                        "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)",
+                        "raw_tracepoint:sched_process_free(task_struct *)",
+                    ]),
+                    pair([
+                        "tracepoint:task:task_newtask",
+                        "tracepoint:sched:sched_process_free",
+                    ]),
+                ) {
+                    (Probe::Available, _) | (_, Probe::Available) => Probe::Available,
+                    (Probe::Missing(raw), Probe::Missing(classic)) => Probe::Missing(format!(
+                        "neither pair a process target is followed with: {raw}; and {classic}"
+                    )),
+                    (raw, classic) => Probe::Unknown(format!(
+                        "neither pair a process target is followed with is known to be there: \
+                         {raw}; and {classic}"
+                    )),
+                }
+            }
             Word::Btf => match self.environment.kernel_btf {
                 Access::Readable => Probe::Available,
                 Access::Restricted => {
@@ -2087,6 +2127,28 @@ mod tests {
 
     /// A seccomp filter is named where the level would have allowed the
     /// event, and only there: at 3 the level refuses it whatever the filter.
+    /// `follower` is available exactly where one of its two pairs is.
+    #[test]
+    fn a_follower_is_either_pair_of_tracepoints() {
+        let capabilities = Capabilities::detect();
+        let either = [
+            [
+                "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)",
+                "raw_tracepoint:sched_process_free(task_struct *)",
+            ],
+            [
+                "tracepoint:task:task_newtask",
+                "tracepoint:sched:sched_process_free",
+            ],
+        ]
+        .iter()
+        .any(|pair| {
+            pair.iter()
+                .all(|need| capabilities.probe(need, None).is_available())
+        });
+        assert_eq!(capabilities.probe("follower", None).is_available(), either);
+    }
+
     #[test]
     fn a_seccomp_filter_is_named_where_the_level_allows_the_event() {
         assert!(seccomp_explanation(Some(2), Some(2))

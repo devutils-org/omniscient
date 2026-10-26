@@ -410,7 +410,7 @@
   backends:
     # Bucketed in the kernel and drained on a tick: one event is one bucket of
     # one window, standing for every packet in it.
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:qdisc_enqueue(Qdisc *, netdev_queue *, sk_buff *)", "raw_tracepoint:qdisc_dequeue(Qdisc *, netdev_queue *, int, sk_buff *)", "bpf_map:ringbuf"], cost: low, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:qdisc_enqueue(Qdisc *, netdev_queue *, sk_buff *)", "raw_tracepoint:qdisc_dequeue(Qdisc *, netdev_queue *, int, sk_buff *)"], cost: low, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:qdisc:qdisc_enqueue", "tracepoint:qdisc:qdisc_dequeue", "bpf"], cost: low, equivalent: true, drained: true}
   modes: [trace]
   emits: [hist, raw, summary, timeline]
@@ -437,7 +437,7 @@
   unit: ns
   backends:
     # A count and an exact total per (cpu, vector, bucket), drained on a tick.
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:softirq_entry(unsigned int)", "raw_tracepoint:softirq_exit(unsigned int)", "bpf_map:ringbuf"], cost: med, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:softirq_entry(unsigned int)", "raw_tracepoint:softirq_exit(unsigned int)"], cost: med, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:irq:softirq_entry", "tracepoint:irq:softirq_exit", "bpf"], cost: med, equivalent: true, drained: true}
   modes: [trace, count]
   emits: [hist, rate, raw, summary]

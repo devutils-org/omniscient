@@ -252,6 +252,14 @@ bandwidth monitoring (missing names whether the cpu or the mount is what
 lacks), `damon` DAMON's sysfs, writable, and `so_timestamping` the socket
 option, set on a socket of our own.
 
+`follower`, since the twenty-seventh wave, is a way to follow a process target
+into the processes it starts: the raw `sched_process_fork` and
+`sched_process_free`, or the classic `task:task_newtask` and
+`sched:sched_process_free`, the two pairs `Descendants::follow` tries in that
+order. A backend whose own program needs neither kind of tracepoint -- a
+kprobe pair -- asks this rather than the raw pair, which a 5.4 kernel's BTF
+does not declare.
+
 Three kinds read unknown on purpose, and unknown never counts as available:
 `usdt:<runtime>` and `allocator-stats:<allocator>`, which belong to a program
 that does not exist before the run, and `xdp`, whose source stays vocabulary. A requirement a collector's own start decides is

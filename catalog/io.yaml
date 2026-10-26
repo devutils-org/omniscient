@@ -412,7 +412,7 @@
     # is a miss count with nothing to be a share of. Counted in the kernel per
     # task and file; `docs/families/io.md` has why these two and not the fault
     # tracepoints.
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_filemap_get_pages(address_space *, long unsigned int, long unsigned int)", "raw_tracepoint:mm_filemap_add_to_page_cache(folio *)", "bpf_map:ringbuf"], cost: med, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_filemap_get_pages(address_space *, long unsigned int, long unsigned int)", "raw_tracepoint:mm_filemap_add_to_page_cache(folio *)"], cost: med, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:filemap:mm_filemap_get_pages", "tracepoint:filemap:mm_filemap_add_to_page_cache", "bpf"], cost: med, equivalent: true}
   modes: [trace, count]
   emits: [rate, topk, summary, raw]
@@ -448,7 +448,7 @@
   summary: "Readahead: pages filled ahead of what reads looked up"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_filemap_get_pages(address_space *, long unsigned int, long unsigned int)", "raw_tracepoint:mm_filemap_add_to_page_cache(folio *)", "bpf_map:ringbuf"], cost: low, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_filemap_get_pages(address_space *, long unsigned int, long unsigned int)", "raw_tracepoint:mm_filemap_add_to_page_cache(folio *)"], cost: low, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:filemap:mm_filemap_get_pages", "tracepoint:filemap:mm_filemap_add_to_page_cache", "bpf"], cost: low, equivalent: true}
     - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:page_cache_ra_unbounded"], cost: low, equivalent: true}
   modes: [trace, count]

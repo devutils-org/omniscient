@@ -102,6 +102,11 @@ pub enum Word {
     /// `cpufreq:transitions`: a cpufreq driver that sets the frequency, and
     /// so announces each change on `power:cpu_frequency`.
     CpufreqTransitions,
+    /// `follower`: a way to follow a process target into the processes it
+    /// starts -- the raw `sched_process_fork` and `sched_process_free`, or the
+    /// classic `task:task_newtask` and `sched:sched_process_free`, whichever
+    /// pair this machine has (`bpf::sched_common::Descendants::follow`).
+    Follower,
 }
 
 /// Builds a requirement from what follows its prefix.
@@ -152,6 +157,7 @@ impl Word {
             "damon" => Word::Damon,
             "so_timestamping" => Word::SoTimestamping,
             "cpufreq:transitions" => Word::CpufreqTransitions,
+            "follower" => Word::Follower,
             _ => return None,
         })
     }
@@ -262,6 +268,7 @@ impl fmt::Display for Need {
                 Word::Damon => "damon",
                 Word::SoTimestamping => "so_timestamping",
                 Word::CpufreqTransitions => "cpufreq:transitions",
+                Word::Follower => "follower",
             }),
             Need::Gpu(text) | Need::Unprobed(text) => f.write_str(text),
         }

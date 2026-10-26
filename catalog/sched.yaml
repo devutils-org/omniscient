@@ -264,7 +264,7 @@
   summary: "Task migrations between cores"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_migrate_task(task_struct *, int)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)", "bpf_map:ringbuf"], cost: low, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_migrate_task(task_struct *, int)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)"], cost: low, drained: true}
     # The classic record names a task by its id alone, so no cgroup: one is
     # left to the perf counter below.
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_migrate_task", "tracepoint:task:task_newtask",
@@ -294,7 +294,7 @@
     # Before the contention tracepoints (5.19: Rocky 8, Ubuntu 22.04):
     # kprobe pairs on the sleeping locks' slow paths, each read as
     # `contention_begin`/`_end` would have been.
-    - {id: "bpf:kprobe", requires: ["kprobe", "bpf", "btf", "kprobe:__mutex_lock_slowpath", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)"], cost: high, drained: true,
+    - {id: "bpf:kprobe", requires: ["kprobe", "bpf", "btf", "kprobe:__mutex_lock_slowpath", "follower"], cost: high, drained: true,
        degraded: "kprobe pairs on the sleeping locks' slow paths -- mutexes and rw-semaphores -- rather than the contention tracepoints, so a wait is the whole slow path, its optimistic spin on the owner included: where the tracepoints begin after the spin, this is far longer under a convoy (contend.py's mmap_lock, 6.3 s against 50 ms of write waits). A spinlock, an rt-mutex or a per-cpu rw-semaphore wait is not here"}
   modes: [trace]
   emits: [hist, topk, stack, raw, summary]
@@ -329,7 +329,7 @@
   summary: "Userspace futex wait"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter(pt_regs *, long int)", "raw_tracepoint:sys_exit(pt_regs *, long int)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)", "bpf_map:ringbuf"], cost: high, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter(pt_regs *, long int)", "raw_tracepoint:sys_exit(pt_regs *, long int)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)"], cost: high, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit",
          "tracepoint:task:task_newtask", "tracepoint:sched:sched_process_free", "bpf"], cost: high, equivalent: true}
   modes: [trace]
@@ -398,7 +398,7 @@
   summary: "Time spent in hard and soft interrupt handlers"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:irq_handler_entry(int, irqaction *)", "raw_tracepoint:irq_handler_exit(int, irqaction *, int)", "raw_tracepoint:softirq_entry(unsigned int)", "raw_tracepoint:softirq_exit(unsigned int)", "bpf_map:ringbuf"], cost: med, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:irq_handler_entry(int, irqaction *)", "raw_tracepoint:irq_handler_exit(int, irqaction *, int)", "raw_tracepoint:softirq_entry(unsigned int)", "raw_tracepoint:softirq_exit(unsigned int)"], cost: med, drained: true}
     # A hard row is named from /proc/interrupts at the drain: a shared line
     # gives all its handlers, where the raw program names the one that ran.
     - {id: "bpf:tp", requires: ["tracepoint:irq:irq_handler_entry", "tracepoint:irq:irq_handler_exit", "tracepoint:irq:softirq_entry", "tracepoint:irq:softirq_exit", "bpf"], cost: med, drained: true,
@@ -518,7 +518,9 @@
   summary: "Each cpu's run queue length, sampled on its clock (runqlen)"
   unit: count
   backends:
-    - {id: "bpf:perf_event", requires: ["bpf", "btf", "pmu:PERF_COUNT_SW_CPU_CLOCK", "bpf_map:ringbuf"], cost: low}
+    # Counted in a per-cpu array, so no ring buffer: a 5.4 kernel with BTF
+    # serves it.
+    - {id: "bpf:perf_event", requires: ["bpf", "btf", "pmu:PERF_COUNT_SW_CPU_CLOCK"], cost: low}
   modes: [sample]
   emits: [hist, topk, raw]
   targets: {system: native, cpu: native}
@@ -539,7 +541,7 @@
   summary: "Automatic NUMA balancing decisions"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_stick_numa(task_struct *, int, task_struct *, int)", "bpf_map:ringbuf"], cost: low, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_stick_numa(task_struct *, int, task_struct *, int)"], cost: low, drained: true}
     # The classic record has both tasks' ids and both cpus; a row's comm is
     # read from /proc at the drain, where the raw program reads the task's.
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_stick_numa", "bpf"], cost: low, drained: true,
