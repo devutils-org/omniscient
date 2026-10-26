@@ -1460,12 +1460,6 @@ fn a_net_source_this_build_does_not_collect_exits_three_and_names_the_backend() 
             "bpf:kprobe",
             Some("force:bpf:kprobe"),
         ),
-        (
-            "net.socket",
-            "trace",
-            "bpf:kprobe",
-            Some("force:bpf:kprobe"),
-        ),
         ("net.xdp", "count", "bpf", None),
     ];
     for (source, mode, backend, pinned) in unbuilt {
@@ -3554,13 +3548,13 @@ fn the_three_answers_an_ebpf_net_request_can_be_refused_with() {
         "the refusal should say what the source does accept: {complaint}"
     );
 
-    // 3 -- this build has not written it. `net.socket` pinned to its
+    // 3 -- this build has not written it. `net.tcp.connect` pinned to its
     // `bpf:kprobe` backend, which this machine serves and no collector does,
     // and the answer says so in those words: not "this machine cannot", which
     // would send a reader to change a kernel that is already capable. It was
-    // the unpinned request until the eighth wave wrote `bpf:fentry`.
+    // `net.socket`'s until its kprobe pair was written (2026-10-26).
     let outcome = omn(&[
-        "net.socket",
+        "net.tcp.connect",
         "--system",
         "--mode",
         "trace",
@@ -3578,7 +3572,7 @@ fn the_three_answers_an_ebpf_net_request_can_be_refused_with() {
         "a backend this build has not written is the build's gap: {complaint}"
     );
     assert!(
-        complaint.contains("no collector is written") && complaint.contains("net.socket"),
+        complaint.contains("no collector is written") && complaint.contains("net.tcp.connect"),
         "the refusal should name the source and say it is this build: {complaint}"
     );
     assert!(
