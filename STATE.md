@@ -322,7 +322,9 @@ the eighteen and twenty-six collectors moved onto `UserFilter` and
    `bpf_probe_read` before 5.5 -- Debian 10 root 57 to 58, Ubuntu 20.04 root
    60 to 64. What is left there is no BTF, no ring buffer and tracepoints
    these kernels lack: a perf-event-array transport, a wave of its own.
-3. **The `bpf:kprobe` rows**: the sweep says where they would serve.
+3. **The `bpf:kprobe` rows**: written on 2026-10-26 for `io.fs`, `io.fsync`,
+   `net.socket` and `sched.lock` (`DECISIONS.md`); `net.tcp.connect`'s
+   stays the one unwritten. What follows is what the sweep said first.
    `io.fsync` was refused on five cells only because the compiler inlined
    `do_fsync` and `vfs_fsync`; a kprobe would not have reached them either,
    and `bpf:fentry:syscall` now serves it there (Ubuntu 22.04 and 24.04,
@@ -336,9 +338,9 @@ the eighteen and twenty-six collectors moved onto `UserFilter` and
    (`docs/fixes/w26-poller.md`, "Phase 1"); seven keep their own `previous`
    reading, each with its reason there. Twelve eBPF collectors that count
    only what their filter removed keep their own wording.
-5. **perftp** (`BRIEF.md`): a counting perf tracepoint needs the event's id
-   from tracefs, which only root reads here; under lockdown and in a
-   container it is as out of reach as eBPF. Not written.
+5. **perftp**: shown not to open (`DECISIONS.md`, 2026-10-26): under
+   lockdown tracefs is mounted and empty, in a container the ids are
+   root's, and root without lockdown has eBPF. Not written, on purpose.
 
 The eleventh wave -- the escalation, the engine's debts, the silent
 degradations, the drains and the portability matrix -- is merged, and
