@@ -14578,3 +14578,11 @@ bpftrace:
   the file (hot_beta 49 %, hot_gamma 29-31 %, hot_alpha 19-22 %). What is left
   is the chain's environment: the perf the witnesses install (xpac, DNF4),
   or its build-id cache under the runner's user. Still open.
+
+For the flaky tally, the kprobe pairs' full run (2026-10-26, 3247 passed,
+2 failed), each passing alone at once:
+`family_sched::time_slices_add_up_to_the_cpu_and_the_runnable_time` (2224
+preempted slices off the cpu 0.3 s beside 22.8 s queued) and
+`scenario_net::every_datagram_sent_to_a_closed_port_is_a_drop_with_one_reason`
+(the machine's own drops, 1779 `SOCKET_RCVBUFF`, crowded the scenario's
+`NO_SOCKET` out of the ring); the second also once in the net file's run.
