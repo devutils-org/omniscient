@@ -272,8 +272,11 @@
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:contention_begin(void *, unsigned int)", "raw_tracepoint:contention_end(void *, int)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)"], cost: med, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:lock:contention_begin", "tracepoint:lock:contention_end", "bpf"], cost: med, equivalent: true}
-    - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: high,
-       degraded: "older kernels: futex and uprobe fallback, partial coverage"}
+    # Before the contention tracepoints (5.19: Rocky 8, Ubuntu 22.04):
+    # kprobe pairs on the sleeping locks' slow paths, each read as
+    # `contention_begin`/`_end` would have been.
+    - {id: "bpf:kprobe", requires: ["kprobe", "bpf", "btf", "kprobe:__mutex_lock_slowpath", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)"], cost: high, drained: true,
+       degraded: "kprobe pairs on the sleeping locks' slow paths -- mutexes and rw-semaphores -- rather than the contention tracepoints, so a wait is the whole slow path, its optimistic spin on the owner included: where the tracepoints begin after the spin, this is far longer under a convoy (contend.py's mmap_lock, 6.3 s against 50 ms of write waits). A spinlock, an rt-mutex or a per-cpu rw-semaphore wait is not here"}
   modes: [trace]
   emits: [hist, topk, stack, raw, summary]
   targets: {system: native, pid: bpf_only, tid: bpf_only, cgroup: bpf_only, launch: bpf_only}

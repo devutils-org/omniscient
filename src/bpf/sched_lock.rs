@@ -194,6 +194,32 @@ pub struct LockWait {
     pub comm: String,
 }
 
+/// A sleeping lock's slow path, probed where the contention tracepoints do
+/// not exist (before 5.19: Rocky 8, Ubuntu 22.04).
+#[derive(Debug, Clone, Copy)]
+struct SlowPath {
+    /// The lock, the first argument, in `pt_regs`.
+    lock_register: i16,
+    /// What `contention_begin` would have said of it.
+    flags: u32,
+}
+
+/// The slow paths probed, each the first of its names this kernel has, and
+/// the `LCB_F_*` kind of its lock. A mutex's includes its optimistic spin.
+const SLOW_PATHS: [(&[&str], u32); 5] = [
+    (&["__mutex_lock_slowpath"], LCB_F_MUTEX),
+    (&["__mutex_lock_interruptible_slowpath"], LCB_F_MUTEX),
+    (&["__mutex_lock_killable_slowpath"], LCB_F_MUTEX),
+    (
+        &["rwsem_down_write_slowpath", "rwsem_down_write_failed"],
+        LCB_F_WRITE,
+    ),
+    (
+        &["rwsem_down_read_slowpath", "rwsem_down_read_failed"],
+        LCB_F_READ,
+    ),
+];
+
 /// The `LCB_F_*` bits, as `include/trace/events/lock.h` defines them.
 const LCB_F_SPIN: u32 = 1 << 0;
 const LCB_F_READ: u32 = 1 << 1;
@@ -280,18 +306,25 @@ fn current_and_filter(
 }
 
 /// The program on `contention_begin`: a thread has started waiting.
+///
+/// `kprobe`: a kprobe on a sleeping lock's slow path stands for the
+/// tracepoint -- the lock is the first argument's register, and the kind the
+/// function's own, as the `LCB_F_*` bits the tracepoint would have passed.
 fn begin_instructions(
     btf: &Btf,
     followed: &Followed,
     waiting_fd: i32,
     drops_fd: i32,
+    kprobe: Option<SlowPath>,
 ) -> Result<Vec<Insn>, String> {
-    crate::bpf::program::prototype(
-        btf,
-        "contention_begin",
-        &[&BEGIN_SIGNATURE],
-        "its arguments",
-    )?;
+    if kprobe.is_none() {
+        crate::bpf::program::prototype(
+            btf,
+            "contention_begin",
+            &[&BEGIN_SIGNATURE],
+            "its arguments",
+        )?;
+    }
 
     let mut program = Program::new();
     // r6 keeps the context and r7 the caller's ids; both survive the helper
@@ -319,12 +352,20 @@ fn begin_instructions(
     // The flags are read before the clock: `ldx` clobbers nothing the call
     // would, but keeping the context read next to the context makes the
     // register discipline visible.
-    program.push(Insn::ldx(BPF_DW, 8, 6, ARG_FLAGS));
+    program.push(match kprobe {
+        None => Insn::ldx(BPF_DW, 8, 6, ARG_FLAGS),
+        Some(path) => Insn::mov64_imm(8, path.flags as i32),
+    });
     program.push(Insn::stx(BPF_W, R10, WAIT_VALUE + WAIT_FLAGS, 8));
     // Every byte of the value is written: the four this layout does not use
     // would otherwise travel whatever was on the stack.
     program.push(Insn::st_imm(BPF_W, R10, WAIT_VALUE + WAIT_PAD, 0));
-    program.push(Insn::ldx(BPF_DW, 1, 6, ARG_LOCK));
+    program.push(Insn::ldx(
+        BPF_DW,
+        1,
+        6,
+        kprobe.map_or(ARG_LOCK, |path| path.lock_register),
+    ));
     program.push(Insn::stx(BPF_DW, R10, WAIT_VALUE + WAIT_ADDR, 1));
 
     program.push(Insn::call(helper::KTIME_GET_NS));
@@ -383,8 +424,11 @@ fn end_instructions(
     stacks_fd: i32,
     kernel_stacks_fd: i32,
     leaf_lr: bool,
+    kprobe: bool,
 ) -> Result<Vec<Insn>, String> {
-    crate::bpf::program::prototype(btf, "contention_end", &[&END_SIGNATURE], "its arguments")?;
+    if !kprobe {
+        crate::bpf::program::prototype(btf, "contention_end", &[&END_SIGNATURE], "its arguments")?;
+    }
 
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
@@ -558,10 +602,90 @@ pub struct LockProgram {
     /// Why the user link register is not read, where the architecture has
     /// one.
     leaf_lr_missing: Option<String>,
-    begin_program: OwnedFd,
-    _begin_link: OwnedFd,
-    end_program: OwnedFd,
-    _end_link: OwnedFd,
+    attached: Attached,
+}
+
+/// How the pair is attached: to the two tracepoints, or kprobe pairs on the
+/// slow paths.
+enum Attached {
+    Tracepoints {
+        begin_program: OwnedFd,
+        _begin_link: OwnedFd,
+        end_program: OwnedFd,
+        _end_link: OwnedFd,
+    },
+    SlowPaths(Vec<super::attach::PerfAttachment>),
+}
+
+/// Each slow path this kernel has, a kprobe on its entry standing for
+/// `contention_begin` and one on its return for `contention_end`: every
+/// return before any entry, for the reason the tracepoints are attached in
+/// that order.
+#[allow(clippy::too_many_arguments)]
+fn attach_slow_paths(
+    btf: &Btf,
+    followed: &Followed,
+    waiting: &Hash,
+    rows: &Rows,
+    drops: &Counters,
+    stacks: &StackTraces,
+    kernel_stacks: &StackTraces,
+) -> Result<Vec<super::attach::PerfAttachment>, String> {
+    use super::attach::{kprobe, Scope};
+    let lock_register = btf.function_argument(0)? as i16;
+    let end = end_instructions(
+        btf,
+        followed,
+        waiting.as_raw_fd(),
+        rows.as_raw_fd(),
+        drops.as_raw_fd(),
+        stacks.as_raw_fd(),
+        kernel_stacks.as_raw_fd(),
+        false,
+        true,
+    )?;
+    let present: Vec<(&str, u32)> = SLOW_PATHS
+        .iter()
+        .filter_map(|(names, flags)| {
+            names
+                .iter()
+                .find(|name| super::fentry::kprobe_support(name) == super::Support::Yes)
+                .map(|name| (*name, *flags))
+        })
+        .collect();
+    if present.is_empty() {
+        return Err(
+            "this kernel has none of the sleeping locks' slow paths among its symbols \
+             (`__mutex_lock_slowpath`, `rwsem_down_write_slowpath`, ...), so no wait can be \
+             probed"
+                .to_owned(),
+        );
+    }
+    let mut probes = Vec::new();
+    for (name, _) in &present {
+        probes.push(kprobe(name, 0, true, &end, "omn_lock_end", Scope::System)?);
+    }
+    for (name, flags) in &present {
+        let begin = begin_instructions(
+            btf,
+            followed,
+            waiting.as_raw_fd(),
+            drops.as_raw_fd(),
+            Some(SlowPath {
+                lock_register,
+                flags: *flags,
+            }),
+        )?;
+        probes.push(kprobe(
+            name,
+            0,
+            false,
+            &begin,
+            "omn_lock_begin",
+            Scope::System,
+        )?);
+    }
+    Ok(probes)
 }
 
 impl LockProgram {
@@ -571,8 +695,20 @@ impl LockProgram {
     /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
     /// program's own counters can say an occurrence was never seen.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::program::skipped([&self.begin_program, &self.end_program])
-            + self.descendants.as_ref().map_or(0, Descendants::skipped)
+        let programs = match &self.attached {
+            Attached::Tracepoints {
+                begin_program,
+                end_program,
+                ..
+            } => crate::bpf::program::skipped([begin_program, end_program]),
+            Attached::SlowPaths(probes) => crate::bpf::program::skipped(
+                probes
+                    .iter()
+                    .map(super::attach::PerfAttachment::program)
+                    .collect::<Vec<_>>(),
+            ),
+        };
+        programs + self.descendants.as_ref().map_or(0, Descendants::skipped)
     }
 
     /// The processes the target started and this run follows now, beside the
@@ -589,7 +725,9 @@ impl LockProgram {
         self.descendants.as_ref().map_or(0, Descendants::missed)
     }
 
-    pub fn load(whose: Whose) -> Result<Self, String> {
+    /// `kprobes`: the `bpf:kprobe` backend, the slow paths in place of the
+    /// tracepoints.
+    pub fn load(whose: Whose, kprobes: bool) -> Result<Self, String> {
         let btf = super::kernel_btf()?;
         // A process target is followed into every process it starts, as
         // `sched.offcpu` and `sched.wakeup` follow it: a program on
@@ -620,7 +758,29 @@ impl LockProgram {
         let kernel_stacks = StackTraces::create(MAX_STACKS, MAX_STACK_DEPTH, "omn_lock_kstk")
             .map_err(|error| map_failure("lock kernel stack map", error))?;
 
-        let begin = begin_instructions(btf, &followed, waiting.as_raw_fd(), drops.as_raw_fd())?;
+        if kprobes {
+            let probes = attach_slow_paths(
+                btf,
+                &followed,
+                &waiting,
+                &rows,
+                &drops,
+                &stacks,
+                &kernel_stacks,
+            )?;
+            return Ok(Self {
+                descendants,
+                waiting,
+                rows,
+                drops,
+                stacks,
+                kernel_stacks,
+                leaf_lr_missing: None,
+                attached: Attached::SlowPaths(probes),
+            });
+        }
+        let begin =
+            begin_instructions(btf, &followed, waiting.as_raw_fd(), drops.as_raw_fd(), None)?;
         let begin_program = load(&begin, "omn_lock_begin")?;
         let (end_program, leaf_lr_missing) = load_reading_user_lr(
             "lock",
@@ -634,6 +794,7 @@ impl LockProgram {
                     stacks.as_raw_fd(),
                     kernel_stacks.as_raw_fd(),
                     leaf_lr,
+                    false,
                 )
             },
             |instructions| load(instructions, "omn_lock_end"),
@@ -656,10 +817,12 @@ impl LockProgram {
             stacks,
             kernel_stacks,
             leaf_lr_missing,
-            begin_program,
-            _begin_link: begin_link,
-            end_program,
-            _end_link: end_link,
+            attached: Attached::Tracepoints {
+                begin_program,
+                _begin_link: begin_link,
+                end_program,
+                _end_link: end_link,
+            },
         })
     }
 
@@ -742,7 +905,8 @@ mod tests {
     }
 
     fn end_program(btf: &Btf, target: Whose) -> Vec<Insn> {
-        end_instructions(btf, &Followed::only(target), 3, 4, 5, 6, 7, true).expect("a program")
+        end_instructions(btf, &Followed::only(target), 3, 4, 5, 6, 7, true, false)
+            .expect("a program")
     }
 
     /// A wait is the gap between two events, so both programs have to read the
@@ -754,7 +918,7 @@ mod tests {
         let Some(btf) = kernel_btf() else { return };
         const KTIME_GET_BOOT_NS: i32 = 125;
         for program in [
-            begin_instructions(&btf, &Followed::only(Whose::Any), 3, 4).expect("a program"),
+            begin_instructions(&btf, &Followed::only(Whose::Any), 3, 4, None).expect("a program"),
             end_program(&btf, Whose::Any),
         ] {
             let called: Vec<i32> = program
@@ -967,8 +1131,18 @@ mod tests {
     #[test]
     fn the_row_map_is_taken_from_the_slot_once_per_run() {
         let Some(btf) = kernel_btf() else { return };
-        let program = end_instructions(&btf, &Followed::only(Whose::Any), 3, 4, 5, 6, 7, true)
-            .expect("a program");
+        let program = end_instructions(
+            &btf,
+            &Followed::only(Whose::Any),
+            3,
+            4,
+            5,
+            6,
+            7,
+            true,
+            false,
+        )
+        .expect("a program");
         crate::bpf::map::assert_rows_taken_once(&program, 4);
     }
 }

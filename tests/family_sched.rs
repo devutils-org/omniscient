@@ -2229,6 +2229,43 @@ fn time_slices_add_up_to_the_cpu_and_the_runnable_time() {
     );
 }
 
+/// `sched.lock` through `bpf:kprobe`, the slow paths a kernel before the
+/// contention tracepoints still has: the same eight threads queue on their
+/// process's `mmap_lock` for writing, and `rwsem_down_write_slowpath`'s
+/// kprobe pair says so as `kind=write`, with nothing lost.
+#[test]
+fn the_slow_paths_kprobes_see_the_mmap_lock_convoy() {
+    let workload = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/reference/workloads/perfsched/contend.py"
+    );
+    let output = run(&[
+        "trace",
+        "sched.lock",
+        "--backend",
+        "force:bpf:kprobe",
+        "-e",
+        "raw",
+        "--format",
+        "json",
+        "--",
+        "python3",
+        workload,
+        "8",
+        "1",
+    ]);
+    let text = String::from_utf8_lossy(&output.stderr).into_owned();
+    if refused_for_capabilities(&text) || !output.status.success() {
+        eprintln!("skipped: sched.lock was not served through kprobes: {text}");
+        return;
+    }
+    let events = raw_events(&output);
+    assert!(
+        events.iter().any(|attrs| attrs["kind"] == "write"),
+        "eight threads mapping memory wait on mmap_lock for writing: {text}"
+    );
+}
+
 /// `sched.lock` ranked by `kind`, as `perf lock contention` groups by type:
 /// eight threads mapping and unmapping memory queue on their process's
 /// `mmap_lock` for writing, so `write` is where the time went; and a filter

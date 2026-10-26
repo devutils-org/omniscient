@@ -372,6 +372,17 @@ pub fn factories() -> Vec<Factory> {
                 // `bpf` backend with filtering in the kernel and then leaves
                 // its events alone; see `lock::Prepare`.
                 filter: resolved.request.filter.clone(),
+                kprobes: false,
+            }))
+        }),
+        // Before the contention tracepoints (5.19): kprobe pairs on the
+        // sleeping locks' slow paths, read as the tracepoints would be.
+        Factory::new("sched.lock", "bpf:kprobe", |resolved| {
+            Ok(Box::new(lock::Prepare {
+                mode: resolved.request.mode,
+                wants_stacks: resolved.request.emit.contains(&crate::request::Emit::Stack),
+                filter: resolved.request.filter.clone(),
+                kprobes: true,
             }))
         }),
         Factory::new("sched.futex", "bpf:raw_tp", |resolved| {

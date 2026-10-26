@@ -57,6 +57,9 @@ pub struct Prepare {
     /// `stack`; the kernel walks them either way, because the walk happens in
     /// the program.
     pub wants_stacks: bool,
+    /// `bpf:kprobe`: the sleeping locks' slow paths, where the contention
+    /// tracepoints do not exist.
+    pub kprobes: bool,
 }
 
 impl Prepared for Prepare {
@@ -70,17 +73,17 @@ impl Prepared for Prepare {
             ));
         }
         let filter = super::whose(target, "a lock wait is attributed per thread")?;
-        Ok(Box::new(LockCollector::new(
-            filter,
-            self.wants_stacks,
-            self.filter,
-        )))
+        let mut collector = LockCollector::new(filter, self.wants_stacks, self.filter);
+        collector.kprobes = self.kprobes;
+        Ok(Box::new(collector))
     }
 }
 
 pub struct LockCollector {
     /// Whose waits are kept.
     filter: Whose,
+    /// The slow paths' kprobes rather than the tracepoints.
+    kprobes: bool,
     program: Option<LockProgram>,
     losses: Losses,
     /// The program's loss counters, as last read (`collect::kernel`).
@@ -125,6 +128,7 @@ impl LockCollector {
     pub fn new(filter: Whose, wants_stacks: bool, predicate: Option<FilterExpr>) -> Self {
         Self {
             filter,
+            kprobes: false,
             program: None,
             losses: Losses::default(),
             counts: KernelCounts::default(),
@@ -511,7 +515,7 @@ impl Collector for LockCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        let program = LockProgram::load(self.filter)?;
+        let program = LockProgram::load(self.filter, self.kprobes)?;
         self.notes
             .extend(program.leaf_lr_missing().map(str::to_owned));
         self.leaf.enable(program.leaf_lr_missing().is_none());
@@ -664,6 +668,7 @@ mod tests {
             mode: Mode::Count,
             wants_stacks: false,
             filter: None,
+            kprobes: false,
         });
         let Err(error) = prepared.attach(&Target::Pid(vec![1])) else {
             panic!("a counting mode must be refused");
@@ -677,6 +682,7 @@ mod tests {
             mode: Mode::Trace,
             wants_stacks: false,
             filter: None,
+            kprobes: false,
         });
         let Err(error) = prepared.attach(&Target::Iface("eth0".to_owned())) else {
             panic!("an interface names no thread that can wait for a lock");
