@@ -27,7 +27,7 @@ commit that fixed it. It is meant to be read as distroproof's living proof.
 | Findings in Omniscient | **27 defects** no test on the development machine had shown: **13 in the tool** (the release, the probes, the catalog, a collector) and **14 in its test suite** (a judge, the reference runner, twelve reference pairs) |
 | Claims refuted | **158** runs of a source Omniscient called usable that the kernel refused at start, in the first matrix; **0** after |
 | Cross-checked | every reason Omniscient gives for a refusal agrees with envprobe's independent reading of the same guest, on all 21 targets |
-| Latest run | 2026-10-20, the binary of `main` after the io histogram's `tp_btf` and one-program paths: **25 of 25** targets passed, the 8 containers swept, 33 cells, and the 28 judges of `cargo test --test portability` green. Usable sources per cell, of 123: 36 (Debian 10, Ubuntu 18.04) to 96 (Fedora, Arch, Gentoo, NixOS); arm64 82 to 88; containers 44 rootless, 57 with the capabilities added, 59 privileged |
+| Latest run | 2026-10-26, the twenty-seventh wave's binary (`adb1e5d`): **28 of 28** targets passed, the 7 cells before 5.8 swept again after the fixes they found, the 8 containers swept, and the 28 judges of `cargo test --test portability` green. Usable sources per cell, of 123: 40 (Debian 10, Ubuntu 18.04, unprivileged) to 97 (Arch, Fedora, Gentoo, NixOS); root on the kernels without BTF 79 (Debian 10) and 90 (Ubuntu 20.04, Rocky 8); arm64 83 to 89; containers 48 rootless, 61 with the capabilities added, 62 privileged |
 | Back into distroproof | 3 images (Gentoo, Debian sid, Fedora 43), 2 boot fixes, 3 `[run]` options, 2 envprobe facts (pull requests [#4](https://github.com/devutils-org/distroproof/pull/4), [#5](https://github.com/devutils-org/distroproof/pull/5)) |
 
 ## Reproducing it
@@ -82,8 +82,33 @@ completions issued before the attach counted, not dropped. Found on the way
 and fixed: 4.19's `sched_stick_numa` names its task `pid` where later kernels
 write `src_pid`; its `tcp_retransmit_skb` has neither `state` nor `family`
 (an IPv4 end is told by its mapped address); a classic completion has no
-`bytes`, only sectors. The rest of the matrix is to be swept with this
-binary.
+`bytes`, only sectors.
+
+Then the whole matrix with this binary (28 of 28 targets, `distroproof up`),
+whose judges found four more, each fixed and the seven cells before 5.8 swept
+again:
+
+1. **A helper's `int` arrives zero-extended before 5.8.** `io.fsync`'s kprobe
+   pair on Ubuntu 20.04 counted every sync as a full pending map: written
+   into a counter, the stamp's result read 4294967279, `-EEXIST` with its upper
+   half zero, which no `r0 == -17` matches and every `r0 >= 0` takes for a
+   success. `bpf::portable` sign-extends the result after each such helper on
+   those kernels, and moves the jumps over what it inserts; the syncs are timed
+   with no loss, and every program's `r0 >= 0` test after a map update or an
+   output means what it says there.
+2. **Two programs needed a ring buffer they did not declare**: `io.fsync`'s and
+   the USDT sources' (`runtime.*`), listed usable on Ubuntu 20.04 and refused
+   at the start. Both publish through `bpf::transport` now: `runtime.gc` sees
+   the fixture's five pauses there.
+3. **`/proc/kallsyms`'s first line is not its answer.** x86-64 opens it with
+   its per-cpu symbols, absolute and at zero (`0000000000000000 A
+   fixed_percpu_data`) whatever `kptr_restrict` says, and `omn` and envprobe
+   both read root on Debian 10 and Ubuntu 20.04 as seeing no address. Both
+   read the first function now (distroproof's `cac6979`).
+4. **The judge's tracefs fact** read the mounts alone, and 4.19 reaches tracefs
+   through debugfs's automount, mounted by the first look inside it; and
+   lockdown's reason had changed its words. Both judges read what the cell
+   says now.
 
 ## After the twenty-sixth wave's follow-up (2026-10-26)
 

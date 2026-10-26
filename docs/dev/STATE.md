@@ -321,13 +321,10 @@ array, classic records and a classic follower, and wrote `bpf:tp` collectors
 for twenty-nine sources (and `net.tcp.connect`'s, in place of the kprobe row
 item 3 left). What is left, by what it waits on:
 
-1. **The matrix, swept with this wave's binary.** Only the two root cells it
-   was for were counted (`docs/distroproof.md`). Every other cell's chain is
-   unchanged where it has BTF, but `cpu.oncpu_time` no longer declares `trace`,
-   `sched.runqlen` no longer asks for a ring buffer, `sched.lock`'s kprobe row
-   asks `follower`, and thirteen drained rows dropped a requirement they did
-   not have: `release.sh`, `distroproof up`, then `cargo test --test
-   portability`.
+1. ~~**The matrix, swept with this wave's binary.**~~ **Done** (2026-10-26):
+   28 of 28 targets, the containers, the 28 judges green; four findings fixed
+   on the way, the first of them that a helper's `int` arrives zero-extended
+   before 5.8 (`docs/distroproof.md`, "After the twenty-seventh wave").
 2. **A machine**: unchanged from the twenty-sixth wave's item 1 below.
 3. **What the classic road cannot serve on these kernels**: `net.qdisc`
    (`qdisc_enqueue` is 5.15), `sched.lock`'s tracepoints (5.19), `io.pagecache`
