@@ -327,7 +327,12 @@ pub fn tracepoint(
     // event with no period is an event that never fires.
     attr.__bindgen_anon_1.sample_period = 1;
     attr.sample_type = u64::from(sys::bindings::PERF_SAMPLE_RAW);
-    open_and_set(&mut attr, program, one_event(scope), &format!("{category}:{name}"))
+    open_and_set(
+        &mut attr,
+        program,
+        one_event(scope),
+        &format!("{category}:{name}"),
+    )
 }
 
 /// Attaches a `BPF_PROG_TYPE_PERF_EVENT` program to a cpu-clock event on

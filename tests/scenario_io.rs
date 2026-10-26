@@ -4409,6 +4409,71 @@ fn every_sync_at_the_syscalls_is_one_event_on_the_file_it_named() {
     );
 }
 
+/// The same twenty-eight syncs through `bpf:kprobe`, kprobe pairs on the
+/// VFS functions for a kernel built without the function tracer: the record
+/// filled at the entry from the saved registers, the file found with probe
+/// reads, each sync one event timed at the function the kernel routed it
+/// through, as the trampolines time it.
+#[test]
+fn every_sync_through_kprobes_is_one_event_on_the_file_it_named() {
+    if let Some(reason) = no_fentry_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let path = scratch("kprobe-syncs.bin");
+    let account_path = scratch("kprobe-syncs.json");
+    let workload = script("kprobe-syncs.py", SYNCS);
+    let output = run_on_launch_pinned(
+        "kprobe-syncs",
+        &[("fsync", "io.fsync", "trace", "raw")],
+        Some("bpf:kprobe"),
+        &[
+            "python3",
+            workload.to_str().expect("a path"),
+            path.to_str().expect("a path"),
+            account_path.to_str().expect("a path"),
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    let did = account(&account_path);
+    let (dev, _) = mounted_device(&path);
+    let file = (dev, did["ino"].as_u64().expect("an inode"));
+    let document = json(&output);
+    let events = raw_with_keys(result(&document, "fsync"));
+    let mine: Vec<_> = events
+        .iter()
+        .filter(|(raw, _)| file_key(raw) == Some(file))
+        .collect();
+    let count = |call: &str, range: bool| {
+        mine.iter()
+            .filter(|(_, event)| {
+                attr_text(event, "call") == call
+                    && (attr_text(event, "via") == "vfs_fsync_range") == range
+            })
+            .count()
+    };
+    assert_eq!(
+        (
+            count("fsync", false),
+            count("fdatasync", false),
+            count("fdatasync", true)
+        ),
+        (20, 5, 3),
+        "twenty fsyncs, five fdatasyncs and three msyncs on {file:?}: {mine:?}"
+    );
+    assert_eq!(
+        mine.len(),
+        events.len(),
+        "every event names the file: {events:?}"
+    );
+    assert_eq!(
+        losses(result(&document, "fsync"))["dropped"].as_u64(),
+        Some(0),
+        "{}",
+        losses(result(&document, "fsync"))
+    );
+}
+
 const MANY_ROWS: &str = r#"
 import json, os, resource, sys, threading
 directory, account = sys.argv[1], sys.argv[2]

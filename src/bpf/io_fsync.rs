@@ -50,7 +50,7 @@
 use std::os::fd::AsRawFd;
 
 use crate::bpf::btf::Btf;
-use crate::bpf::fentry::{self, Function, Link, Narrowing, Side, BPF_H, SKIP};
+use crate::bpf::fentry::{self, Function, Kprobe, Link, Narrowing, Side, BPF_H, SKIP};
 use crate::bpf::insn::{
     self, count_drop, helper, read_field, read_narrow, read_pointer, Insn, Program, BPF_DW, BPF_W,
     R10,
@@ -200,6 +200,11 @@ const PEND_VALUE: i16 = -128;
 const PEND_TS: i16 = 0;
 const PEND_TAG: i16 = 8;
 const PEND_VALUE_BYTES: usize = 16;
+/// A kprobe pair's stamp: the time and the tag, then the record the entry
+/// filled, since the kretprobe sees no argument. Built at [`K_TS`].
+const K_TS: i16 = -216;
+const K_EVENT: i16 = K_TS + 16;
+const K_VALUE_BYTES: usize = 16 + RECORD_BYTES;
 
 /// `S_IFMT`, from the frozen `stat(2)` ABI.
 const S_IFMT: i32 = 0o170000;
@@ -270,6 +275,30 @@ impl Offsets {
 }
 
 /// One of the three functions, and how its arguments are read.
+/// Where a program finds the timed function's arguments.
+#[derive(Clone, Copy)]
+enum Args<'a> {
+    /// A trampoline's: the context is an array of them.
+    Typed(&'a Function),
+    /// A kprobe's: the registers `pt_regs` saved, by argument, read with
+    /// probe reads past them.
+    Regs(&'a [i16; 4]),
+}
+
+impl Args<'_> {
+    fn load(self, program: &mut Program, into: u8, index: usize) {
+        let at = match self {
+            Args::Typed(function) => function.arg(index),
+            Args::Regs(regs) => regs[index],
+        };
+        program.push(Insn::ldx(BPF_DW, into, 6, at));
+    }
+
+    fn probed(self) -> bool {
+        matches!(self, Args::Regs(_))
+    }
+}
+
 struct Shape<'a> {
     function: &'a Function,
     via: Via,
@@ -280,14 +309,20 @@ struct Shape<'a> {
 /// A process target is compared as a constant, and with `descendants` every
 /// other thread group is looked up in the map of the processes it started:
 /// a launched shell's `sync`-ing child is the run's.
+/// `kprobe`: the argument registers of a kprobe's `pt_regs`; the record is
+/// then filled here, into the stamp, since the kretprobe sees none of them.
+#[allow(clippy::too_many_arguments)]
 fn entry_instructions(
     shape: &Shape<'_>,
     narrowing: Narrowing,
     descendants: Option<i32>,
     pending_fd: i32,
     drops_fd: i32,
+    at: &Offsets,
+    kprobe: Option<&[i16; 4]>,
 ) -> Result<Vec<Insn>, String> {
     let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
     program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
     program.push(Insn::mov64_reg(7, 0));
     if let Some(tgid) = narrowing.tgid {
@@ -315,19 +350,31 @@ fn entry_instructions(
         program.push(Insn::ldx(BPF_W, 1, R10, PEND_KEY));
         program.jump_to(SKIP, Insn::jne_imm(1, tid as i32, 0));
     }
+    let value = match kprobe {
+        None => PEND_VALUE,
+        Some(regs) => {
+            for slot in 0..(K_VALUE_BYTES as i16 / 8) {
+                program.push(Insn::st_imm(BPF_DW, R10, K_TS + slot * 8, 0));
+            }
+            program.push(Insn::st_imm(BPF_W, R10, K_EVENT + R_VIA, shape.via as i32));
+            program.push(Insn::st_imm(BPF_W, R10, K_EVENT + R_FD, -1));
+            fill_record(&mut program, shape, Args::Regs(regs), at, K_EVENT);
+            K_TS
+        }
+    };
     program.push(Insn::call(helper::KTIME_GET_NS));
-    program.push(Insn::stx(BPF_DW, R10, PEND_VALUE + PEND_TS, 0));
+    program.push(Insn::stx(BPF_DW, R10, value + PEND_TS, 0));
     program.push(Insn::st_imm(
         BPF_DW,
         R10,
-        PEND_VALUE + PEND_TAG,
+        value + PEND_TAG,
         shape.via as i32,
     ));
     program.extend(Insn::load_map_fd(1, pending_fd));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, PEND_KEY as i32));
     program.push(Insn::mov64_reg(3, R10));
-    program.push(Insn::add64_imm(3, PEND_VALUE as i32));
+    program.push(Insn::add64_imm(3, value as i32));
     // Only if absent. A thread already stamped is either inside an outer
     // function of the three -- and that call is the one being timed -- or it
     // is a sync whose exit half the kernel skipped, and the two are told apart
@@ -349,7 +396,7 @@ fn entry_instructions(
     // A shallower function, stamped a moment ago, is the call this one is
     // nested in. Stamped long ago, it is an orphan all the same.
     program.push(Insn::ldx(BPF_DW, 2, 0, PEND_TS));
-    program.push(Insn::ldx(BPF_DW, 1, R10, PEND_VALUE + PEND_TS));
+    program.push(Insn::ldx(BPF_DW, 1, R10, value + PEND_TS));
     program.push(Insn::sub64_reg(1, 2));
     program.jump_to("orphan", Insn::jsge_imm(1, NEST_WINDOW_NS, 0));
     program.jump_to(SKIP, Insn::ja());
@@ -361,7 +408,7 @@ fn entry_instructions(
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, PEND_KEY as i32));
     program.push(Insn::mov64_reg(3, R10));
-    program.push(Insn::add64_imm(3, PEND_VALUE as i32));
+    program.push(Insn::add64_imm(3, value as i32));
     program.push(Insn::mov64_imm(4, 0));
     program.push(Insn::call(helper::MAP_UPDATE_ELEM));
     program.jump_to(SKIP, Insn::jsge_imm(0, 0, 0));
@@ -376,17 +423,33 @@ fn entry_instructions(
 }
 
 /// Writes the file's identity from a typed `struct file *` in slot zero.
-fn typed_identity(program: &mut Program, function: &Function, at: &Offsets) {
-    program.push(Insn::ldx(BPF_DW, 1, 6, function.arg(0)));
+fn typed_identity(program: &mut Program, args: Args<'_>, at: &Offsets, base: i16) {
+    if args.probed() {
+        // A kprobe's file is a register's value: each step a probe read.
+        args.load(program, 7, 0);
+        read_pointer(program, SCRATCH, 7, 7, at.f_inode);
+        program.jump_to("unnamed", Insn::jeq_imm(7, 0, 0));
+        read_field(program, base + R_INO, 8, 7, at.i_ino);
+        read_narrow(program, SCRATCH, 2, 7, at.i_mode);
+        program.push(Insn::ldx(BPF_W, 1, R10, SCRATCH));
+        program.push(Insn::and64_imm(1, S_IFMT));
+        program.push(Insn::stx(BPF_W, R10, base + R_MODE, 1));
+        read_pointer(program, SCRATCH, 7, 7, at.i_sb);
+        program.jump_to("unnamed", Insn::jeq_imm(7, 0, 0));
+        read_field(program, base + R_DEV, 4, 7, at.s_dev);
+        program.label("unnamed");
+        return;
+    }
+    args.load(program, 1, 0);
     program.push(Insn::ldx(BPF_DW, 1, 1, at.f_inode as i16));
     program.push(Insn::ldx(BPF_DW, 2, 1, at.i_ino as i16));
-    program.push(Insn::stx(BPF_DW, R10, EVENT + R_INO, 2));
+    program.push(Insn::stx(BPF_DW, R10, base + R_INO, 2));
     program.push(Insn::ldx(BPF_H, 2, 1, at.i_mode as i16));
     program.push(Insn::and64_imm(2, S_IFMT));
-    program.push(Insn::stx(BPF_W, R10, EVENT + R_MODE, 2));
+    program.push(Insn::stx(BPF_W, R10, base + R_MODE, 2));
     program.push(Insn::ldx(BPF_DW, 1, 1, at.i_sb as i16));
     program.push(Insn::ldx(BPF_W, 1, 1, at.s_dev as i16));
-    program.push(Insn::stx(BPF_W, R10, EVENT + R_DEV, 1));
+    program.push(Insn::stx(BPF_W, R10, base + R_DEV, 1));
 }
 
 /// Writes the file's identity by walking the calling task's descriptor table.
@@ -395,15 +458,21 @@ fn typed_identity(program: &mut Program, function: &Function, at: &Offsets) {
 /// when it grows, and another thread can close the descriptor while the sync
 /// runs. A step that finds a null pointer leaves the identity at zero, which the
 /// collector reports as a sync it could not name rather than as file zero.
-fn descriptor_identity(program: &mut Program, function: &Function, at: &Offsets, wrapper: bool) {
+fn descriptor_identity(
+    program: &mut Program,
+    args: Args<'_>,
+    at: &Offsets,
+    wrapper: bool,
+    base: i16,
+) {
     // The descriptor, zero-extended: a word store and a word load. A
     // wrapper's is the first argument in the saved registers, a typed load
     // through its one argument.
-    program.push(Insn::ldx(BPF_DW, 1, 6, function.arg(0)));
+    args.load(program, 1, 0);
     if wrapper {
         program.push(Insn::ldx(BPF_DW, 1, 1, at.regs_di as i16));
     }
-    program.push(Insn::stx(BPF_W, R10, EVENT + R_FD, 1));
+    program.push(Insn::stx(BPF_W, R10, base + R_FD, 1));
     program.push(Insn::call(GET_CURRENT_TASK));
     program.push(Insn::mov64_reg(7, 0));
     read_pointer(program, SCRATCH, 7, 7, at.task_files);
@@ -414,26 +483,74 @@ fn descriptor_identity(program: &mut Program, function: &Function, at: &Offsets,
     // the caller's number, and a probe read past the end reads somebody else's.
     read_narrow(program, SCRATCH, 4, 7, at.fdt_max_fds);
     program.push(Insn::ldx(BPF_W, 1, R10, SCRATCH));
-    program.push(Insn::ldx(BPF_W, 2, R10, EVENT + R_FD));
+    program.push(Insn::ldx(BPF_W, 2, R10, base + R_FD));
     program.jump_to("unnamed", Insn::jge_reg(2, 1, 0));
     read_pointer(program, SCRATCH, 7, 7, at.fdt_fd);
     program.jump_to("unnamed", Insn::jeq_imm(7, 0, 0));
-    program.push(Insn::ldx(BPF_W, 2, R10, EVENT + R_FD));
+    program.push(Insn::ldx(BPF_W, 2, R10, base + R_FD));
     program.push(Insn::lsh64_imm(2, 3));
     program.push(Insn::add64_reg(7, 2));
     read_pointer(program, SCRATCH, 7, 7, 0);
     program.jump_to("unnamed", Insn::jeq_imm(7, 0, 0));
     read_pointer(program, SCRATCH, 7, 7, at.f_inode);
     program.jump_to("unnamed", Insn::jeq_imm(7, 0, 0));
-    read_field(program, EVENT + R_INO, 8, 7, at.i_ino);
+    read_field(program, base + R_INO, 8, 7, at.i_ino);
     read_narrow(program, SCRATCH, 2, 7, at.i_mode);
     program.push(Insn::ldx(BPF_W, 1, R10, SCRATCH));
     program.push(Insn::and64_imm(1, S_IFMT));
-    program.push(Insn::stx(BPF_W, R10, EVENT + R_MODE, 1));
+    program.push(Insn::stx(BPF_W, R10, base + R_MODE, 1));
     read_pointer(program, SCRATCH, 7, 7, at.i_sb);
     program.jump_to("unnamed", Insn::jeq_imm(7, 0, 0));
-    read_field(program, EVENT + R_DEV, 4, 7, at.s_dev);
+    read_field(program, base + R_DEV, 4, 7, at.s_dev);
     program.label("unnamed");
+}
+
+/// The record's fields the arguments make -- the range, `datasync`, the
+/// descriptor and the file -- written at `base`: the exit's record for a
+/// trampoline, the stamp's copy at the entry for a kprobe.
+fn fill_record(program: &mut Program, shape: &Shape<'_>, args: Args<'_>, at: &Offsets, base: i16) {
+    let datasync_arg = match shape.via {
+        Via::Descriptor | Via::Whole => Some(1),
+        Via::Range => Some(3),
+        Via::Fsync | Via::Fdatasync => None,
+    };
+    match shape.via {
+        Via::Range => {
+            args.load(program, 1, 1);
+            program.push(Insn::stx(BPF_DW, R10, base + R_START, 1));
+            args.load(program, 1, 2);
+            program.push(Insn::stx(BPF_DW, R10, base + R_END, 1));
+        }
+        Via::Descriptor | Via::Whole | Via::Fsync | Via::Fdatasync => {
+            // A whole-file sync is `vfs_fsync_range(file, 0, LLONG_MAX, ...)`
+            // and the record says so in the same numbers. `LLONG_MAX` does not
+            // fit an immediate, so it is built: all ones, shifted right once.
+            program.push(Insn::mov64_imm(1, -1));
+            program.push(Insn::rsh64_imm(1, 1));
+            program.push(Insn::stx(BPF_DW, R10, base + R_END, 1));
+        }
+    }
+    match datasync_arg {
+        Some(arg) => {
+            args.load(program, 1, arg);
+            program.push(Insn::stx(BPF_W, R10, base + R_DATASYNC, 1));
+        }
+        // Which wrapper it is says it.
+        None => {
+            program.push(Insn::st_imm(
+                BPF_W,
+                R10,
+                base + R_DATASYNC,
+                i32::from(shape.via == Via::Fdatasync),
+            ));
+        }
+    }
+
+    match shape.via {
+        Via::Descriptor => descriptor_identity(program, args, at, false, base),
+        Via::Fsync | Via::Fdatasync => descriptor_identity(program, args, at, true, base),
+        Via::Whole | Via::Range => typed_identity(program, args, at, base),
+    }
 }
 
 /// The exit half: close this function's stamp, fill one record, publish it.
@@ -443,6 +560,7 @@ fn exit_instructions(
     pending_fd: i32,
     ring_fd: i32,
     drops_fd: i32,
+    kprobe: Option<Kprobe>,
 ) -> Result<Vec<Insn>, String> {
     let function = shape.function;
     let mut program = Program::new();
@@ -461,6 +579,21 @@ fn exit_instructions(
     program.push(Insn::ldx(BPF_DW, 1, 0, PEND_TAG));
     program.jump_to("done", Insn::jne_imm(1, shape.via as i32, 0));
     program.push(Insn::ldx(BPF_DW, 9, 0, PEND_TS));
+    match kprobe {
+        // The record the entry filled, copied out before the stamp is gone.
+        Some(_) => {
+            for slot in 0..(RECORD_BYTES as i16 / 8) {
+                program.push(Insn::ldx(BPF_DW, 1, 0, 16 + slot * 8));
+                program.push(Insn::stx(BPF_DW, R10, EVENT + slot * 8, 1));
+            }
+        }
+        // Every byte of the record, before any of it is filled.
+        None => {
+            for slot in 0..(RECORD_BYTES as i16 / 8) {
+                program.push(Insn::st_imm(BPF_DW, R10, EVENT + slot * 8, 0));
+            }
+        }
+    }
     program.extend(Insn::load_map_fd(1, pending_fd));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, PEND_KEY as i32));
@@ -470,63 +603,24 @@ fn exit_instructions(
     program.push(Insn::sub64_reg(0, 9));
     program.push(Insn::mov64_reg(9, 0));
 
-    // Every byte of the record, before any of it is filled.
-    for slot in 0..(RECORD_BYTES as i16 / 8) {
-        program.push(Insn::st_imm(BPF_DW, R10, EVENT + slot * 8, 0));
-    }
     program.push(Insn::stx(BPF_DW, R10, EVENT + R_TS, 8));
     program.push(Insn::stx(BPF_DW, R10, EVENT + R_DURATION, 9));
     program.push(Insn::stx(BPF_W, R10, EVENT + R_TID, 7));
     program.push(Insn::mov64_reg(1, 7));
     program.push(Insn::rsh64_imm(1, 32));
     program.push(Insn::stx(BPF_W, R10, EVENT + R_TGID, 1));
-    program.push(Insn::st_imm(BPF_W, R10, EVENT + R_VIA, shape.via as i32));
-    program.push(Insn::st_imm(BPF_W, R10, EVENT + R_FD, -1));
-
-    let datasync_arg = match shape.via {
-        Via::Descriptor | Via::Whole => Some(1),
-        Via::Range => Some(3),
-        Via::Fsync | Via::Fdatasync => None,
-    };
-    match shape.via {
-        Via::Range => {
-            program.push(Insn::ldx(BPF_DW, 1, 6, function.arg(1)));
-            program.push(Insn::stx(BPF_DW, R10, EVENT + R_START, 1));
-            program.push(Insn::ldx(BPF_DW, 1, 6, function.arg(2)));
-            program.push(Insn::stx(BPF_DW, R10, EVENT + R_END, 1));
-        }
-        Via::Descriptor | Via::Whole | Via::Fsync | Via::Fdatasync => {
-            // A whole-file sync is `vfs_fsync_range(file, 0, LLONG_MAX, ...)`
-            // and the record says so in the same numbers. `LLONG_MAX` does not
-            // fit an immediate, so it is built: all ones, shifted right once.
-            program.push(Insn::mov64_imm(1, -1));
-            program.push(Insn::rsh64_imm(1, 1));
-            program.push(Insn::stx(BPF_DW, R10, EVENT + R_END, 1));
-        }
-    }
-    match datasync_arg {
-        Some(arg) => {
-            program.push(Insn::ldx(BPF_DW, 1, 6, function.arg(arg)));
-            program.push(Insn::stx(BPF_W, R10, EVENT + R_DATASYNC, 1));
-        }
-        // Which wrapper it is says it.
+    match kprobe {
         None => {
-            program.push(Insn::st_imm(
-                BPF_W,
-                R10,
-                EVENT + R_DATASYNC,
-                i32::from(shape.via == Via::Fdatasync),
-            ));
+            program.push(Insn::st_imm(BPF_W, R10, EVENT + R_VIA, shape.via as i32));
+            program.push(Insn::st_imm(BPF_W, R10, EVENT + R_FD, -1));
+            fill_record(&mut program, shape, Args::Typed(function), at, EVENT);
+            program.push(Insn::ldx(BPF_DW, 1, 6, function.ret()));
+        }
+        Some(kprobe) => {
+            program.push(Insn::ldx(BPF_DW, 1, 6, kprobe.ret));
         }
     }
-    program.push(Insn::ldx(BPF_DW, 1, 6, function.ret()));
     program.push(Insn::stx(BPF_W, R10, EVENT + R_RET, 1));
-
-    match shape.via {
-        Via::Descriptor => descriptor_identity(&mut program, function, at, false),
-        Via::Fsync | Via::Fdatasync => descriptor_identity(&mut program, function, at, true),
-        Via::Whole | Via::Range => typed_identity(&mut program, function, at),
-    }
 
     program.push(Insn::mov64_reg(1, R10));
     program.push(Insn::add64_imm(1, (EVENT + R_COMM) as i32));
@@ -558,6 +652,8 @@ pub struct FsyncProgram {
     drops: Counters,
     pending: Hash,
     links: Vec<Link>,
+    /// The kprobe pairs' events, under `bpf:kprobe`.
+    probes: Vec<crate::bpf::attach::PerfAttachment>,
     /// Whether `do_fsync` was found and timed.
     pub by_descriptor: bool,
     /// The processes a process target started, followed from the fork.
@@ -567,11 +663,28 @@ pub struct FsyncProgram {
 impl FsyncProgram {
     /// `at_syscalls`: the `bpf:fentry:syscall` backend, timed at the two
     /// syscalls' wrappers and `vfs_fsync_range`, rather than at the VFS.
-    pub fn load(narrowing: Narrowing, at_syscalls: bool) -> Result<Self, String> {
+    ///
+    /// `kprobes`: the `bpf:kprobe` backend, the same three functions through
+    /// a kprobe pair each, for a kernel built without the function tracer.
+    pub fn load(narrowing: Narrowing, at_syscalls: bool, kprobes: bool) -> Result<Self, String> {
         let btf = crate::bpf::kernel_btf()?;
         if at_syscalls {
             return Self::load_at_syscalls(btf, narrowing);
         }
+        let kprobe = if kprobes {
+            let mut regs = [0i16; 4];
+            for (index, reg) in regs.iter_mut().enumerate() {
+                *reg = btf.function_argument(index)? as i16;
+            }
+            Some((
+                regs,
+                Kprobe {
+                    ret: btf.return_register()? as i16,
+                },
+            ))
+        } else {
+            None
+        };
         // `do_fsync` is static: a kernel that inlines it into the two
         // syscalls has no `FUNC` for it, and on that kernel `vfs_fsync` is the
         // one the syscalls call out of line. So it is timed where it exists
@@ -598,7 +711,7 @@ impl FsyncProgram {
                 },
             );
         }
-        Self::attach(btf, narrowing, &shapes, by_descriptor.is_some())
+        Self::attach(btf, narrowing, &shapes, by_descriptor.is_some(), kprobe)
     }
 
     fn load_at_syscalls(btf: &Btf, narrowing: Narrowing) -> Result<Self, String> {
@@ -626,7 +739,7 @@ impl FsyncProgram {
             function: &range,
             via: Via::Range,
         });
-        Self::attach(btf, narrowing, &shapes, true)
+        Self::attach(btf, narrowing, &shapes, true, None)
     }
 
     fn attach(
@@ -634,6 +747,7 @@ impl FsyncProgram {
         narrowing: Narrowing,
         shapes: &[Shape<'_>],
         by_descriptor: bool,
+        kprobe: Option<([i16; 4], Kprobe)>,
     ) -> Result<Self, String> {
         let offsets = Offsets::read(btf)?;
         let descendants = match narrowing.tgid {
@@ -650,7 +764,12 @@ impl FsyncProgram {
                 .map_err(|error| map_failure("fsync ring buffer", error))?;
         let drops = Counters::create(3, "omn_fsync_drop")
             .map_err(|error| map_failure("fsync drop counter", error))?;
-        let pending = Hash::create(4, PEND_VALUE_BYTES, MAX_PENDING, "omn_fsync_pend")
+        let value_bytes = if kprobe.is_some() {
+            K_VALUE_BYTES
+        } else {
+            PEND_VALUE_BYTES
+        };
+        let pending = Hash::create(4, value_bytes, MAX_PENDING, "omn_fsync_pend")
             .map_err(|error| map_failure("fsync pending map", error))?;
 
         let mut built = Vec::new();
@@ -661,6 +780,8 @@ impl FsyncProgram {
                 followed,
                 pending.as_raw_fd(),
                 drops.as_raw_fd(),
+                &offsets,
+                kprobe.as_ref().map(|(regs, _)| regs),
             )?;
             let exit = exit_instructions(
                 shape,
@@ -668,11 +789,37 @@ impl FsyncProgram {
                 pending.as_raw_fd(),
                 ring_map.as_raw_fd(),
                 drops.as_raw_fd(),
+                kprobe.map(|(_, kprobe)| kprobe),
             )?;
             built.push((shape, entry, exit));
         }
         // Every exit before any entry, for the reason `HistogramProgram::load`
         // gives.
+        let mut probes = Vec::new();
+        if kprobe.is_some() {
+            use crate::bpf::attach::{kprobe, Scope};
+            for (shape, _, exit) in &built {
+                probes.push(kprobe(
+                    &shape.function.name,
+                    0,
+                    true,
+                    exit,
+                    "omn_fsync_x",
+                    Scope::System,
+                )?);
+            }
+            for (shape, entry, _) in &built {
+                probes.push(kprobe(
+                    &shape.function.name,
+                    0,
+                    false,
+                    entry,
+                    "omn_fsync_e",
+                    Scope::System,
+                )?);
+            }
+        }
+        let built = if kprobe.is_some() { Vec::new() } else { built };
         // Each half's batch at once (`fentry::attach_many`).
         let exits: Vec<_> = built
             .iter()
@@ -701,6 +848,7 @@ impl FsyncProgram {
             drops,
             pending,
             links,
+            probes,
             by_descriptor,
             descendants,
         })
@@ -726,6 +874,11 @@ impl FsyncProgram {
     /// Runs the kernel skipped; see `fentry::Link::misses`.
     pub fn missed(&self) -> u64 {
         fentry::misses(&self.links)
+            + self
+                .probes
+                .iter()
+                .map(|probe| fentry::recursion_misses(probe.program()).unwrap_or(0))
+                .sum::<u64>()
             + self
                 .descendants
                 .as_ref()
@@ -790,6 +943,19 @@ mod tests {
                 assert!(at + size <= *other_at || other_at + other_size <= *at);
             }
         }
+        // A kprobe entry's stamp is built where the trampoline's pending
+        // value is, which it does not use, and clear of the rest.
+        let stamp = (K_TS, K_VALUE_BYTES as i16);
+        assert!(stamp.0 >= -512 && stamp.0 + stamp.1 <= 0);
+        for (at, size) in [
+            regions[0],
+            regions[1],
+            regions[2],
+            regions[3],
+            (FOLLOW_KEY, 4),
+        ] {
+            assert!(stamp.0 + stamp.1 <= at || at + size <= stamp.0, "{at}");
+        }
     }
 
     /// A negative return is an errno and must survive as one.
@@ -832,14 +998,15 @@ mod tests {
                 function: &function,
                 via,
             };
-            let exit = exit_instructions(&shape, &offsets, 3, 4, 5).expect("a program");
+            let exit = exit_instructions(&shape, &offsets, 3, 4, 5, None).expect("a program");
             assert!(
                 exit.iter()
                     .any(|insn| insn.code == 0x55 && insn.imm == via as i32),
                 "the {name} exit must compare the stamp's tag with its own"
             );
             let entry =
-                entry_instructions(&shape, Narrowing::default(), None, 3, 5).expect("a program");
+                entry_instructions(&shape, Narrowing::default(), None, 3, 5, &offsets, None)
+                    .expect("a program");
             assert!(
                 entry
                     .iter()
@@ -871,6 +1038,7 @@ mod tests {
             3,
             4,
             5,
+            None,
         )
         .expect("a program");
         let bound = exit

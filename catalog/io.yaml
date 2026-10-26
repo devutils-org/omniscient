@@ -501,8 +501,11 @@
     # Ubuntu 24.04's and Rocky 9's `fsync`) still calls `vfs_fsync_range`.
     - {id: "bpf:fentry:syscall", requires: ["btf", "bpf", "fentry:__{arch}_sys_fsync", "fentry:__{arch}_sys_fdatasync", "fentry:vfs_fsync_range"], cost: high,
        degraded: "timed at the fsync and fdatasync syscalls' wrappers, or at vfs_fsync_range where the syscall dispatcher inlined a wrapper: a sync the kernel makes for itself (nfsd) is in only when it reaches vfs_fsync_range, and a wrapper's time includes the descriptor lookup"}
-    - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: high,
-       degraded: "no BTF: struct offsets are not portable across kernels"}
+    # A kernel built without the function tracer (Alpine's): the same
+    # functions through kprobe pairs, the record filled at the entry, the
+    # fields read with probe reads at offsets out of the kernel's BTF.
+    - {id: "bpf:kprobe", requires: ["btf", "kprobe", "bpf", "kprobe:do_fsync or vfs_fsync", "kprobe:vfs_fsync_range"], cost: high,
+       degraded: "kprobe pairs rather than trampolines: each call costs a breakpoint on entry and a return probe, and a call whose return probe the kernel had no instance left for is counted as orphaned, not timed"}
   modes: [trace]
   emits: [hist, topk, raw, summary]
   targets: {pid: native, tid: native, launch: native, cgroup: bpf_only, system: native}

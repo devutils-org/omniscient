@@ -641,6 +641,18 @@ fn on_the_path(function: &Function) -> Support {
 /// kprobe on it counted a thousand writes and none of a thousand pwrites, and
 /// `io.fs` reported a program that wrote with `pwrite` as one that never wrote.
 pub fn kprobe_support(function: &str) -> Support {
+    // `a or b`: the first a call reaches, as `fentry:a or b`.
+    if function.contains(" or ") {
+        let mut reasons = Vec::new();
+        for alternative in function.split(" or ") {
+            match kprobe_support(alternative.trim()) {
+                Support::Yes => return Support::Yes,
+                Support::No(reason) => reasons.push(reason),
+                other => return other,
+            }
+        }
+        return Support::No(reasons.join("; and "));
+    }
     let listed = std::fs::read_to_string("/proc/kallsyms").map(|symbols| {
         symbols.lines().any(|line| {
             let mut fields = line.split_whitespace();

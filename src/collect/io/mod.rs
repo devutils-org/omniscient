@@ -186,6 +186,7 @@ pub fn factories() -> Vec<Factory> {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
                 at_syscalls: false,
+                kprobes: false,
             }))
         }),
         // Where the compiler inlined `do_fsync` and `vfs_fsync` into the
@@ -195,6 +196,17 @@ pub fn factories() -> Vec<Factory> {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
                 at_syscalls: true,
+                kprobes: false,
+            }))
+        }),
+        // The same functions through kprobe pairs, for a kernel built without
+        // the function tracer.
+        Factory::new("io.fsync", "bpf:kprobe", |resolved| {
+            Ok(Box::new(fsync::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+                at_syscalls: false,
+                kprobes: true,
             }))
         }),
         // The page cache, from the two tracepoints on either side of a read:
