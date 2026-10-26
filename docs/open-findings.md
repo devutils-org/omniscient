@@ -14591,3 +14591,20 @@ preempted slices off the cpu 0.3 s beside 22.8 s queued) and
 `scenario_net::every_datagram_sent_to_a_closed_port_is_a_drop_with_one_reason`
 (the machine's own drops, 1779 `SOCKET_RCVBUFF`, crowded the scenario's
 `NO_SOCKET` out of the ring); the second also once in the net file's run.
+
+### For the flaky tally, after the twenty-seventh wave (2026-10-26)
+
+The wave's last full run (`cargo test --workspace --no-fail-fast` at
+`6e72ddf`, under `systemd-run`): 3287 passed, 2 failed, both known to vary
+with the machine.
+
+- `collect::mem::footprint::tests::the_rollup_agrees_with_the_per_mapping_walk`
+  (*"in 10 tries the walk never landed between the rollups around it"*):
+  passed alone.
+- `cases::every_case_names_its_known_cause_both_ways`: in the full run,
+  `cpython-perf-map/a-blocking-read`'s dominant stack named 1 of 4 frames
+  through the perf map (python moved from 3.14.7 to 3.14.8 under the case);
+  alone, that check passed and `sqlite3-stripped/a-plan-that-scans/mcp`'s
+  cited on-cpu time was 38 ms from `timer.cpu_ns` where 27 are allowed. Two
+  different checks, each passing in the other run: noise on cases measured
+  against the live machine, not either one's defect, until one repeats.
