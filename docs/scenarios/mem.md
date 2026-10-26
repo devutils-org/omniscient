@@ -966,7 +966,7 @@ Four refusals, four codes, checked side by side by
 |---|---|---|
 | `mem.compaction --pid 1` | 2 | compaction is work done for a whole memory zone, and the entry declares no `pid` |
 | `mem.reclaim -m poll@100ms -e timeline` | 2 | a stall is the gap between two events; the refusal names `trace` and `count` |
-| `--backend force:bpf:tp`, all four | 3 | the classic tracepoint attach, which no collector serves — this is also the backend comparison these four have, since each has exactly one implemented backend |
+| `--backend force:bpf:tp`, all four | 0 or 1 | the classic tracepoint road, collected since the twenty-seventh wave for a kernel without BTF: it measures where tracefs is readable, and is the machine's refusal, naming what it lacks, where not -- never "no collector is written" |
 | `mem.kmalloc -k mem` | 3 | see D8 below |
 
 ### Does every axis the catalog declares work?

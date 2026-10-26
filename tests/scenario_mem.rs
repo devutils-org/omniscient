@@ -2994,26 +2994,21 @@ fn the_kernel_sources_tell_their_three_refusals_apart() {
         stderr(&polled)
     );
 
-    // 1 or 3: the classic tracepoint backend, which this machine can reach
-    // only through tracefs and which no collector serves either way. Forcing
-    // it is the backend comparison these four have -- each has exactly one
-    // implemented backend that traces (`mem.page_alloc`'s `/proc/vmstat`
-    // only counts), so the comparison is with the refusal: the machine's
-    // where tracefs is not readable here, the build's where it is.
+    // 0 or 1: the classic tracepoint backend, collected since the
+    // twenty-seventh wave for a kernel without BTF, which this machine can
+    // reach only through tracefs. Pinned, it measures where tracefs is
+    // readable and is the machine's refusal, naming what it lacks, where not:
+    // never the build's.
     for (source, implemented) in [
-        ("mem.page_alloc", &["bpf:raw_tp", "fs:proc"][..]),
-        ("mem.kmalloc", &["bpf:raw_tp"][..]),
-        ("mem.reclaim", &["bpf:raw_tp"][..]),
-        ("mem.compaction", &["bpf:raw_tp"][..]),
+        ("mem.page_alloc", &["bpf:raw_tp", "bpf:tp", "fs:proc"][..]),
+        ("mem.kmalloc", &["bpf:raw_tp", "bpf:tp"][..]),
+        ("mem.reclaim", &["bpf:raw_tp", "bpf:tp"][..]),
+        ("mem.compaction", &["bpf:raw_tp", "bpf:tp"][..]),
     ] {
         assert_eq!(
             implemented_backends(source),
             implemented,
-            "{source} has one implemented backend that traces, so its comparison is with the refusal"
-        );
-        assert!(
-            declared_backends(source).contains(&"bpf:tp".to_owned()),
-            "{source} declares the classic tracepoint backend"
+            "{source}'s implemented backends"
         );
         let forced = run(&[
             source,
@@ -3027,7 +3022,23 @@ fn the_kernel_sources_tell_their_three_refusals_apart() {
             "--backend",
             "force:bpf:tp",
         ]);
-        assert_refused_in_the_chains_order(source, "bpf:tp", &forced);
+        let message = stderr(&forced);
+        match lacks_here(source, "bpf:tp") {
+            Some(lacks) => {
+                assert_eq!(code(&forced), EXIT_NO_VIABLE_BACKEND, "{message}");
+                assert!(
+                    lacks
+                        .iter()
+                        .all(|needs| message.contains(&format!("{needs}: missing"))),
+                    "the machine's refusal names what it lacks: {message}"
+                );
+            }
+            None => assert_eq!(code(&forced), 0, "`{source}` through `bpf:tp`: {message}"),
+        }
+        assert!(
+            !message.contains("no collector is written"),
+            "`{source}`'s classic backend is written: {message}"
+        );
     }
 
     // 3: a key an aggregating collector cannot carry, refused before anything

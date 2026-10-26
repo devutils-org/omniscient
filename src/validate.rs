@@ -1205,7 +1205,7 @@ mod tests {
 
     #[test]
     fn the_mode_emit_matrix_is_enforced() {
-        let request = request("cpu.oncpu_time", Target::Pid(vec![1]), "poll@1s", "hist");
+        let request = request("cpu.cycles", Target::Pid(vec![1]), "poll@1s", "hist");
         let rejections = reject(&request);
         assert!(
             rejections
