@@ -1713,22 +1713,22 @@ mod tests {
     fn a_pinned_backend_this_build_lacks_is_refused_for_the_machine_first() {
         let embedded = Catalog::embedded().unwrap();
         let mut entry = embedded
-            .get(&"proc.exec".parse().unwrap())
-            .expect("proc.exec is in the catalog")
+            .get(&"io.bytes".parse().unwrap())
+            .expect("io.bytes is in the catalog")
             .clone();
         let classic = entry
             .backends
             .iter_mut()
             .find(|backend| backend.id == "bpf:tp")
-            .expect("proc.exec has a classic tracepoint backend");
+            .expect("io.bytes has a classic tracepoint backend");
         classic.requires.push("kernel>=999.0".to_owned());
         assert!(
-            !crate::collect::implements("proc.exec", "bpf:tp"),
+            !crate::collect::implements("io.bytes", "bpf:tp"),
             "this test needs a backend with no collector"
         );
         let catalog = Catalog::from_entries(vec![entry]).unwrap();
         let capabilities = Capabilities::detect();
-        let mut request = fixture("proc.exec", Target::System);
+        let mut request = fixture("io.bytes", Target::System);
         request.mode = Mode::Trace;
         request.emit = vec!["summary".parse().unwrap()];
         request.backend = Some("force:bpf:tp".parse().unwrap());
@@ -1756,14 +1756,14 @@ mod tests {
 
         // And with nothing missing, the build's gap is the runner's to say.
         let mut entry = embedded
-            .get(&"proc.exec".parse().unwrap())
-            .expect("proc.exec is in the catalog")
+            .get(&"io.bytes".parse().unwrap())
+            .expect("io.bytes is in the catalog")
             .clone();
         let classic = entry
             .backends
             .iter_mut()
             .find(|backend| backend.id == "bpf:tp")
-            .expect("proc.exec has a classic tracepoint backend");
+            .expect("io.bytes has a classic tracepoint backend");
         classic.requires.clear();
         let catalog = Catalog::from_entries(vec![entry]).unwrap();
         request.backend = Some("force:bpf:tp".parse().unwrap());

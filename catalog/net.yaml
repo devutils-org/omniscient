@@ -76,11 +76,13 @@
       requires: ["bpf", "btf", "raw_tracepoint:inet_sock_set_state(sock *, int, int)", "bpf_map:ringbuf"]
       join: {key: "sock:cookie", match: eq, ttl: 300s}
       cost: low
+    # The classic record, read without BTF: both ends, the duration and the
+    # owner, and no socket layout to read a cookie, an inode or a count in.
     - id: "bpf:tp"
       requires: ["tracepoint:sock:inet_sock_set_state", "bpf"]
-      join: {key: "sock:cookie", match: eq, ttl: 300s}
       cost: low
-      equivalent: true
+      degraded: "no socket: no cookie to join net.tcp.rtt on, no inode, and no bytes or
+                 segments"
   modes: [trace]
   emits: [hist, topk, raw, timeline, summary]
   targets: {system: native, pid: native, tid: native, launch: native}
@@ -164,7 +166,10 @@
   unit: count
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:tcp_retransmit_skb(sock *, sk_buff *, int)|(sock *, sk_buff *)", "bpf_map:ringbuf"], cost: low}
-    - {id: "bpf:tp", requires: ["tracepoint:tcp:tcp_retransmit_skb", "bpf"], cost: low, equivalent: true}
+    # The classic record, read without BTF: both ends, ports and state, and
+    # no socket layout to find a cookie or an inode in.
+    - {id: "bpf:tp", requires: ["tracepoint:tcp:tcp_retransmit_skb", "bpf"], cost: low,
+       degraded: "no socket: no cookie or inode to key or join a retransmission on, no error, and no state on 4.19"}
     - {id: "fs:proc", requires: ["/proc/net/snmp"], cost: free, modes: [count], emits: [summary, rate, raw],
        targets: {system: native}, keys: [], filter_fields: [],
        degraded: "TCP's own count of segments sent again over the window, from /proc/net/snmp:
@@ -183,7 +188,11 @@
   unit: count
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:kfree_skb(sk_buff *, void *, skb_drop_reason, sock *)|(sk_buff *, void *, skb_drop_reason)", "bpf_map:ringbuf"], cost: low}
-    - {id: "bpf:tp", requires: ["tracepoint:skb:kfree_skb", "bpf"], cost: low, equivalent: true}
+    # The classic record, read without BTF: the drop site, the ethertype,
+    # and the reason from 5.17 on; no `sk_buff` layout, so no length and no
+    # socket.
+    - {id: "bpf:tp", requires: ["tracepoint:skb:kfree_skb", "bpf"], cost: low,
+       degraded: "no length and no socket, so no protocol or bytes; no reason before 5.17"}
   modes: [trace, count]
   emits: [rate, topk, raw, summary, stack]
   targets: {system: native}

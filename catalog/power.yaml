@@ -118,7 +118,7 @@
     # fires without a cpuidle driver too: the kernel's default idle loop
     # announces itself as state 1, which is what a guest has.
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:cpu_idle(unsigned int, unsigned int)", "bpf_map:ringbuf"], cost: low, modes: [trace]}
-    - {id: "bpf:tp", requires: ["tracepoint:power:cpu_idle", "bpf"], cost: low, equivalent: true}
+    - {id: "bpf:tp", requires: ["tracepoint:power:cpu_idle", "bpf"], cost: low, modes: [trace], equivalent: true}
     - {id: "fs:sys", requires: ["/sys/devices/system/cpu/cpu0/cpuidle"], cost: high, modes: [poll, count],
        degraded: "residency totals only: no transition timeline"}
   modes: [trace, poll, count]

@@ -65,6 +65,9 @@ pub struct Prepare {
     /// resolver credits every `bpf` backend with filtering in the kernel and
     /// then leaves its events alone.
     pub filter: Option<FilterExpr>,
+    /// Through the classic `tcp:tcp_retransmit_skb` (`bpf:tp`), for a kernel
+    /// without BTF.
+    pub classic: bool,
 }
 
 impl Prepared for Prepare {
@@ -85,7 +88,9 @@ impl Prepared for Prepare {
                 target.kind()
             )));
         }
-        Ok(Box::new(RetransmitCollector::new(self.mode, self.filter)))
+        let mut collector = RetransmitCollector::new(self.mode, self.filter);
+        collector.classic = self.classic;
+        Ok(Box::new(collector))
     }
 }
 
@@ -105,6 +110,9 @@ pub struct RetransmitCollector {
     without_cookie: u64,
     /// Whether this kernel's tracepoint says what the send returned.
     has_error: bool,
+    /// Whether the program goes on the classic tracepoint, whose records
+    /// carry no socket: no cookie, no inode.
+    classic: bool,
     predicate: UserFilter,
 }
 
@@ -126,6 +134,7 @@ impl RetransmitCollector {
             seen: 0,
             without_cookie: 0,
             has_error: true,
+            classic: false,
             predicate: UserFilter::new(predicate, "retransmissions"),
         }
     }
@@ -210,16 +219,22 @@ impl RetransmitCollector {
 
 /// What an event carries beside its value: both ends, the state and the error.
 fn attributes(again: &Retransmit, retransmits: u64, has_error: bool) -> Vec<Attr> {
-    let mut attrs = vec![
-        Attr::uint("retransmits", retransmits),
+    let mut attrs = vec![Attr::uint("retransmits", retransmits)];
+    if again.state == Retransmit::NO_STATE {
+        // 4.19's classic record carries no state: named, so a predicate
+        // over `state_name` can select these.
+        attrs.push(Attr::text("state_name", "unknown"));
+    } else {
         // The kernel's own state number, and the name beside it: a
         // retransmission from SYN_SENT and one from ESTABLISHED are different
         // faults with the same count.
-        Attr::uint("state", u64::from(again.state)),
-        Attr::text("state_name", state_name(again.state)),
+        attrs.push(Attr::uint("state", u64::from(again.state)));
+        attrs.push(Attr::text("state_name", state_name(again.state)));
+    }
+    attrs.extend([
         Attr::uint("family", u64::from(again.family)),
         Attr::uint("sport", u64::from(again.local_port())),
-    ];
+    ]);
     if let Some(address) = again.local_address() {
         attrs.push(Attr::text("saddr", address));
     }
@@ -247,7 +262,11 @@ impl Collector for RetransmitCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        let program = RetransmitProgram::load(RING_BYTES)?;
+        let program = if self.classic {
+            RetransmitProgram::load_classic(RING_BYTES)?
+        } else {
+            RetransmitProgram::load(RING_BYTES)?
+        };
         self.has_error = program.has_error();
         self.program = Some(program);
         Ok(())
@@ -285,14 +304,22 @@ impl Collector for RetransmitCollector {
 
     fn notes(&self) -> Vec<String> {
         let mut notes = Vec::new();
-        if !self.has_error {
+        if !self.has_error && !self.classic {
             notes.push(
                 "this kernel's `tcp_retransmit_skb` does not carry what the resend returned, so \
                  no event here has an `error`"
                     .to_owned(),
             );
         }
-        if self.without_cookie > 0 {
+        if self.classic {
+            notes.push(
+                "through the classic `tcp:tcp_retransmit_skb`, read without BTF: a \
+                 retransmission carries its connection's addresses and ports, and its state from \
+                 5.x on (`state_name` is `unknown` before), but no socket, so no `cookie` or \
+                 `inode` and no join on one, and no `error`"
+                    .to_owned(),
+            );
+        } else if self.without_cookie > 0 {
             notes.push(format!(
                 "{} of {} retransmissions carry no socket key: the kernel generates a socket \
                  cookie the first time something asks for one, and nothing ever asked for \
@@ -330,6 +357,7 @@ mod tests {
                 freq: "997hz".parse().expect("a frequency"),
             },
             filter: None,
+            classic: false,
         });
         let Err(error) = prepared.attach(&Target::System) else {
             panic!("a sampled mode must be refused");
@@ -345,6 +373,7 @@ mod tests {
         let prepared = Box::new(Prepare {
             mode: Mode::Trace,
             filter: None,
+            classic: false,
         });
         let Err(error) = prepared.attach(&Target::Pid(vec![1])) else {
             panic!("a retransmission is issued by a timer");

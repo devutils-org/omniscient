@@ -31,13 +31,19 @@
 //! table, and the kernel prints that table, in that order, as the row labels of
 //! `/proc/softirqs`. So the collector reads the numbers out of the running
 //! kernel and hands them in; nothing in this file assumes that `NET_RX` is 3.
+//!
+//! **A kernel without BTF** has the classic `irq:softirq_entry` and
+//! `softirq_exit` instead, whose record carries the same vector as its `vec`
+//! field; the programs differ in that one load and nothing else.
 
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
+use super::context::Record;
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
 use super::map::{map_failure, row_map, select_rows, Counters, Rows};
 use super::net_program::{bucket_low_ns, count_drop, expect_signature, load, push_log2_bucket};
+use super::proc_events::Attached;
 use super::syscall::{self, BPF_MAP_TYPE_PERCPU_ARRAY};
 
 /// The prototype both programs are written against.
@@ -71,6 +77,8 @@ const DROP_KEY: i16 = -16;
 /// The row map of this interval, as the generation slot named it, kept in
 /// this slot once per run; see `map::select_rows`.
 const ROWS_SLOT: i16 = -64;
+/// Where a classic record's vector is copied when it is not aligned.
+const SCRATCH: i16 = -72;
 
 /// The layout of a row key.
 const KEY_CPU: i16 = 0;
@@ -164,15 +172,35 @@ fn only_these_vectors(
     program.label(keep);
 }
 
-/// The program on `softirq_entry`: a handler is about to run on this cpu.
-fn entry_instructions(btf: &Btf, vectors: &[u32], at_fd: i32) -> Result<Vec<Insn>, String> {
-    expect_signature(btf, "softirq_entry", &[&SIGNATURE])?;
+/// Where the vector number comes from: a raw tracepoint's first argument,
+/// checked against BTF, or a classic record's `vec` field.
+#[derive(Clone, Copy)]
+enum Vector<'a> {
+    Raw(&'a Btf),
+    Classic(&'a Record),
+}
 
+impl Vector<'_> {
+    /// `r6 = ctx; r7 = vector`, after checking the tracepoint takes one.
+    fn load(self, program: &mut Program, tracepoint: &str) -> Result<(), String> {
+        program.push(Insn::mov64_reg(6, 1));
+        match self {
+            Vector::Raw(btf) => {
+                expect_signature(btf, tracepoint, &[&SIGNATURE])?;
+                program.push(Insn::ldx(BPF_DW, 7, 6, 0));
+            }
+            Vector::Classic(record) => record.load(program, 7, 6, "vec", SCRATCH)?,
+        }
+        Ok(())
+    }
+}
+
+/// The program on `softirq_entry`: a handler is about to run on this cpu.
+fn entry_instructions(vector: Vector, vectors: &[u32], at_fd: i32) -> Result<Vec<Insn>, String> {
     let mut program = Program::new();
     // r6 keeps the context and r7 the vector number; both survive the helper
     // calls, which clobber r1 through r5.
-    program.push(Insn::mov64_reg(6, 1));
-    program.push(Insn::ldx(BPF_DW, 7, 6, 0));
+    vector.load(&mut program, "softirq_entry")?;
     only_these_vectors(&mut program, vectors, 7, "measure", "done");
 
     program.push(Insn::call(helper::KTIME_GET_NS));
@@ -203,17 +231,14 @@ fn entry_instructions(btf: &Btf, vectors: &[u32], at_fd: i32) -> Result<Vec<Insn
 /// The program on `softirq_exit`: the handler has finished, so the interval
 /// that opened at `softirq_entry` can be closed and bucketed.
 fn exit_instructions(
-    btf: &Btf,
+    vector: Vector,
     vectors: &[u32],
     at_fd: i32,
     rows_fd: i32,
     counters_fd: i32,
 ) -> Result<Vec<Insn>, String> {
-    expect_signature(btf, "softirq_exit", &[&SIGNATURE])?;
-
     let mut program = Program::new();
-    program.push(Insn::mov64_reg(6, 1));
-    program.push(Insn::ldx(BPF_DW, 7, 6, 0));
+    vector.load(&mut program, "softirq_exit")?;
     only_these_vectors(&mut program, vectors, 7, "measure", "done");
 
     program.push(Insn::call(helper::KTIME_GET_NS));
@@ -314,10 +339,8 @@ pub struct SoftIrqProgram {
     rows: Rows,
     counters: Counters,
     _at: OwnedFd,
-    entry_program: OwnedFd,
-    _entry_link: OwnedFd,
-    exit_program: OwnedFd,
-    _exit_link: OwnedFd,
+    /// The entry program, then the exit program.
+    attached: Vec<Attached>,
 }
 
 /// What one drain found, beside the measurements.
@@ -338,6 +361,17 @@ impl SoftIrqProgram {
     /// rather than a request for the whole machine, and is refused here.
     pub fn load(vectors: &[u32]) -> Result<Self, String> {
         let btf = super::kernel_btf()?;
+        Self::load_with(vectors, Some(btf))
+    }
+
+    /// The same two programs on the classic `irq` tracepoints (`bpf:tp`), for
+    /// a kernel without BTF.
+    pub fn load_classic(vectors: &[u32]) -> Result<Self, String> {
+        Self::load_with(vectors, None)
+    }
+
+    /// `btf` is the raw road's; without it, the classic one.
+    fn load_with(vectors: &[u32], btf: Option<&Btf>) -> Result<Self, String> {
         if vectors.is_empty() {
             return Err(
                 "no softirq vector was named, and a network source measuring every vector would \
@@ -362,16 +396,26 @@ impl SoftIrqProgram {
         let counters = Counters::create(COUNTER_SLOTS, "omn_sirq_lost")
             .map_err(|error| map_failure("softirq counters", error))?;
 
-        let entry = entry_instructions(btf, vectors, at.as_raw_fd())?;
+        let records = match btf {
+            Some(_) => None,
+            None => Some((
+                Record::of("irq", "softirq_entry")?,
+                Record::of("irq", "softirq_exit")?,
+            )),
+        };
+        let (entry_vector, exit_vector) = match (&records, btf) {
+            (Some((entry, exit)), _) => (Vector::Classic(entry), Vector::Classic(exit)),
+            (None, Some(btf)) => (Vector::Raw(btf), Vector::Raw(btf)),
+            (None, None) => unreachable!("records are read wherever there is no BTF"),
+        };
+        let entry = entry_instructions(entry_vector, vectors, at.as_raw_fd())?;
         let exit = exit_instructions(
-            btf,
+            exit_vector,
             vectors,
             at.as_raw_fd(),
             rows.as_raw_fd(),
             counters.as_raw_fd(),
         )?;
-        let entry_program = load(&entry, "omn_sirq_in")?;
-        let exit_program = load(&exit, "omn_sirq_out")?;
 
         // The entry program is attached first, on purpose. An interval opened
         // by a program whose partner is not attached yet is simply never
@@ -379,17 +423,31 @@ impl SoftIrqProgram {
         // entry was recorded would close an interval nobody opened, and the
         // zero test is the only thing standing between that and a duration
         // measured from an uninitialised slot.
-        let entry_link = crate::bpf::program::attach_raw("softirq_entry", &entry_program)?;
-        let exit_link = crate::bpf::program::attach_raw("softirq_exit", &exit_program)?;
+        let attached = if records.is_some() {
+            vec![
+                Attached::classic("irq", "softirq_entry", &entry, "omn_sirq_in")?,
+                Attached::classic("irq", "softirq_exit", &exit, "omn_sirq_out")?,
+            ]
+        } else {
+            let attach = |tracepoint: &str, instructions: &[Insn], name: &str| {
+                let program = load(instructions, name)?;
+                let link = crate::bpf::program::attach_raw(tracepoint, &program)?;
+                Ok::<_, String>(Attached::Raw {
+                    program,
+                    _link: link,
+                })
+            };
+            vec![
+                attach("softirq_entry", &entry, "omn_sirq_in")?,
+                attach("softirq_exit", &exit, "omn_sirq_out")?,
+            ]
+        };
 
         Ok(Self {
             rows,
             counters,
             _at: at,
-            entry_program,
-            _entry_link: entry_link,
-            exit_program,
-            _exit_link: exit_link,
+            attached,
         })
     }
 
@@ -423,7 +481,7 @@ impl SoftIrqProgram {
     /// Runs of these programs the kernel skipped because one was already
     /// running on that cpu; see `BlockProgram::skipped`, where it was measured.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::program::skipped([&self.entry_program, &self.exit_program])
+        crate::bpf::program::skipped(self.attached.iter().filter_map(Attached::program))
     }
 
     /// Handler runs the histogram could not hold, which are lost.
@@ -496,14 +554,35 @@ mod tests {
     #[test]
     fn both_programs_are_built_against_the_running_kernel() {
         let Some(btf) = kernel_btf() else { return };
-        let entry = entry_instructions(btf, &[2, 3], 3).expect("an entry program");
-        let exit = exit_instructions(btf, &[2, 3], 3, 4, 5).expect("an exit program");
+        let entry = entry_instructions(Vector::Raw(btf), &[2, 3], 3).expect("an entry program");
+        let exit = exit_instructions(Vector::Raw(btf), &[2, 3], 3, 4, 5).expect("an exit program");
         assert_eq!(entry.last().copied(), Some(Insn::exit()));
         assert_eq!(exit.last().copied(), Some(Insn::exit()));
         assert!(
             exit.len() > entry.len(),
             "closing an interval and bucketing it is the longer half"
         );
+    }
+
+    /// The classic programs read the vector out of 4.19's `irq:softirq_entry`
+    /// record, at its offset, and are otherwise the raw ones.
+    #[test]
+    fn the_classic_programs_read_the_records_vector() {
+        let record = Record::from_layout(
+            "irq:softirq_entry",
+            super::super::attach::parse_layout(
+                "\tfield:unsigned int vec;\toffset:8;\tsize:4;\tsigned:0;\n",
+            ),
+        );
+        let entry = entry_instructions(Vector::Classic(&record), &[3], 77).expect("an entry");
+        let exit = exit_instructions(Vector::Classic(&record), &[3], 77, 4, 5).expect("an exit");
+        for program in [&entry, &exit] {
+            assert_eq!(
+                program[1],
+                Insn::ldx(BPF_W, 7, 6, 8),
+                "the vector, at offset 8"
+            );
+        }
     }
 
     /// Invariant 6, checked in the instruction stream rather than trusted.
@@ -517,8 +596,8 @@ mod tests {
         let Some(btf) = kernel_btf() else { return };
         const KTIME_GET_BOOT_NS: i32 = 125;
         for program in [
-            entry_instructions(btf, &[3], 3).expect("an entry program"),
-            exit_instructions(btf, &[3], 3, 4, 5).expect("an exit program"),
+            entry_instructions(Vector::Raw(btf), &[3], 3).expect("an entry program"),
+            exit_instructions(Vector::Raw(btf), &[3], 3, 4, 5).expect("an exit program"),
         ] {
             let called: Vec<i32> = program
                 .iter()
@@ -542,8 +621,8 @@ mod tests {
         // A file descriptor number that cannot be mistaken for a vector: the
         // map descriptor is written into the instruction stream as an
         // immediate too, and 3 is both a plausible fd and NET_RX.
-        let one = entry_instructions(btf, &[3], 77).expect("a program");
-        let two = entry_instructions(btf, &[2, 3], 77).expect("a program");
+        let one = entry_instructions(Vector::Raw(btf), &[3], 77).expect("a program");
+        let two = entry_instructions(Vector::Raw(btf), &[2, 3], 77).expect("a program");
         assert_eq!(
             one.iter().filter(|insn| insn.imm == 3).count(),
             1,
@@ -603,6 +682,7 @@ mod tests {
             (AT_KEY, 4, "at key"),
             (DROP_KEY, 4, "drop key"),
             (ROWS_SLOT, 8, "row map slot"),
+            (SCRATCH, 8, "scratch"),
         ];
         for (at, size, name) in regions {
             assert!(at >= -512 && at + size <= 0, "`{name}` is off the frame");
@@ -624,7 +704,8 @@ mod tests {
     #[test]
     fn the_row_map_is_taken_from_the_slot_once_per_run() {
         let Some(btf) = kernel_btf() else { return };
-        let program = exit_instructions(btf, &[2, 3], 3, 4, 5).expect("an exit program");
+        let program =
+            exit_instructions(Vector::Raw(btf), &[2, 3], 3, 4, 5).expect("an exit program");
         crate::bpf::map::assert_rows_taken_once(&program, 4);
     }
 

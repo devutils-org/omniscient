@@ -57,7 +57,16 @@ pub fn factories() -> Vec<Factory> {
             Ok(Box::new(freq_pmu::Prepare::new(resolved.request.mode)?))
         }),
         Factory::new("power.cstate", "bpf:raw_tp", |resolved| {
-            Ok(Box::new(idle_bpf::Prepare::new(resolved.request.mode)?))
+            Ok(Box::new(idle_bpf::Prepare::new(
+                resolved.request.mode,
+                false,
+            )?))
+        }),
+        Factory::new("power.cstate", "bpf:tp", |resolved| {
+            Ok(Box::new(idle_bpf::Prepare::new(
+                resolved.request.mode,
+                true,
+            )?))
         }),
         Factory::new("power.cstate", "fs:sys", |resolved| {
             Ok(Box::new(cstate::Prepare::new(resolved.request.mode)?))

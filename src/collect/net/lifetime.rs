@@ -49,6 +49,9 @@ pub struct Prepare {
     /// resolver credits every `bpf` backend with filtering in the kernel and
     /// then leaves its events alone.
     pub filter: Option<FilterExpr>,
+    /// Through the classic `sock:inet_sock_set_state` (`bpf:tp`), for a
+    /// kernel without BTF.
+    pub classic: bool,
 }
 
 impl Prepared for Prepare {
@@ -85,11 +88,15 @@ impl Prepared for Prepare {
         let mut collector = LifetimeCollector::new(self.filter);
         collector.tree = tree;
         collector.thread = thread;
+        collector.classic = self.classic;
         Ok(Box::new(collector))
     }
 }
 
 pub struct LifetimeCollector {
+    /// Whether the program goes on the classic tracepoint, whose
+    /// connections carry no socket names and no counts.
+    classic: bool,
     program: Option<TcpLifetimeProgram>,
     /// The program's loss counters, as last read (`collect::kernel`).
     counts: KernelCounts,
@@ -205,6 +212,7 @@ impl LifetimeCollector {
             outside: 0,
             unplaced: 0,
             unowned: 0,
+            classic: false,
         }
     }
 
@@ -217,7 +225,7 @@ impl LifetimeCollector {
                 0 => Vec::new(),
                 cookie => vec![KeyValue::Sock { cookie }],
             },
-            attrs: attributes(closed),
+            attrs: attributes(closed, !self.classic),
             collector_id: CollectorId::unstamped(),
             seq,
         }
@@ -350,15 +358,22 @@ impl LifetimeCollector {
 
 /// What an event carries beside its value: both ends of the connection, what
 /// crossed it, and the task current at the close.
-fn attributes(closed: &TcpLifetime) -> Vec<Attr> {
-    let mut attrs = vec![
-        Attr::uint("duration_ns", closed.duration_ns),
-        // Payload bytes, which is what `bytes_sent` counts in the kernel: not
-        // segments, not wire bytes, and not retransmissions.
-        Attr::uint("bytes_sent", closed.bytes_sent),
-        Attr::uint("bytes_received", closed.bytes_received),
-        Attr::uint("segs_out", u64::from(closed.segs_out)),
-        Attr::uint("segs_in", u64::from(closed.segs_in)),
+///
+/// `counted` is whether the program could read what crossed the connection:
+/// the classic record has no `tcp_sock` to read it out of.
+fn attributes(closed: &TcpLifetime, counted: bool) -> Vec<Attr> {
+    let mut attrs = vec![Attr::uint("duration_ns", closed.duration_ns)];
+    if counted {
+        attrs.extend([
+            // Payload bytes, which is what `bytes_sent` counts in the kernel:
+            // not segments, not wire bytes, and not retransmissions.
+            Attr::uint("bytes_sent", closed.bytes_sent),
+            Attr::uint("bytes_received", closed.bytes_received),
+            Attr::uint("segs_out", u64::from(closed.segs_out)),
+            Attr::uint("segs_in", u64::from(closed.segs_in)),
+        ]);
+    }
+    attrs.extend([
         Attr::uint("family", u64::from(closed.family)),
         Attr::uint("sport", u64::from(closed.local_port())),
         // The connection's owner when the program saw it act on the socket
@@ -375,7 +390,7 @@ fn attributes(closed: &TcpLifetime) -> Vec<Attr> {
                 "at_close"
             },
         ),
-    ];
+    ]);
     if closed.inode != 0 {
         // Zero is not an inode. A socket accepted from a listen queue has none
         // until `accept()` gives it a file, which is after it is established,
@@ -403,7 +418,11 @@ impl Collector for LifetimeCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        self.program = Some(TcpLifetimeProgram::load(RING_BYTES)?);
+        self.program = Some(if self.classic {
+            TcpLifetimeProgram::load_classic(RING_BYTES)?
+        } else {
+            TcpLifetimeProgram::load(RING_BYTES)?
+        });
         Ok(())
     }
 
@@ -466,7 +485,7 @@ impl Collector for LifetimeCollector {
                 self.unowned
             ));
         }
-        if self.without_inode > 0 {
+        if !self.classic && self.without_inode > 0 {
             notes.push(format!(
                 "{} of {} connections carry no inode: a socket taken off a listen queue has \
                  no file, and therefore no inode, until `accept()` gives it one -- which is \
@@ -474,7 +493,15 @@ impl Collector for LifetimeCollector {
                 self.without_inode, self.closed,
             ));
         }
-        if self.without_cookie > 0 {
+        if self.classic {
+            notes.push(
+                "through the classic `sock:inet_sock_set_state`, read without BTF: a connection \
+                 carries its ends, its duration and its owner, but no socket -- no `cookie` to \
+                 join `net.tcp.rtt` on, no `inode` -- and nothing of what crossed it: no \
+                 `bytes_sent`, `bytes_received`, `segs_out` or `segs_in`"
+                    .to_owned(),
+            );
+        } else if self.without_cookie > 0 {
             notes.push(format!(
                 "{} of {} connections carry no socket key: the kernel generates a socket cookie \
                  the first time something asks for one, and nothing ever asked for theirs, so \
@@ -532,6 +559,7 @@ mod tests {
         let prepared = Box::new(Prepare {
             mode: Mode::Count,
             filter: None,
+            classic: false,
         });
         let Err(error) = prepared.attach(&Target::System) else {
             panic!("a counted mode must be refused");
@@ -547,6 +575,7 @@ mod tests {
             Box::new(Prepare {
                 mode: Mode::Trace,
                 filter: None,
+                classic: false,
             })
         };
         assert!(prepared().attach(&Target::Pid(vec![1])).is_ok());
@@ -578,7 +607,7 @@ mod tests {
     /// series silently.
     #[test]
     fn every_filter_field_the_catalog_declares_is_on_an_event() {
-        let attributes = attributes(&closed());
+        let attributes = attributes(&closed(), true);
         let catalog = crate::catalog::Catalog::embedded().expect("the built-in catalog");
         let declared = &catalog
             .get(&"net.tcp.lifetime".parse().expect("a source id"))
@@ -597,7 +626,7 @@ mod tests {
     /// order a person reads.
     #[test]
     fn the_events_numbers_are_the_records_numbers() {
-        let attributes = attributes(&closed());
+        let attributes = attributes(&closed(), true);
         let of = |name: &str| {
             attributes
                 .iter()
@@ -629,7 +658,7 @@ mod tests {
             vec![KeyValue::Sock { cookie: 4242 }]
         );
         assert!(
-            !attributes(&anonymous)
+            !attributes(&anonymous, true)
                 .iter()
                 .any(|attr| attr.name == "cookie"),
             "a cookie of zero must not be reported as a cookie"
@@ -690,6 +719,7 @@ mod tests {
         let prepared = Box::new(Prepare {
             mode: Mode::Trace,
             filter: None,
+            classic: false,
         });
         assert!(prepared.attach(&Target::Tid(vec![me])).is_ok());
         let mut collector = LifetimeCollector::new(None);

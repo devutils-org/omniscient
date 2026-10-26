@@ -590,7 +590,7 @@ invisible to every CPU profiler.
 | Metric | What it measures | Backends | Modes | Targets | Cost | Det. |
 |---|---|---|---|---|---|---|
 | `sched.runqlat` | run queue wait | `bpf:raw_tp` · `bpf:tp` sched_switch, read from the task's `sched_info` | trace | all | med | low |
-| `sched.offcpu` | blocked time + stack | `bpf:tp:stacks` sched_switch + callchain · `bpf:raw_tp` · `bpf:tp` (no stack) | trace | pid, tid, cgroup, system | high / med | low |
+| `sched.offcpu` | blocked time + stack | `bpf:raw_tp` · `bpf:tp:stacks` sched_switch + callchain · `bpf:tp` (no stack) | trace | pid, tid, cgroup, system | med / high | low |
 | `sched.wakeup` | **wakeup chain** (who unblocks whom) | `bpf:raw_tp` · `bpf:tp` sched_wakeup (waker context) | trace | pid, tid, cgroup, system, launch | med | low |
 | `sched.switches` | context switches | `pmu:sw` · `bpf:raw_tp` sched_switch (count, reached first for a cgroup) · `bpf:tp` | count, trace | all | free / low | low |
 | `sched.migrations` | migrations | `bpf:raw_tp` · `bpf:tp` sched_migrate_task · `pmu:sw` cpu-migrations | trace, count | pid, cgroup, system | low | low |

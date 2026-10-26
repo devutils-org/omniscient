@@ -32,16 +32,19 @@
 //! through anonymous members is under `## Needs from another stream` in
 //! `docs/open-findings.md`.
 
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::AsRawFd;
 
 use super::btf::Btf;
+use super::context::Record;
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
 use super::map::{map_failure, Counters, StackTraces};
 use super::net_program::{
     count_drop, expect_signature, load, read_field, read_narrow, SocketInode,
 };
+use super::proc_events::Attached;
 use super::ring::{ring_bytes, RingBuffer};
 use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
+use super::transport::{Output, Transport};
 
 /// The prototypes this program is written against.
 ///
@@ -97,8 +100,11 @@ pub struct PacketDrop {
     /// id into the program's stack map, negative when the kernel could not
     /// walk or intern it, [`PacketDrop::NO_STACK`] when no stack was asked.
     pub stack: i32,
-    /// Written as zero, so that no byte of the record is left to the stack.
-    _pad: u32,
+    /// The packet's ethertype (`ETH_P_IP` is 0x0800), host order, from the
+    /// classic record, which carries `skb->protocol` where the raw program
+    /// cannot read it (see the module comment). Zero on the raw road: no
+    /// frame is ethertype 0.
+    pub ethertype: u32,
 }
 
 /// The size of the record the program writes.
@@ -111,6 +117,14 @@ const MAX_STACK_DEPTH: u32 = 64;
 impl PacketDrop {
     /// What a protocol field holds when the drop had no socket.
     pub const NO_PROTOCOL: u32 = u32::MAX;
+
+    /// What the protocol field holds where the program could not look for a
+    /// socket at all: the classic record, read without BTF, names none.
+    pub const UNKNOWN_PROTOCOL: u32 = u32::MAX - 1;
+
+    /// What the reason field holds where the tracepoint gives none, which is
+    /// every kernel before 5.17.
+    pub const NO_REASON: u32 = u32::MAX;
 
     /// What the stack field holds when the request asked for no stack. Not a
     /// value `bpf_get_stackid` returns: its errors are small negative errnos.
@@ -150,7 +164,7 @@ impl PacketDrop {
             inode: long(32),
             location: long(40),
             stack: word(48) as i32,
-            _pad: 0,
+            ethertype: word(52),
         })
     }
 }
@@ -166,7 +180,7 @@ const COOKIE: i16 = EVENT + 24;
 const INODE: i16 = EVENT + 32;
 const LOCATION: i16 = EVENT + 40;
 const STACK: i16 = EVENT + 48;
-const PAD: i16 = EVENT + 52;
+const ETHERTYPE: i16 = EVENT + 52;
 /// The one-word key of the drop counter, and eight bytes a pointer read lands
 /// in, both below the record.
 const DROP_KEY: i16 = EVENT - 8;
@@ -211,7 +225,7 @@ fn instructions(
 
     // The kernel stack at the drop, interned: the walk happens once per
     // distinct stack and four bytes travel with each drop.
-    program.push(Insn::st_imm(BPF_W, R10, PAD, 0));
+    program.push(Insn::st_imm(BPF_W, R10, ETHERTYPE, 0));
     match stacks_fd {
         Some(stacks_fd) => {
             program.push(Insn::mov64_reg(1, 6));
@@ -256,12 +270,7 @@ fn instructions(
     inode.read(&mut program, INODE, 8, SCRATCH, "inode_read");
 
     program.label("emit");
-    program.extend(Insn::load_map_fd(1, ring_fd));
-    program.push(Insn::mov64_reg(2, R10));
-    program.push(Insn::add64_imm(2, EVENT as i32));
-    program.push(Insn::mov64_imm(3, RECORD_BYTES as i32));
-    program.push(Insn::mov64_imm(4, 0));
-    program.push(Insn::call(helper::RINGBUF_OUTPUT));
+    Output::Ring(ring_fd).push(&mut program, 6, EVENT, RECORD_BYTES as i32);
 
     // A full ring returns an error and the drop is gone. Nothing else would
     // ever record that: a measurement of what the machine threw away, itself
@@ -278,15 +287,85 @@ fn instructions(
     Ok(instructions)
 }
 
+/// The program on the classic `skb:kfree_skb` (`bpf:tp`), for a kernel
+/// without BTF: the record's drop site, its ethertype, and its reason where
+/// the record has one (5.17 on). With no BTF there is no `sk_buff` layout to
+/// read a length or a socket out of, so neither is looked for: the protocol
+/// is [`PacketDrop::UNKNOWN_PROTOCOL`], not the no-socket one.
+fn classic_instructions(
+    record: &Record,
+    output: Output,
+    drops_fd: i32,
+    stacks_fd: Option<i32>,
+) -> Result<Vec<Insn>, String> {
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::stx(BPF_DW, R10, TS, 0));
+
+    if record.has("reason") {
+        record.load(&mut program, 1, 6, "reason", SCRATCH)?;
+        program.push(Insn::stx(BPF_W, R10, REASON, 1));
+    } else {
+        program.push(Insn::st_imm(
+            BPF_W,
+            R10,
+            REASON,
+            PacketDrop::NO_REASON as i32,
+        ));
+    }
+    record.load(&mut program, 1, 6, "location", SCRATCH)?;
+    program.push(Insn::stx(BPF_DW, R10, LOCATION, 1));
+    record.load(&mut program, 1, 6, "protocol", SCRATCH)?;
+    program.push(Insn::stx(BPF_W, R10, ETHERTYPE, 1));
+
+    program.push(Insn::st_imm(BPF_W, R10, LEN, 0));
+    program.push(Insn::st_imm(
+        BPF_W,
+        R10,
+        PROTOCOL,
+        PacketDrop::UNKNOWN_PROTOCOL as i32,
+    ));
+    program.push(Insn::st_imm(BPF_W, R10, FAMILY, 0));
+    program.push(Insn::st_imm(BPF_DW, R10, COOKIE, 0));
+    program.push(Insn::st_imm(BPF_DW, R10, INODE, 0));
+    match stacks_fd {
+        Some(stacks_fd) => {
+            program.push(Insn::mov64_reg(1, 6));
+            program.extend(Insn::load_map_fd(2, stacks_fd));
+            program.push(Insn::mov64_imm(3, 0));
+            program.push(Insn::call(helper::GET_STACKID));
+            program.push(Insn::stx(BPF_W, R10, STACK, 0));
+        }
+        None => {
+            program.push(Insn::st_imm(BPF_W, R10, STACK, PacketDrop::NO_STACK));
+        }
+    }
+
+    output.push(&mut program, 6, EVENT, RECORD_BYTES as i32);
+    program.jump_to("done", Insn::jsge_imm(0, 0, 0));
+    count_drop(&mut program, drops_fd, DROP_KEY, 0, "done");
+
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
 /// A loaded, attached drop program and the two maps it writes.
 pub struct DropProgram {
-    ring: RingBuffer,
+    ring: Transport,
     drops: Counters,
     stacks: Option<StackTraces>,
     /// Whether this kernel's tracepoint carries the receive-side socket.
     has_rx_socket: bool,
-    program: OwnedFd,
-    _link: OwnedFd,
+    /// Whether the program is on the classic tracepoint.
+    classic: bool,
+    attached: Attached,
 }
 
 impl DropProgram {
@@ -321,13 +400,52 @@ impl DropProgram {
             .map_err(|error| format!("cannot map the drop ring buffer: {error}"))?;
 
         Ok(Self {
-            ring,
+            ring: Transport::from_ring(ring),
             drops,
             stacks,
             has_rx_socket,
-            program,
-            _link: link,
+            classic: false,
+            attached: Attached::Raw {
+                program,
+                _link: link,
+            },
         })
+    }
+
+    /// The classic tracepoint's form (`bpf:tp`), for a kernel without BTF.
+    pub fn load_classic(requested_ring_bytes: usize, with_stacks: bool) -> Result<Self, String> {
+        let record = Record::of("skb", "kfree_skb")?;
+        // The record's stamp is its first field, as the raw program's is.
+        let ring = Transport::create(requested_ring_bytes, Some(0), "omn_drops")?;
+        let drops = Counters::create(1, "omn_drop_lost")
+            .map_err(|error| map_failure("drop counter", error))?;
+        let stacks = with_stacks
+            .then(|| {
+                StackTraces::create(MAX_STACKS, MAX_STACK_DEPTH, "omn_drop_stk")
+                    .map_err(|error| map_failure("drop stack map", error))
+            })
+            .transpose()?;
+        let instructions = classic_instructions(
+            &record,
+            ring.output(),
+            drops.as_raw_fd(),
+            stacks.as_ref().map(StackTraces::as_raw_fd),
+        )?;
+        let attached = Attached::classic("skb", "kfree_skb", &instructions, "omn_kfree_skb")?;
+        Ok(Self {
+            ring,
+            drops,
+            stacks,
+            has_rx_socket: false,
+            classic: true,
+            attached,
+        })
+    }
+
+    /// Whether the program is on the classic tracepoint, whose drops carry
+    /// no length and no socket.
+    pub fn classic(&self) -> bool {
+        self.classic
     }
 
     /// Whether this kernel's tracepoint says which socket a received packet
@@ -350,7 +468,7 @@ impl DropProgram {
     /// Runs of these programs the kernel skipped because one was already
     /// running on that cpu; see `BlockProgram::skipped`, where it was measured.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::program::skipped([&self.program])
+        crate::bpf::program::skipped(self.attached.program())
     }
 
     /// Drops the program could not publish because the ring was full.
@@ -372,6 +490,7 @@ impl DropProgram {
 
 #[cfg(test)]
 mod tests {
+    use super::super::insn::BPF_H;
     use super::*;
 
     /// The running kernel's BTF, read once for the whole process.
@@ -407,7 +526,7 @@ mod tests {
             (INODE, offset_of!(PacketDrop, inode), "inode"),
             (LOCATION, offset_of!(PacketDrop, location), "location"),
             (STACK, offset_of!(PacketDrop, stack), "stack"),
-            (PAD, offset_of!(PacketDrop, _pad), "_pad"),
+            (ETHERTYPE, offset_of!(PacketDrop, ethertype), "ethertype"),
         ] {
             assert_eq!(
                 (stack - EVENT) as usize,
@@ -437,6 +556,45 @@ mod tests {
         assert_eq!(dropped.protocol(), Some(0), "IPPROTO_IP is a protocol");
     }
 
+    /// The classic program reads 4.19's record, which has no reason, and
+    /// 5.17's, which has one; every field is written before it publishes.
+    #[test]
+    fn the_classic_program_writes_every_field_from_either_record() {
+        let old = "\tfield:void * skbaddr;\toffset:8;\tsize:8;\tsigned:0;\n\
+                   \tfield:void * location;\toffset:16;\tsize:8;\tsigned:0;\n\
+                   \tfield:unsigned short protocol;\toffset:24;\tsize:2;\tsigned:0;\n";
+        let new =
+            format!("{old}\tfield:enum skb_drop_reason reason;\toffset:28;\tsize:4;\tsigned:0;\n");
+        for (layout, reason) in [(old.to_owned(), false), (new, true)] {
+            let record =
+                Record::from_layout("skb:kfree_skb", super::super::attach::parse_layout(&layout));
+            let program = classic_instructions(&record, Output::PerfArray(3), 4, None)
+                .expect("a classic program");
+            assert_eq!(program.contains(&Insn::ldx(BPF_W, 1, 6, 28)), reason);
+            assert!(
+                program.contains(&Insn::ldx(BPF_H, 1, 6, 24)),
+                "the ethertype"
+            );
+            let published = program
+                .iter()
+                .position(Output::is_output_call)
+                .expect("the program publishes its record");
+            for offset in [
+                TS, REASON, PROTOCOL, LEN, FAMILY, COOKIE, INODE, LOCATION, STACK, ETHERTYPE,
+            ] {
+                assert!(
+                    program[..published].iter().any(|insn| {
+                        let class = insn.code & 0x07;
+                        (class == 0x02 || class == 0x03)
+                            && insn.regs & 0xf == 10
+                            && insn.off == offset
+                    }),
+                    "offset {offset} is never written"
+                );
+            }
+        }
+    }
+
     /// Every byte of the record is written before it is published, including
     /// the fields on the path where there is no socket. An uninitialised one is
     /// whatever the last drop left on the stack, which reads as a plausible
@@ -462,7 +620,7 @@ mod tests {
             (INODE, "inode"),
             (LOCATION, "location"),
             (STACK, "stack"),
-            (PAD, "_pad"),
+            (ETHERTYPE, "ethertype"),
         ] {
             assert!(
                 program[..published].iter().any(|insn| {

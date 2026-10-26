@@ -127,12 +127,28 @@ pub fn factories() -> Vec<Factory> {
             Ok(Box::new(lifetime::Prepare {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
+                classic: false,
+            }))
+        }),
+        Factory::new("net.tcp.lifetime", "bpf:tp", |resolved| {
+            Ok(Box::new(lifetime::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+                classic: true,
             }))
         }),
         Factory::new("net.tcp.retransmit", "bpf:raw_tp", |resolved| {
             Ok(Box::new(retransmit::Prepare {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
+                classic: false,
+            }))
+        }),
+        Factory::new("net.tcp.retransmit", "bpf:tp", |resolved| {
+            Ok(Box::new(retransmit::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+                classic: true,
             }))
         }),
         Factory::new("net.qdisc", "bpf:raw_tp", |resolved| {
@@ -146,6 +162,15 @@ pub fn factories() -> Vec<Factory> {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
                 wants_stacks: resolved.request.emit.contains(&crate::request::Emit::Stack),
+                classic: false,
+            }))
+        }),
+        Factory::new("net.drops", "bpf:tp", |resolved| {
+            Ok(Box::new(drops::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+                wants_stacks: resolved.request.emit.contains(&crate::request::Emit::Stack),
+                classic: true,
             }))
         }),
         Factory::new("net.softirq", "bpf:raw_tp", |resolved| {
@@ -155,6 +180,14 @@ pub fn factories() -> Vec<Factory> {
                 // `bpf` backend with filtering in the kernel and then leaves
                 // its events alone; see `softirq::Prepare`.
                 filter: resolved.request.filter.clone(),
+                classic: false,
+            }))
+        }),
+        Factory::new("net.softirq", "bpf:tp", |resolved| {
+            Ok(Box::new(softirq::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+                classic: true,
             }))
         }),
         // The handshake, over fentry: opened by the caller, closed by softirq.

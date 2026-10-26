@@ -21,7 +21,7 @@
 use std::os::fd::OwnedFd;
 
 use super::btf::Btf;
-use super::insn::{self, Insn, Log2Labels, Program};
+use super::insn::{self, Insn, Log2Labels, Program, BPF_B, R10};
 
 // Written once in `insn.rs` since the seventh wave, and re-exported here so a
 // `net` program still reads as one import.
@@ -180,6 +180,18 @@ pub(super) fn load(instructions: &[Insn], name: &str) -> Result<OwnedFd, String>
             format!("the kernel refused the `{name}` program: {error}")
         }
     })
+}
+
+/// Stores the host-order 16-bit port in `r1` at `at` in network order, the
+/// order the raw program stores `inet_sport` in, and zeroes the word's upper
+/// half. Clobbers `r2`.
+pub(super) fn store_port_be(program: &mut Program, at: i16) {
+    program.push(Insn::mov64_reg(2, 1));
+    program.push(Insn::rsh64_imm(2, 8));
+    program.push(Insn::stx(BPF_B, R10, at, 2));
+    program.push(Insn::stx(BPF_B, R10, at + 1, 1));
+    program.push(Insn::st_imm(BPF_B, R10, at + 2, 0));
+    program.push(Insn::st_imm(BPF_B, R10, at + 3, 0));
 }
 
 #[cfg(test)]

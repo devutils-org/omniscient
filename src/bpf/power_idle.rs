@@ -14,8 +14,9 @@
 //! ones.
 
 use super::btf::Btf;
+use super::context::Record;
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
-use super::proc_events::{publish_to, EventStream};
+use super::proc_events::{publish_to, ClassicProgram, EventStream};
 use super::transport::Output;
 
 /// `cpu_idle(state, cpu_id)` as BTF spells it.
@@ -53,6 +54,8 @@ const EDGE: i16 = -16;
 const STATE: i16 = EDGE + 8;
 const CPU: i16 = EDGE + 12;
 const DROP_KEY: i16 = EDGE - 8;
+/// Where a classic field is copied when it is not aligned.
+const SCRATCH: i16 = DROP_KEY - 8;
 
 fn instructions(btf: &Btf, output: Output, drops_fd: i32) -> Result<Vec<Insn>, String> {
     super::program::prototype(btf, "cpu_idle", &[&SIGNATURE], "the state and the cpu")?;
@@ -83,6 +86,38 @@ fn instructions(btf: &Btf, output: Output, drops_fd: i32) -> Result<Vec<Insn>, S
 }
 
 /// The `cpu_idle` stream.
+/// The same record from the classic `power:cpu_idle` (`bpf:tp`): its
+/// `state` and `cpu_id` fields where the raw tracepoint has two arguments.
+fn classic_instructions(
+    record: &Record,
+    output: Output,
+    drops_fd: i32,
+) -> Result<Vec<Insn>, String> {
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::stx(BPF_DW, R10, EDGE, 0));
+    record.load(&mut program, 1, 6, "state", SCRATCH)?;
+    program.push(Insn::stx(BPF_W, R10, STATE, 1));
+    record.load(&mut program, 1, 6, "cpu_id", SCRATCH)?;
+    program.push(Insn::stx(BPF_W, R10, CPU, 1));
+    publish_to(
+        &mut program,
+        output,
+        6,
+        drops_fd,
+        EDGE,
+        EDGE_BYTES,
+        DROP_KEY,
+    );
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
 pub struct IdleProgram(EventStream);
 
 impl IdleProgram {
@@ -98,6 +133,21 @@ impl IdleProgram {
             requested_ring_bytes,
             instructions,
         )
+        .map(Self)
+    }
+
+    /// The classic tracepoint's form, for a kernel without BTF.
+    pub fn load_classic(requested_ring_bytes: usize) -> Result<Self, String> {
+        let record = Record::of("power", "cpu_idle")?;
+        EventStream::load_classic("omn_cpu_idle", requested_ring_bytes, |output, drops| {
+            let program = ClassicProgram {
+                category: "power",
+                tracepoint: "cpu_idle",
+                instructions: classic_instructions(&record, output, drops)?,
+                name: "omn_cpu_idle",
+            };
+            Ok((vec![program], Vec::new()))
+        })
         .map(Self)
     }
 
@@ -130,6 +180,21 @@ mod tests {
             })
         );
         assert_eq!(IdleEdge::from_bytes(&bytes[..EDGE_BYTES - 1]), None);
+    }
+
+    /// The classic program reads 4.19's `power:cpu_idle` fields in place.
+    #[test]
+    fn the_classic_program_reads_the_records_fields() {
+        let record = Record::from_layout(
+            "power:cpu_idle",
+            super::super::attach::parse_layout(
+                "\tfield:u32 state;\toffset:8;\tsize:4;\tsigned:0;\n\
+                 \tfield:u32 cpu_id;\toffset:12;\tsize:4;\tsigned:0;\n",
+            ),
+        );
+        let program = classic_instructions(&record, Output::PerfArray(3), 4).expect("a program");
+        assert!(program.contains(&Insn::ldx(BPF_W, 1, 6, 8)), "the state");
+        assert!(program.contains(&Insn::ldx(BPF_W, 1, 6, 12)), "the cpu");
     }
 
     #[test]

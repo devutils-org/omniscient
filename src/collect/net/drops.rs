@@ -52,6 +52,9 @@ pub struct Prepare {
     /// Whether the request asked for `stack`: the kernel stack of each drop,
     /// interned in the kernel and symbolised through `/proc/kallsyms`.
     pub wants_stacks: bool,
+    /// Through the classic `skb:kfree_skb` (`bpf:tp`), for a kernel without
+    /// BTF.
+    pub classic: bool,
 }
 
 impl Prepared for Prepare {
@@ -73,6 +76,7 @@ impl Prepared for Prepare {
         }
         let mut collector = DropCollector::new(self.mode, self.filter);
         collector.wants_stacks = self.wants_stacks;
+        collector.classic = self.classic;
         Ok(Box::new(collector))
     }
 }
@@ -96,6 +100,9 @@ pub struct DropCollector {
     /// Whether this kernel's tracepoint says which socket a received packet
     /// would have gone to.
     receive_socket: bool,
+    /// Whether the program goes on the classic tracepoint, whose drops have
+    /// no length, no socket, and before 5.17 no reason.
+    classic: bool,
     predicate: UserFilter,
     /// Stacks asked: each drop carries its kernel stack's id, and `function`,
     /// the symbol `location` is in.
@@ -131,6 +138,7 @@ impl DropCollector {
             receive_socket: true,
             predicate: UserFilter::new(predicate, "drops"),
             wants_stacks: false,
+            classic: false,
             symbolizer: None,
             stacks: BTreeMap::new(),
             unwalkable: 0,
@@ -213,7 +221,7 @@ impl DropCollector {
                 0 => Vec::new(),
                 cookie => vec![KeyValue::Sock { cookie }],
             },
-            attrs: attributes(dropped, drops, bytes),
+            attrs: attributes(dropped, drops, (!self.classic).then_some(bytes)),
             collector_id: CollectorId::unstamped(),
             seq,
         }
@@ -347,20 +355,39 @@ fn reason_name(value: u32) -> String {
 /// filter fields: a predicate over a field no event carries is false
 /// everywhere, which empties the series and looks exactly like a machine that
 /// dropped nothing.
-fn attributes(dropped: &PacketDrop, drops: u64, bytes: u64) -> Vec<Attr> {
-    let mut attrs = vec![
-        Attr::uint("drops", drops),
+///
+/// `bytes` is `None` where the program could not read a length: the classic
+/// record, which has no `sk_buff` layout to read one from.
+fn attributes(dropped: &PacketDrop, drops: u64, bytes: Option<u64>) -> Vec<Attr> {
+    let mut attrs = vec![Attr::uint("drops", drops)];
+    if dropped.reason == PacketDrop::NO_REASON {
+        // Before 5.17 the tracepoint gives no reason. Named rather than left
+        // out, so that a predicate over `reason` can select exactly these.
+        attrs.push(Attr::text("reason", "unknown"));
+    } else {
         // The kernel's own name for `enum skb_drop_reason`'s value, read from
         // this kernel's BTF, and the value beside it.
-        Attr::text("reason", reason_name(dropped.reason)),
-        Attr::uint("reason_code", u64::from(dropped.reason)),
-        Attr::text("protocol", protocol_name(dropped.protocol())),
-        Attr::uint("bytes", bytes),
-        // Where in the kernel the packet died. Not symbolised: this is a kernel
-        // address and resolving it needs `/proc/kallsyms`, which is a different
-        // privilege and a different question.
-        Attr::uint("location", dropped.location),
-    ];
+        attrs.push(Attr::text("reason", reason_name(dropped.reason)));
+        attrs.push(Attr::uint("reason_code", u64::from(dropped.reason)));
+    }
+    attrs.push(Attr::text(
+        "protocol",
+        if dropped.protocol == PacketDrop::UNKNOWN_PROTOCOL {
+            "unknown".to_owned()
+        } else {
+            protocol_name(dropped.protocol())
+        },
+    ));
+    if let Some(bytes) = bytes {
+        attrs.push(Attr::uint("bytes", bytes));
+    }
+    // Where in the kernel the packet died. Not symbolised: this is a kernel
+    // address and resolving it needs `/proc/kallsyms`, which is a different
+    // privilege and a different question.
+    attrs.push(Attr::uint("location", dropped.location));
+    if dropped.ethertype != 0 {
+        attrs.push(Attr::uint("ethertype", u64::from(dropped.ethertype)));
+    }
     if dropped.family != 0 {
         attrs.push(Attr::uint("family", u64::from(dropped.family)));
     }
@@ -382,7 +409,11 @@ impl Collector for DropCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        let program = DropProgram::load(RING_BYTES, self.wants_stacks)?;
+        let program = if self.classic {
+            DropProgram::load_classic(RING_BYTES, self.wants_stacks)?
+        } else {
+            DropProgram::load(RING_BYTES, self.wants_stacks)?
+        };
         if self.wants_stacks {
             // The kernel's table, read before the window rather than inside
             // the first drain (`stack::prime_kernel_symbols`).
@@ -447,7 +478,14 @@ impl Collector for DropCollector {
                 self.evicted_stacks
             ));
         }
-        if !self.receive_socket {
+        if self.classic {
+            notes.push(
+                "through the classic `skb:kfree_skb`, read without BTF: a drop carries its site \
+                 (`location`) and its `ethertype`, but no length and no socket, so `protocol` is \
+                 `unknown` and there is no `bytes`"
+                    .to_owned(),
+            );
+        } else if !self.receive_socket {
             notes.push(
                 "this kernel's `kfree_skb` does not say which socket a received packet would \
                  have gone to, so a receive-side drop here carries no socket at all"
@@ -464,11 +502,19 @@ impl Collector for DropCollector {
             ));
         }
 
-        notes.push(
-            "`reason` is the running kernel's own name for its `enum skb_drop_reason` value, \
-             read from its BTF, and `reason_code` the number beside it"
-                .to_owned(),
-        );
+        if self.classic && crate::bpf::kernel_btf().is_err() {
+            notes.push(
+                "`reason` is `unknown` where this kernel's record has no reason (before 5.17), \
+                 and otherwise the number: naming it needs the kernel's BTF"
+                    .to_owned(),
+            );
+        } else {
+            notes.push(
+                "`reason` is the running kernel's own name for its `enum skb_drop_reason` value, \
+                 read from its BTF, and `reason_code` the number beside it"
+                    .to_owned(),
+            );
+        }
         notes.extend(self.predicate.note());
         notes
     }
@@ -502,6 +548,7 @@ mod tests {
             },
             filter: None,
             wants_stacks: false,
+            classic: false,
         });
         let Err(error) = prepared.attach(&Target::System) else {
             panic!("a sampled mode must be refused");
@@ -518,6 +565,7 @@ mod tests {
             mode: Mode::Trace,
             filter: None,
             wants_stacks: false,
+            classic: false,
         });
         let Err(error) = prepared.attach(&Target::Pid(vec![1])) else {
             panic!("a pid names nothing most drops belong to");
@@ -526,10 +574,37 @@ mod tests {
         assert!(error.contains("--system"), "{error}");
     }
 
+    /// A classic drop says what it could not read rather than reporting a
+    /// zero: no reason before 5.17, no socket, no length.
+    #[test]
+    fn a_classic_drop_names_what_it_could_not_read() {
+        let mut bytes = [0u8; 56];
+        bytes[8..12].copy_from_slice(&PacketDrop::NO_REASON.to_ne_bytes());
+        bytes[12..16].copy_from_slice(&PacketDrop::UNKNOWN_PROTOCOL.to_ne_bytes());
+        bytes[52..56].copy_from_slice(&0x0800u32.to_ne_bytes());
+        let classic = PacketDrop::from_bytes(&bytes).expect("a full record");
+        let attributes = attributes(&classic, 1, None);
+        let text = |name: &str| {
+            attributes
+                .iter()
+                .find(|attr| attr.name == name)
+                .map(|attr| format!("{:?}", attr.value))
+        };
+        assert!(text("reason").is_some_and(|value| value.contains("unknown")));
+        assert_eq!(
+            text("reason_code"),
+            None,
+            "no number for a reason never given"
+        );
+        assert!(text("protocol").is_some_and(|value| value.contains("unknown")));
+        assert_eq!(text("bytes"), None, "no length was read");
+        assert!(text("ethertype").is_some_and(|value| value.contains("2048")));
+    }
+
     /// Every filter field the catalog offers must be on the events.
     #[test]
     fn every_filter_field_the_catalog_declares_is_on_an_event() {
-        let attributes = attributes(&dropped(), 1, 142);
+        let attributes = attributes(&dropped(), 1, Some(142));
         let catalog = crate::catalog::Catalog::embedded().expect("the built-in catalog");
         let declared = &catalog
             .get(&"net.drops".parse().expect("a source id"))

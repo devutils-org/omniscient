@@ -32,12 +32,15 @@ const CPU_ROOT: &str = "/sys/devices/system/cpu";
 
 pub struct Prepare {
     mode: Mode,
+    /// Through the classic `power:cpu_idle` (`bpf:tp`), for a kernel without
+    /// BTF.
+    classic: bool,
 }
 
 impl Prepare {
-    pub fn new(mode: Mode) -> Result<Self, String> {
+    pub fn new(mode: Mode, classic: bool) -> Result<Self, String> {
         match mode {
-            Mode::Trace => Ok(Self { mode }),
+            Mode::Trace => Ok(Self { mode, classic }),
             other => Err(format!(
                 "the tracepoint gives each idle period as it ends; `{}` residency is cpuidle's \
                  totals, which the `fs:sys` backend reads",
@@ -60,10 +63,9 @@ impl Prepared for Prepare {
                 ))
             }
         };
-        Ok(Box::new(IdlePeriods::new(
-            cpus,
-            state_names(Path::new(CPU_ROOT)),
-        )))
+        let mut periods = IdlePeriods::new(cpus, state_names(Path::new(CPU_ROOT)));
+        periods.classic = self.classic;
+        Ok(Box::new(periods))
     }
 }
 
@@ -95,6 +97,8 @@ fn state_names(root: &Path) -> BTreeMap<(u32, u32), String> {
 pub struct IdlePeriods {
     cpus: Option<Vec<u32>>,
     names: BTreeMap<(u32, u32), String>,
+    /// Whether the program goes on the classic tracepoint.
+    classic: bool,
     program: Option<IdleProgram>,
     /// Each cpu's open period: the state it entered, and when.
     open: BTreeMap<u32, (u32, u64)>,
@@ -119,6 +123,7 @@ impl IdlePeriods {
         Self {
             cpus,
             names,
+            classic: false,
             program: None,
             open: BTreeMap::new(),
             losses: Losses::default(),
@@ -234,7 +239,11 @@ impl Collector for IdlePeriods {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        self.program = Some(IdleProgram::load(RING_BYTES)?);
+        self.program = Some(if self.classic {
+            IdleProgram::load_classic(RING_BYTES)?
+        } else {
+            IdleProgram::load(RING_BYTES)?
+        });
         Ok(())
     }
 

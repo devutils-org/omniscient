@@ -26,16 +26,20 @@
 //! `Btf::member_offset` walks into those, so they are the running kernel's
 //! offsets like every other one here rather than numbers written down.
 
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::AsRawFd;
 
 use super::btf::Btf;
+use super::context::Record;
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
 use super::map::{map_failure, Counters, Hash};
 use super::net_program::{
-    count_drop, expect_signature, load, read_field, read_narrow, SocketInode, GET_CURRENT_COMM,
+    count_drop, expect_signature, load, read_field, read_narrow, store_port_be, SocketInode,
+    GET_CURRENT_COMM,
 };
+use super::proc_events::Attached;
 use super::ring::{ring_bytes, RingBuffer};
 use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
+use super::transport::{Output, Transport};
 
 /// The prototype this program is written against.
 pub(super) const SIGNATURE: [&str; 3] = ["sock *", "int", "int"];
@@ -254,53 +258,114 @@ const OPEN_KEY_BYTES: usize = 8;
 const OPEN_VALUE_BYTES: usize = 24;
 const OWNER_VALUE_BYTES: usize = 24;
 
+/// Where the socket's fields are in memory, composed from this kernel's
+/// BTF: the raw road's.
+struct Offsets {
+    inode: SocketInode,
+    cookie_at: i32,
+    family_at: i32,
+    v6_saddr_at: i32,
+    daddr_at: i32,
+    v6_daddr_at: i32,
+    dport_at: i32,
+    saddr_at: i32,
+    sport_at: i32,
+    bytes_sent_at: i32,
+    bytes_received_at: i32,
+    segs_out_at: i32,
+    segs_in_at: i32,
+}
+
+impl Offsets {
+    fn locate(btf: &Btf, inode: SocketInode) -> Result<Self, String> {
+        expect_signature(btf, "inet_sock_set_state", &[&SIGNATURE])?;
+
+        // Every offset below is composed out of named members, which is what makes
+        // it the running kernel's answer rather than a number written down. The
+        // three leading members are all at zero on every kernel anyone has seen,
+        // and they are subtracted anyway: a `sock *` is what the tracepoint hands
+        // over, and these fields are named relative to the structures that embed
+        // it.
+        let sock_at = btf.member_offset("inet_sock", "sk")?;
+        let inet_at = sock_at + btf.member_offset("inet_connection_sock", "icsk_inet")?;
+        let tcp_at = inet_at + btf.member_offset("tcp_sock", "inet_conn")?;
+        let from_inet = |member: &str| {
+            btf.member_offset("inet_sock", member)
+                .map(|at| at - sock_at)
+        };
+        let from_tcp = |member: &str| btf.member_offset("tcp_sock", member).map(|at| at - tcp_at);
+
+        let common_at = btf.member_offset("sock", "__sk_common")?;
+        let cookie_at = common_at + btf.member_offset("sock_common", "skc_cookie")?;
+        let family_at = common_at + btf.member_offset("sock_common", "skc_family")?;
+        let v6_saddr_at = common_at + btf.member_offset("sock_common", "skc_v6_rcv_saddr")?;
+        // The peer's two, inside `sock_common`'s anonymous unions.
+        let daddr_at = common_at + btf.member_offset("sock_common", "skc_daddr")?;
+        let v6_daddr_at = common_at + btf.member_offset("sock_common", "skc_v6_daddr")?;
+        let dport_at = common_at + btf.member_offset("sock_common", "skc_dport")?;
+        let saddr_at = from_inet("inet_saddr")?;
+        let sport_at = from_inet("inet_sport")?;
+        let bytes_sent_at = from_tcp("bytes_sent")?;
+        let bytes_received_at = from_tcp("bytes_received")?;
+        let segs_out_at = from_tcp("segs_out")?;
+        let segs_in_at = from_tcp("segs_in")?;
+        Ok(Self {
+            inode,
+            cookie_at,
+            family_at,
+            v6_saddr_at,
+            daddr_at,
+            v6_daddr_at,
+            dport_at,
+            saddr_at,
+            sport_at,
+            bytes_sent_at,
+            bytes_received_at,
+            segs_out_at,
+            segs_in_at,
+        })
+    }
+}
+
+/// What the program reads a transition out of: a raw tracepoint's socket,
+/// through BTF's layout, or the classic `sock:inet_sock_set_state` record
+/// (`bpf:tp`), which names the socket's ends and ports but whose socket has
+/// no layout to read a cookie, an inode or a byte count out of.
+enum Source<'a> {
+    Raw(Offsets),
+    Classic(&'a Record),
+}
+
+/// `IPPROTO_TCP`: the classic tracepoint fires for every inet protocol
+/// that keeps a state, and its record says which.
+const IPPROTO_TCP: i32 = 6;
+
 /// Builds the program, or says why this kernel cannot be read.
 fn instructions(
-    btf: &Btf,
-    inode: SocketInode,
-    ring_fd: i32,
+    source: Source,
+    output: Output,
     open_fd: i32,
     owners_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
-    expect_signature(btf, "inet_sock_set_state", &[&SIGNATURE])?;
-
-    // Every offset below is composed out of named members, which is what makes
-    // it the running kernel's answer rather than a number written down. The
-    // three leading members are all at zero on every kernel anyone has seen,
-    // and they are subtracted anyway: a `sock *` is what the tracepoint hands
-    // over, and these fields are named relative to the structures that embed
-    // it.
-    let sock_at = btf.member_offset("inet_sock", "sk")?;
-    let inet_at = sock_at + btf.member_offset("inet_connection_sock", "icsk_inet")?;
-    let tcp_at = inet_at + btf.member_offset("tcp_sock", "inet_conn")?;
-    let from_inet = |member: &str| {
-        btf.member_offset("inet_sock", member)
-            .map(|at| at - sock_at)
-    };
-    let from_tcp = |member: &str| btf.member_offset("tcp_sock", member).map(|at| at - tcp_at);
-
-    let common_at = btf.member_offset("sock", "__sk_common")?;
-    let cookie_at = common_at + btf.member_offset("sock_common", "skc_cookie")?;
-    let family_at = common_at + btf.member_offset("sock_common", "skc_family")?;
-    let v6_saddr_at = common_at + btf.member_offset("sock_common", "skc_v6_rcv_saddr")?;
-    // The peer's two, inside `sock_common`'s anonymous unions.
-    let daddr_at = common_at + btf.member_offset("sock_common", "skc_daddr")?;
-    let v6_daddr_at = common_at + btf.member_offset("sock_common", "skc_v6_daddr")?;
-    let dport_at = common_at + btf.member_offset("sock_common", "skc_dport")?;
-    let saddr_at = from_inet("inet_saddr")?;
-    let sport_at = from_inet("inet_sport")?;
-    let bytes_sent_at = from_tcp("bytes_sent")?;
-    let bytes_received_at = from_tcp("bytes_received")?;
-    let segs_out_at = from_tcp("segs_out")?;
-    let segs_in_at = from_tcp("segs_in")?;
-
     let mut program = Program::new();
     // r6 keeps the context, r7 the socket and r8 the moment it was established;
     // all three survive helper calls, which clobber r1 through r5.
     program.push(Insn::mov64_reg(6, 1));
-    program.push(Insn::ldx(BPF_DW, 7, 6, ARG_SOCK));
-    program.push(Insn::ldx(BPF_DW, 1, 6, ARG_NEW_STATE));
+    match &source {
+        Source::Raw(_) => {
+            program.push(Insn::ldx(BPF_DW, 7, 6, ARG_SOCK));
+            program.push(Insn::ldx(BPF_DW, 1, 6, ARG_NEW_STATE));
+        }
+        Source::Classic(record) => {
+            record.load(&mut program, 7, 6, "skaddr", SCRATCH)?;
+            if record.has("protocol") {
+                record.load(&mut program, 1, 6, "protocol", SCRATCH)?;
+                program.jump_to("done", Insn::jne_imm(1, IPPROTO_TCP, 0));
+            }
+            record.load(&mut program, 1, 6, "newstate", SCRATCH)?;
+        }
+    }
     program.jump_to("opened", Insn::jeq_imm(1, TCP_ESTABLISHED, 0));
     program.jump_to("closed", Insn::jeq_imm(1, TCP_CLOSE, 0));
     program.jump_to("owner", Insn::jeq_imm(1, TCP_SYN_SENT, 0));
@@ -335,14 +400,22 @@ fn instructions(
     program.push(Insn::stx(BPF_DW, R10, OPEN_VALUE + OPEN_TS, 0));
     // The socket's two names, taken now because the close is too late for one
     // of them.
-    read_field(&mut program, OPEN_VALUE + OPEN_COOKIE, 8, 7, cookie_at);
-    inode.read(
-        &mut program,
-        OPEN_VALUE + OPEN_INODE,
-        7,
-        SCRATCH,
-        "open_inode_read",
-    );
+    match &source {
+        Source::Raw(at) => {
+            read_field(&mut program, OPEN_VALUE + OPEN_COOKIE, 8, 7, at.cookie_at);
+            at.inode.read(
+                &mut program,
+                OPEN_VALUE + OPEN_INODE,
+                7,
+                SCRATCH,
+                "open_inode_read",
+            );
+        }
+        Source::Classic(_) => {
+            program.push(Insn::st_imm(BPF_DW, R10, OPEN_VALUE + OPEN_COOKIE, 0));
+            program.push(Insn::st_imm(BPF_DW, R10, OPEN_VALUE + OPEN_INODE, 0));
+        }
+    }
     program.extend(Insn::load_map_fd(1, open_fd));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, OPEN_KEY as i32));
@@ -414,42 +487,74 @@ fn instructions(
     // connection opened. A cookie is generated once and never cleared, so the
     // fallback only ever fills in an inode -- which `sock_orphan` takes away
     // on the way into `tcp_close`.
-    read_field(&mut program, COOKIE, 8, 7, cookie_at);
-    program.push(Insn::ldx(BPF_DW, 1, R10, COOKIE));
-    program.jump_to("named", Insn::jne_imm(1, 0, 0));
-    program.push(Insn::ldx(BPF_DW, 1, R10, HELD_COOKIE));
-    program.push(Insn::stx(BPF_DW, R10, COOKIE, 1));
-    program.label("named");
-    inode.read(&mut program, INODE, 7, SCRATCH, "close_inode_read");
-    program.push(Insn::ldx(BPF_DW, 1, R10, INODE));
-    program.jump_to("numbered", Insn::jne_imm(1, 0, 0));
-    program.push(Insn::ldx(BPF_DW, 1, R10, HELD_INODE));
-    program.push(Insn::stx(BPF_DW, R10, INODE, 1));
-    program.label("numbered");
-    read_field(&mut program, BYTES_SENT, 8, 7, bytes_sent_at);
-    read_field(&mut program, BYTES_RECEIVED, 8, 7, bytes_received_at);
-    read_narrow(&mut program, SEGS_OUT, 4, 7, segs_out_at);
-    read_narrow(&mut program, SEGS_IN, 4, 7, segs_in_at);
-    read_narrow(&mut program, FAMILY, 2, 7, family_at);
-    read_narrow(&mut program, SPORT, 2, 7, sport_at);
+    match &source {
+        Source::Raw(at) => {
+            read_field(&mut program, COOKIE, 8, 7, at.cookie_at);
+            program.push(Insn::ldx(BPF_DW, 1, R10, COOKIE));
+            program.jump_to("named", Insn::jne_imm(1, 0, 0));
+            program.push(Insn::ldx(BPF_DW, 1, R10, HELD_COOKIE));
+            program.push(Insn::stx(BPF_DW, R10, COOKIE, 1));
+            program.label("named");
+            at.inode
+                .read(&mut program, INODE, 7, SCRATCH, "close_inode_read");
+            program.push(Insn::ldx(BPF_DW, 1, R10, INODE));
+            program.jump_to("numbered", Insn::jne_imm(1, 0, 0));
+            program.push(Insn::ldx(BPF_DW, 1, R10, HELD_INODE));
+            program.push(Insn::stx(BPF_DW, R10, INODE, 1));
+            program.label("numbered");
+            read_field(&mut program, BYTES_SENT, 8, 7, at.bytes_sent_at);
+            read_field(&mut program, BYTES_RECEIVED, 8, 7, at.bytes_received_at);
+            read_narrow(&mut program, SEGS_OUT, 4, 7, at.segs_out_at);
+            read_narrow(&mut program, SEGS_IN, 4, 7, at.segs_in_at);
+            read_narrow(&mut program, FAMILY, 2, 7, at.family_at);
+            read_narrow(&mut program, SPORT, 2, 7, at.sport_at);
 
-    // Sixteen bytes, cleared before either branch writes into them: a v4
-    // address fills four of them and the twelve behind it would otherwise be
-    // whatever the last connection left on the stack.
-    program.push(Insn::st_imm(BPF_DW, R10, SADDR, 0));
-    program.push(Insn::st_imm(BPF_DW, R10, SADDR + 8, 0));
-    program.push(Insn::st_imm(BPF_DW, R10, DADDR, 0));
-    program.push(Insn::st_imm(BPF_DW, R10, DADDR + 8, 0));
-    read_narrow(&mut program, DPORT, 2, 7, dport_at);
-    program.push(Insn::ldx(BPF_W, 1, R10, FAMILY));
-    program.jump_to("v6", Insn::jeq_imm(1, AF_INET6, 0));
-    read_field(&mut program, SADDR, 4, 7, saddr_at);
-    read_field(&mut program, DADDR, 4, 7, daddr_at);
-    program.jump_to("addressed", Insn::ja());
-    program.label("v6");
-    read_field(&mut program, SADDR, 16, 7, v6_saddr_at);
-    read_field(&mut program, DADDR, 16, 7, v6_daddr_at);
-    program.label("addressed");
+            // Sixteen bytes, cleared before either branch writes into them: a v4
+            // address fills four of them and the twelve behind it would otherwise be
+            // whatever the last connection left on the stack.
+            program.push(Insn::st_imm(BPF_DW, R10, SADDR, 0));
+            program.push(Insn::st_imm(BPF_DW, R10, SADDR + 8, 0));
+            program.push(Insn::st_imm(BPF_DW, R10, DADDR, 0));
+            program.push(Insn::st_imm(BPF_DW, R10, DADDR + 8, 0));
+            read_narrow(&mut program, DPORT, 2, 7, at.dport_at);
+            program.push(Insn::ldx(BPF_W, 1, R10, FAMILY));
+            program.jump_to("v6", Insn::jeq_imm(1, AF_INET6, 0));
+            read_field(&mut program, SADDR, 4, 7, at.saddr_at);
+            read_field(&mut program, DADDR, 4, 7, at.daddr_at);
+            program.jump_to("addressed", Insn::ja());
+            program.label("v6");
+            read_field(&mut program, SADDR, 16, 7, at.v6_saddr_at);
+            read_field(&mut program, DADDR, 16, 7, at.v6_daddr_at);
+            program.label("addressed");
+        }
+        Source::Classic(record) => {
+            // No layout to read a cookie, an inode or a count out of: zero,
+            // which the reader takes as unknown.
+            for at in [COOKIE, INODE, BYTES_SENT, BYTES_RECEIVED] {
+                program.push(Insn::st_imm(BPF_DW, R10, at, 0));
+            }
+            program.push(Insn::st_imm(BPF_W, R10, SEGS_OUT, 0));
+            program.push(Insn::st_imm(BPF_W, R10, SEGS_IN, 0));
+            record.load(&mut program, 1, 6, "family", SCRATCH)?;
+            program.push(Insn::stx(BPF_W, R10, FAMILY, 1));
+            // Host order in the record, network order on the event.
+            record.load(&mut program, 1, 6, "sport", SCRATCH)?;
+            store_port_be(&mut program, SPORT);
+            record.load(&mut program, 1, 6, "dport", SCRATCH)?;
+            store_port_be(&mut program, DPORT);
+            program.push(Insn::st_imm(BPF_DW, R10, SADDR + 8, 0));
+            program.push(Insn::st_imm(BPF_DW, R10, DADDR + 8, 0));
+            program.push(Insn::ldx(BPF_W, 1, R10, FAMILY));
+            program.jump_to("v6", Insn::jeq_imm(1, AF_INET6, 0));
+            record.copy(&mut program, 6, "saddr", SADDR, 4)?;
+            record.copy(&mut program, 6, "daddr", DADDR, 4)?;
+            program.jump_to("addressed", Insn::ja());
+            program.label("v6");
+            record.copy(&mut program, 6, "saddr_v6", SADDR, 16)?;
+            record.copy(&mut program, 6, "daddr_v6", DADDR, 16)?;
+            program.label("addressed");
+        }
+    }
 
     // The owner's names when one was recorded, the current task's otherwise.
     program.push(Insn::ldx(BPF_W, 2, R10, OWNED));
@@ -474,12 +579,7 @@ fn instructions(
     program.push(Insn::call(GET_CURRENT_COMM));
     program.label("attributed");
 
-    program.extend(Insn::load_map_fd(1, ring_fd));
-    program.push(Insn::mov64_reg(2, R10));
-    program.push(Insn::add64_imm(2, EVENT as i32));
-    program.push(Insn::mov64_imm(3, RECORD_BYTES as i32));
-    program.push(Insn::mov64_imm(4, 0));
-    program.push(Insn::call(helper::RINGBUF_OUTPUT));
+    output.push(&mut program, 6, EVENT, RECORD_BYTES as i32);
     program.jump_to("done", Insn::jsge_imm(0, 0, 0));
     count_drop(&mut program, drops_fd, DROP_KEY, DROP_RING, "done");
 
@@ -494,13 +594,12 @@ fn instructions(
 
 /// A loaded, attached lifetime program and the maps it writes.
 pub struct TcpLifetimeProgram {
-    ring: RingBuffer,
+    ring: Transport,
     open: Hash,
     /// Kept for the fd the program holds; nothing reads it from here.
     _owners: Hash,
     drops: Counters,
-    program: OwnedFd,
-    _link: OwnedFd,
+    attached: Attached,
 }
 
 impl TcpLifetimeProgram {
@@ -520,9 +619,8 @@ impl TcpLifetimeProgram {
             .map_err(|error| map_failure("connection counters", error))?;
 
         let instructions = instructions(
-            btf,
-            SocketInode::locate(btf)?,
-            ring_map.as_raw_fd(),
+            Source::Raw(Offsets::locate(btf, SocketInode::locate(btf)?)?),
+            Output::Ring(ring_map.as_raw_fd()),
             open.as_raw_fd(),
             owners.as_raw_fd(),
             drops.as_raw_fd(),
@@ -533,12 +631,47 @@ impl TcpLifetimeProgram {
             .map_err(|error| format!("cannot map the connection ring buffer: {error}"))?;
 
         Ok(Self {
+            ring: Transport::from_ring(ring),
+            open,
+            _owners: owners,
+            drops,
+            attached: Attached::Raw {
+                program,
+                _link: link,
+            },
+        })
+    }
+
+    /// The classic tracepoint's form (`bpf:tp`), for a kernel without BTF:
+    /// the same lifetimes, with no socket names and no byte counts.
+    pub fn load_classic(requested_ring_bytes: usize) -> Result<Self, String> {
+        let record = Record::of("sock", "inet_sock_set_state")?;
+        let ring = Transport::create(requested_ring_bytes, Some(0), "omn_tcp_life")?;
+        let open = Hash::create(OPEN_KEY_BYTES, OPEN_VALUE_BYTES, MAX_OPEN, "omn_tcp_open")
+            .map_err(|error| map_failure("open connection map", error))?;
+        let owners = Hash::create(OPEN_KEY_BYTES, OWNER_VALUE_BYTES, MAX_OPEN, "omn_tcp_owner")
+            .map_err(|error| map_failure("connection owner map", error))?;
+        let drops = Counters::create(COUNTER_SLOTS, "omn_tcp_lost")
+            .map_err(|error| map_failure("connection counters", error))?;
+        let instructions = instructions(
+            Source::Classic(&record),
+            ring.output(),
+            open.as_raw_fd(),
+            owners.as_raw_fd(),
+            drops.as_raw_fd(),
+        )?;
+        let attached = Attached::classic(
+            "sock",
+            "inet_sock_set_state",
+            &instructions,
+            "omn_sock_state",
+        )?;
+        Ok(Self {
             ring,
             open,
             _owners: owners,
             drops,
-            program,
-            _link: link,
+            attached,
         })
     }
 
@@ -564,7 +697,7 @@ impl TcpLifetimeProgram {
     /// Runs of these programs the kernel skipped because one was already
     /// running on that cpu; see `BlockProgram::skipped`, where it was measured.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::program::skipped([&self.program])
+        crate::bpf::program::skipped(self.attached.program())
     }
 
     /// What the program could not record, as `(connections the map had no room
@@ -596,6 +729,42 @@ mod tests {
 
     /// The program writes fields at stack offsets and `from_bytes` reads them
     /// at struct offsets. Nothing but this test connects the two.
+    /// The classic program reads 4.19's `sock:inet_sock_set_state`, keeps TCP
+    /// alone, and writes every field of the record before publishing it.
+    #[test]
+    fn the_classic_program_reads_the_record_and_keeps_tcp_alone() {
+        let record = Record::from_layout(
+            "sock:inet_sock_set_state",
+            super::super::attach::parse_layout(
+                "\tfield:const void * skaddr;\toffset:8;\tsize:8;\tsigned:0;\n\
+                 \tfield:int oldstate;\toffset:16;\tsize:4;\tsigned:1;\n\
+                 \tfield:int newstate;\toffset:20;\tsize:4;\tsigned:1;\n\
+                 \tfield:__u16 sport;\toffset:24;\tsize:2;\tsigned:0;\n\
+                 \tfield:__u16 dport;\toffset:26;\tsize:2;\tsigned:0;\n\
+                 \tfield:__u16 family;\toffset:28;\tsize:2;\tsigned:0;\n\
+                 \tfield:__u8 protocol;\toffset:30;\tsize:1;\tsigned:0;\n\
+                 \tfield:__u8 saddr[4];\toffset:31;\tsize:4;\tsigned:0;\n\
+                 \tfield:__u8 daddr[4];\toffset:35;\tsize:4;\tsigned:0;\n\
+                 \tfield:__u8 saddr_v6[16];\toffset:39;\tsize:16;\tsigned:0;\n\
+                 \tfield:__u8 daddr_v6[16];\toffset:55;\tsize:16;\tsigned:0;\n",
+            ),
+        );
+        let program = instructions(Source::Classic(&record), Output::PerfArray(3), 4, 6, 5)
+            .expect("a classic program");
+        assert!(program.contains(&Insn::ldx(BPF_DW, 7, 6, 8)), "the socket");
+        assert!(
+            program.contains(&Insn::ldx(BPF_W, 1, 6, 20)),
+            "the new state"
+        );
+        assert!(
+            program.windows(2).any(|pair| {
+                pair[0] == Insn::ldx(super::super::insn::BPF_B, 1, 6, 30)
+                    && pair[1].imm == IPPROTO_TCP
+            }),
+            "the protocol, compared with TCP's"
+        );
+    }
+
     #[test]
     fn the_record_struct_matches_what_the_program_writes() {
         use std::mem::offset_of;
@@ -709,8 +878,14 @@ mod tests {
     #[test]
     fn the_published_record_is_exactly_the_size_of_the_struct() {
         let Some(btf) = kernel_btf() else { return };
-        let program =
-            instructions(btf, SocketInode::locate(btf).unwrap(), 3, 4, 6, 5).expect("a program");
+        let program = instructions(
+            Source::Raw(Offsets::locate(btf, SocketInode::locate(btf).unwrap()).unwrap()),
+            Output::Ring(3),
+            4,
+            6,
+            5,
+        )
+        .expect("a program");
         let output_at = program
             .iter()
             .position(|insn| insn.code == 0x85 && insn.imm == helper::RINGBUF_OUTPUT)
@@ -728,12 +903,18 @@ mod tests {
     fn the_program_reads_the_monotonic_clock_and_no_other() {
         let Some(btf) = kernel_btf() else { return };
         const KTIME_GET_BOOT_NS: i32 = 125;
-        let called: Vec<i32> = instructions(btf, SocketInode::locate(btf).unwrap(), 3, 4, 6, 5)
-            .expect("a program")
-            .iter()
-            .filter(|insn| insn.code == 0x85)
-            .map(|insn| insn.imm)
-            .collect();
+        let called: Vec<i32> = instructions(
+            Source::Raw(Offsets::locate(btf, SocketInode::locate(btf).unwrap()).unwrap()),
+            Output::Ring(3),
+            4,
+            6,
+            5,
+        )
+        .expect("a program")
+        .iter()
+        .filter(|insn| insn.code == 0x85)
+        .map(|insn| insn.imm)
+        .collect();
         assert_eq!(
             called
                 .iter()
@@ -752,8 +933,14 @@ mod tests {
     #[test]
     fn only_the_states_that_bound_a_connection_or_name_its_owner_are_acted_on() {
         let Some(btf) = kernel_btf() else { return };
-        let program =
-            instructions(btf, SocketInode::locate(btf).unwrap(), 3, 4, 6, 5).expect("a program");
+        let program = instructions(
+            Source::Raw(Offsets::locate(btf, SocketInode::locate(btf).unwrap()).unwrap()),
+            Output::Ring(3),
+            4,
+            6,
+            5,
+        )
+        .expect("a program");
         let compared: Vec<i32> = program
             .iter()
             .filter(|insn| insn.code == 0x15 && insn.regs & 0xf == 1)
@@ -783,7 +970,14 @@ mod tests {
         let SocketInode::ThroughSocket { ino_at, .. } = walk else {
             unreachable!()
         };
-        let program = instructions(btf, walk, 3, 4, 6, 5).expect("a program");
+        let program = instructions(
+            Source::Raw(Offsets::locate(btf, walk).unwrap()),
+            Output::Ring(3),
+            4,
+            6,
+            5,
+        )
+        .expect("a program");
         assert!(
             program
                 .iter()

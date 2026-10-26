@@ -49,6 +49,9 @@ pub struct Prepare {
     /// comes from the backend's name, so a collector that does nothing with the
     /// predicate returns every event and nothing says the filter did not run.
     pub filter: Option<FilterExpr>,
+    /// Through the classic `irq` tracepoints (`bpf:tp`), for a kernel
+    /// without BTF.
+    pub classic: bool,
 }
 
 impl Prepared for Prepare {
@@ -88,13 +91,9 @@ impl Prepared for Prepare {
                 missing.join(" or ")
             ));
         }
-        Ok(Box::new(SoftIrqCollector::new(
-            numbers,
-            vectors,
-            cpus,
-            self.mode,
-            self.filter,
-        )))
+        let mut collector = SoftIrqCollector::new(numbers, vectors, cpus, self.mode, self.filter);
+        collector.classic = self.classic;
+        Ok(Box::new(collector))
     }
 }
 
@@ -108,6 +107,8 @@ pub struct SoftIrqCollector {
     /// What the two declared modes differ by: `trace` is a series of drains,
     /// `count` is the single measurement of one window.
     mode: Mode,
+    /// Whether the programs go on the classic tracepoints.
+    classic: bool,
     program: Option<SoftIrqProgram>,
     /// The program's loss counters, as last read (`collect::kernel`).
     counts: KernelCounts,
@@ -154,6 +155,7 @@ impl SoftIrqCollector {
             names,
             cpus,
             mode,
+            classic: false,
             program: None,
             losses: Losses::default(),
             notes: Vec::new(),
@@ -382,7 +384,11 @@ impl Collector for SoftIrqCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        self.program = Some(SoftIrqProgram::load(&self.vectors)?);
+        self.program = Some(if self.classic {
+            SoftIrqProgram::load_classic(&self.vectors)?
+        } else {
+            SoftIrqProgram::load(&self.vectors)?
+        });
         self.kernel_runs_at_start = self.kernel_runs();
         self.window_opened_ns = monotonic_ns();
         self.run_opened_ns = self.window_opened_ns;
@@ -535,6 +541,7 @@ mod tests {
                 freq: "997hz".parse().expect("a frequency"),
             },
             filter: None,
+            classic: false,
         });
         let Err(error) = prepared.attach(&Target::System) else {
             panic!("a sampled mode must be refused");
@@ -551,6 +558,7 @@ mod tests {
         let prepared = Box::new(Prepare {
             mode: Mode::Trace,
             filter: None,
+            classic: false,
         });
         let Err(error) = prepared.attach(&Target::Pid(vec![1])) else {
             panic!("a process names nothing a softirq belongs to");

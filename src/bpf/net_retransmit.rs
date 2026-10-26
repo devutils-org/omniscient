@@ -16,16 +16,19 @@
 //! Both ends travel, as in `net_lifetime.rs`: the peer's address and port live
 //! in anonymous unions of `sock_common`, which `Btf::member_offset` walks.
 
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::AsRawFd;
 
 use super::btf::Btf;
+use super::context::Record;
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
 use super::map::{map_failure, Counters};
 use super::net_program::{
-    count_drop, expect_signature, load, read_field, read_narrow, SocketInode,
+    count_drop, expect_signature, load, read_field, read_narrow, store_port_be, SocketInode,
 };
+use super::proc_events::Attached;
 use super::ring::{ring_bytes, RingBuffer};
 use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
+use super::transport::{Output, Transport};
 
 /// The prototypes this program is written against.
 ///
@@ -38,7 +41,8 @@ pub(super) const WITHOUT_ERROR: [&str; 2] = ["sock *", "sk_buff *"];
 const ARG_SOCK: i16 = 0;
 const ARG_ERROR: i16 = 16;
 
-/// `AF_INET6`, from the kernel's frozen address-family numbering.
+/// `AF_INET` and `AF_INET6`, from the kernel's frozen address-family numbering.
+const AF_INET: i32 = 2;
 const AF_INET6: i32 = 10;
 
 /// One retransmission, as the program writes it and userspace reads it.
@@ -86,6 +90,9 @@ fn render_address(family: u32, bytes: &[u8; 16]) -> Option<String> {
 }
 
 impl Retransmit {
+    /// What the state field holds where the classic record carries none.
+    pub const NO_STATE: u32 = u32::MAX;
+
     /// The local port, in host order.
     pub fn local_port(&self) -> u16 {
         u16::from_be(self.sport as u16)
@@ -216,12 +223,85 @@ fn instructions(
     read_field(&mut program, DADDR, 16, 7, v6_daddr_at);
     program.label("addressed");
 
-    program.extend(Insn::load_map_fd(1, ring_fd));
-    program.push(Insn::mov64_reg(2, R10));
-    program.push(Insn::add64_imm(2, EVENT as i32));
-    program.push(Insn::mov64_imm(3, RECORD_BYTES as i32));
-    program.push(Insn::mov64_imm(4, 0));
-    program.push(Insn::call(helper::RINGBUF_OUTPUT));
+    Output::Ring(ring_fd).push(&mut program, 6, EVENT, RECORD_BYTES as i32);
+    program.jump_to("done", Insn::jsge_imm(0, 0, 0));
+    count_drop(&mut program, drops_fd, DROP_KEY, 0, "done");
+
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
+/// The program on the classic `tcp:tcp_retransmit_skb` (`bpf:tp`), for a
+/// kernel without BTF.
+///
+/// The record carries the connection's state, its ports in host order and
+/// both ends as IPv6 addresses, an IPv4 one mapped (`::ffff:a.b.c.d`); 5.10
+/// added its family. No socket layout is read, so there is no cookie, no
+/// inode and no error.
+fn classic_instructions(
+    record: &Record,
+    output: Output,
+    drops_fd: i32,
+) -> Result<Vec<Insn>, String> {
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::stx(BPF_DW, R10, TS, 0));
+    program.push(Insn::st_imm(BPF_DW, R10, COOKIE, 0));
+    program.push(Insn::st_imm(BPF_DW, R10, INODE, 0));
+    program.push(Insn::st_imm(BPF_W, R10, ERROR, 0));
+    program.push(Insn::st_imm(BPF_W, R10, PAD, 0));
+
+    // 4.19's record has no state; 5.x added it.
+    if record.has("state") {
+        record.load(&mut program, 1, 6, "state", SCRATCH)?;
+        program.push(Insn::stx(BPF_W, R10, STATE, 1));
+    } else {
+        program.push(Insn::st_imm(BPF_W, R10, STATE, Retransmit::NO_STATE as i32));
+    }
+    record.load(&mut program, 1, 6, "sport", SCRATCH)?;
+    store_port_be(&mut program, SPORT);
+    record.load(&mut program, 1, 6, "dport", SCRATCH)?;
+    store_port_be(&mut program, DPORT);
+
+    record.copy(&mut program, 6, "saddr_v6", SADDR, 16)?;
+    record.copy(&mut program, 6, "daddr_v6", DADDR, 16)?;
+
+    if record.has("family") {
+        record.load(&mut program, 1, 6, "family", SCRATCH)?;
+        program.push(Insn::stx(BPF_W, R10, FAMILY, 1));
+        program.jump_to("addressed", Insn::jeq_imm(1, AF_INET6, 0));
+    } else {
+        // An IPv4 connection's ends are mapped, ten zero bytes and two of
+        // 0xff ahead of the four that are the address.
+        program.push(Insn::st_imm(BPF_W, R10, FAMILY, AF_INET6));
+        program.push(Insn::ldx(BPF_DW, 1, R10, SADDR));
+        program.jump_to("addressed", Insn::jne_imm(1, 0, 0));
+        program.push(Insn::ldx(BPF_W, 1, R10, SADDR + 8));
+        program.push(Insn::mov64_reg(2, 1));
+        program.push(Insn::and64_imm(2, 0xffff));
+        program.jump_to("addressed", Insn::jne_imm(2, 0, 0));
+        program.push(Insn::rsh64_imm(1, 16));
+        program.jump_to("addressed", Insn::jne_imm(1, 0xffff, 0));
+        program.push(Insn::st_imm(BPF_W, R10, FAMILY, AF_INET));
+    }
+    // IPv4: the four bytes the mapped address ends with, at the front, where
+    // the raw program puts `skc_daddr`.
+    for at in [SADDR, DADDR] {
+        program.push(Insn::ldx(BPF_W, 1, R10, at + 12));
+        program.push(Insn::stx(BPF_W, R10, at, 1));
+        program.push(Insn::st_imm(BPF_W, R10, at + 4, 0));
+        program.push(Insn::st_imm(BPF_DW, R10, at + 8, 0));
+    }
+    program.label("addressed");
+
+    output.push(&mut program, 6, EVENT, RECORD_BYTES as i32);
     program.jump_to("done", Insn::jsge_imm(0, 0, 0));
     count_drop(&mut program, drops_fd, DROP_KEY, 0, "done");
 
@@ -236,11 +316,11 @@ fn instructions(
 
 /// A loaded, attached retransmission program and the maps it writes.
 pub struct RetransmitProgram {
-    ring: RingBuffer,
+    ring: Transport,
     drops: Counters,
     has_error: bool,
-    program: OwnedFd,
-    _link: OwnedFd,
+    classic: bool,
+    attached: Attached,
 }
 
 impl RetransmitProgram {
@@ -267,12 +347,39 @@ impl RetransmitProgram {
             .map_err(|error| format!("cannot map the retransmission ring buffer: {error}"))?;
 
         Ok(Self {
-            ring,
+            ring: Transport::from_ring(ring),
             drops,
             has_error,
-            program,
-            _link: link,
+            classic: false,
+            attached: Attached::Raw {
+                program,
+                _link: link,
+            },
         })
+    }
+
+    /// The classic tracepoint's form (`bpf:tp`), for a kernel without BTF.
+    pub fn load_classic(requested_ring_bytes: usize) -> Result<Self, String> {
+        let record = Record::of("tcp", "tcp_retransmit_skb")?;
+        let ring = Transport::create(requested_ring_bytes, Some(0), "omn_retrans")?;
+        let drops = Counters::create(1, "omn_retr_lost")
+            .map_err(|error| map_failure("retransmission counter", error))?;
+        let instructions = classic_instructions(&record, ring.output(), drops.as_raw_fd())?;
+        let attached =
+            Attached::classic("tcp", "tcp_retransmit_skb", &instructions, "omn_retransmit")?;
+        Ok(Self {
+            ring,
+            drops,
+            has_error: false,
+            classic: true,
+            attached,
+        })
+    }
+
+    /// Whether the program is on the classic tracepoint, whose records carry
+    /// no socket.
+    pub fn classic(&self) -> bool {
+        self.classic
     }
 
     /// Whether this kernel's tracepoint says what the send returned. Without
@@ -295,7 +402,7 @@ impl RetransmitProgram {
     /// Runs of these programs the kernel skipped because one was already
     /// running on that cpu; see `BlockProgram::skipped`, where it was measured.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::program::skipped([&self.program])
+        crate::bpf::program::skipped(self.attached.program())
     }
 
     /// Retransmissions the program could not publish because the ring was full.
@@ -320,6 +427,52 @@ mod tests {
             Err(reason) => {
                 eprintln!("skipped: {reason}");
                 None
+            }
+        }
+    }
+
+    /// The classic program builds against 4.19's record, which has no
+    /// family, and 5.10's, which does; it writes every field it publishes.
+    #[test]
+    fn the_classic_program_builds_with_and_without_a_family() {
+        let old = "\tfield:const void * skbaddr;\toffset:8;\tsize:8;\tsigned:0;\n\
+                   \tfield:const void * skaddr;\toffset:16;\tsize:8;\tsigned:0;\n\
+                   \tfield:int state;\toffset:24;\tsize:4;\tsigned:1;\n\
+                   \tfield:__u16 sport;\toffset:28;\tsize:2;\tsigned:0;\n\
+                   \tfield:__u16 dport;\toffset:30;\tsize:2;\tsigned:0;\n\
+                   \tfield:__u8 saddr[4];\toffset:32;\tsize:4;\tsigned:0;\n\
+                   \tfield:__u8 daddr[4];\toffset:36;\tsize:4;\tsigned:0;\n\
+                   \tfield:__u8 saddr_v6[16];\toffset:40;\tsize:16;\tsigned:0;\n\
+                   \tfield:__u8 daddr_v6[16];\toffset:56;\tsize:16;\tsigned:0;\n";
+        let new = format!("{old}\tfield:__u16 family;\toffset:72;\tsize:2;\tsigned:0;\n");
+        for (layout, family) in [(old.to_owned(), false), (new, true)] {
+            let record = Record::from_layout(
+                "tcp:tcp_retransmit_skb",
+                super::super::attach::parse_layout(&layout),
+            );
+            let program =
+                classic_instructions(&record, Output::PerfArray(3), 4).expect("a classic program");
+            assert!(program.contains(&Insn::ldx(BPF_W, 1, 6, 24)), "the state");
+            assert_eq!(
+                program.contains(&Insn::ldx(super::super::insn::BPF_H, 1, 6, 72)),
+                family
+            );
+            let published = program
+                .iter()
+                .position(Output::is_output_call)
+                .expect("the program publishes its record");
+            for offset in [
+                TS, COOKIE, INODE, SADDR, FAMILY, SPORT, STATE, ERROR, DADDR, DPORT, PAD,
+            ] {
+                assert!(
+                    program[..published].iter().any(|insn| {
+                        let class = insn.code & 0x07;
+                        (class == 0x02 || class == 0x03)
+                            && insn.regs & 0xf == 10
+                            && insn.off == offset
+                    }),
+                    "offset {offset} is never written"
+                );
             }
         }
     }
