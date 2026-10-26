@@ -1510,6 +1510,18 @@ pub fn prime_kernel_symbols_aside() {
     }
 }
 
+/// The address of the first text symbol (`t`, `T`, `w`, `W`) of a
+/// `/proc/kallsyms`, or `None` when it has none.
+fn first_text_address(reader: impl std::io::BufRead) -> Option<u64> {
+    reader.lines().map_while(Result::ok).find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let addr = fields.next()?;
+        matches!(fields.next()?, "t" | "T" | "w" | "W")
+            .then(|| u64::from_str_radix(addr, 16).ok())
+            .flatten()
+    })
+}
+
 /// The kernel's own symbol table.
 struct KernelSymbols {
     /// `(address, name)`, sorted by address.
@@ -1524,21 +1536,17 @@ struct KernelSymbols {
 
 impl KernelSymbols {
     fn read() -> Option<Self> {
-        // `kptr_restrict` zeroes every address or none, so the first line
-        // says which: a zeroed table is not read further. Parsing all of it
-        // took 870 ms of a debug build's drain, on a run whose kernel frames
-        // could not be named anyway.
-        let mut first = String::new();
-        std::io::BufRead::read_line(
-            &mut std::io::BufReader::new(std::fs::File::open("/proc/kallsyms").ok()?),
-            &mut first,
-        )
-        .ok()?;
-        if first
-            .split_whitespace()
-            .next()
-            .and_then(|addr| u64::from_str_radix(addr, 16).ok())
-            == Some(0)
+        // `kptr_restrict` zeroes every address or none, so the first text
+        // symbol says which: a zeroed table is not read further. Parsing all
+        // of it took 870 ms of a debug build's drain, on a run whose kernel
+        // frames could not be named anyway. Not the first line: x86-64's
+        // table opens with its per-cpu symbols, absolute and at offsets from
+        // zero (`0000000000000000 A fixed_percpu_data`), and read as the
+        // answer it told a root process on Ubuntu 20.04 that every address
+        // was withheld. No function is at address zero.
+        if first_text_address(std::io::BufReader::new(
+            std::fs::File::open("/proc/kallsyms").ok()?,
+        )) == Some(0)
         {
             return Some(Self::of(Vec::new()));
         }
@@ -3032,6 +3040,24 @@ mod tests {
     /// What loading one file's symbol table costs, on a file named by
     /// `OMN_SYMBOL_LOAD_FILE`: the one-time cost the budget's first check
     /// weighed against a waiting target. A measurement, not a check.
+    /// The per-cpu symbols x86-64 opens its table with are at zero whether
+    /// or not addresses are withheld; the first function is not.
+    #[test]
+    fn a_table_is_judged_by_its_first_function_not_its_first_line() {
+        let shown = "0000000000000000 A fixed_percpu_data\n\
+                     0000000000001000 A cpu_debug_store\n\
+                     ffffffff81000000 T _stext\n";
+        let withheld = "0000000000000000 A fixed_percpu_data\n\
+                        0000000000000000 A cpu_debug_store\n\
+                        0000000000000000 T _stext\n";
+        assert_eq!(
+            first_text_address(shown.as_bytes()),
+            Some(0xffffffff81000000)
+        );
+        assert_eq!(first_text_address(withheld.as_bytes()), Some(0));
+        assert_eq!(first_text_address("".as_bytes()), None);
+    }
+
     #[test]
     #[ignore = "a measurement on a file the environment names"]
     fn the_cost_of_loading_one_symbol_table() {

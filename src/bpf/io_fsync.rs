@@ -47,8 +47,6 @@
 //! which file, which range, and which call, so that a slow commit can be named
 //! and joined to the block requests it waited on.
 
-use std::os::fd::AsRawFd;
-
 use crate::bpf::btf::Btf;
 use crate::bpf::fentry::{self, Function, Kprobe, Link, Narrowing, Side, BPF_H, SKIP};
 use crate::bpf::insn::{
@@ -56,8 +54,7 @@ use crate::bpf::insn::{
     R10,
 };
 use crate::bpf::map::{map_failure, Counters, Hash};
-use crate::bpf::ring::{ring_bytes, RingBuffer};
-use crate::bpf::syscall::{self, BPF_MAP_TYPE_RINGBUF};
+use crate::bpf::transport::{Output, Transport};
 
 /// `bpf_get_current_task`, which `insn::helper` does not name yet.
 const GET_CURRENT_TASK: i32 = 35;
@@ -558,7 +555,7 @@ fn exit_instructions(
     shape: &Shape<'_>,
     at: &Offsets,
     pending_fd: i32,
-    ring_fd: i32,
+    output: Output,
     drops_fd: i32,
     kprobe: Option<Kprobe>,
 ) -> Result<Vec<Insn>, String> {
@@ -627,12 +624,9 @@ fn exit_instructions(
     program.push(Insn::mov64_imm(2, 16));
     program.push(Insn::call(helper::GET_CURRENT_COMM));
 
-    program.extend(Insn::load_map_fd(1, ring_fd));
-    program.push(Insn::mov64_reg(2, R10));
-    program.push(Insn::add64_imm(2, EVENT as i32));
-    program.push(Insn::mov64_imm(3, RECORD_BYTES as i32));
-    program.push(Insn::mov64_imm(4, 0));
-    program.push(Insn::call(helper::RINGBUF_OUTPUT));
+    // The ring buffer where the kernel creates one, a perf event array
+    // otherwise (5.4); r6 is the context the second needs.
+    output.push(&mut program, 6, EVENT, RECORD_BYTES as i32);
     program.jump_to("done", Insn::jeq_imm(0, 0, 0));
     // The ring was full: the sync happened and this run will never see it.
     count_drop(&mut program, drops_fd, DROP_KEY, DROP_RING, "done");
@@ -648,7 +642,7 @@ fn exit_instructions(
 /// Both halves of the three functions, attached, and the ring between them and
 /// userspace.
 pub struct FsyncProgram {
-    ring: RingBuffer,
+    ring: Transport,
     drops: Counters,
     pending: Hash,
     links: Vec<Link>,
@@ -758,10 +752,7 @@ impl FsyncProgram {
             .as_ref()
             .map(crate::bpf::sched_common::Descendants::map_fd);
 
-        let bytes = ring_bytes(RING_BYTES);
-        let ring_map =
-            syscall::map_create(BPF_MAP_TYPE_RINGBUF, 0, 0, bytes as u32, "omn_fsync_ring")
-                .map_err(|error| map_failure("fsync ring buffer", error))?;
+        let ring = Transport::create(RING_BYTES, Some(R_TS as usize), "omn_fsync_ring")?;
         let drops = Counters::create(3, "omn_fsync_drop")
             .map_err(|error| map_failure("fsync drop counter", error))?;
         let value_bytes = if kprobe.is_some() {
@@ -787,7 +778,7 @@ impl FsyncProgram {
                 shape,
                 &offsets,
                 pending.as_raw_fd(),
-                ring_map.as_raw_fd(),
+                ring.output(),
                 drops.as_raw_fd(),
                 kprobe.map(|(_, kprobe)| kprobe),
             )?;
@@ -841,8 +832,6 @@ impl FsyncProgram {
             .collect();
         let mut links = fentry::attach_all(&exits)?;
         links.extend(fentry::attach_all(&entries)?);
-        let ring = RingBuffer::map(ring_map, bytes)
-            .map_err(|error| format!("cannot map the fsync ring buffer: {error}"))?;
         Ok(Self {
             ring,
             drops,
@@ -998,7 +987,8 @@ mod tests {
                 function: &function,
                 via,
             };
-            let exit = exit_instructions(&shape, &offsets, 3, 4, 5, None).expect("a program");
+            let exit = exit_instructions(&shape, &offsets, 3, Output::Ring(4), 5, None)
+                .expect("a program");
             assert!(
                 exit.iter()
                     .any(|insn| insn.code == 0x55 && insn.imm == via as i32),
@@ -1036,7 +1026,7 @@ mod tests {
             },
             &offsets,
             3,
-            4,
+            Output::Ring(4),
             5,
             None,
         )

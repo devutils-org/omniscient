@@ -1427,20 +1427,26 @@ mod tests {
         );
         let (read, _) = answer("both-halves");
         // `kptr_restrict` zeroes every address or none, and a zeroed table is
-        // known from its first line: priming it reads that far and no further.
+        // known from its first function: priming it reads that far and no
+        // further (`stack::KernelSymbols::read`).
         let zeroed = std::fs::read_to_string("/proc/kallsyms")
             .ok()
             .and_then(|text| {
-                let first = text.split_whitespace().next()?.to_owned();
-                u64::from_str_radix(&first, 16).ok()
+                text.lines().find_map(|line| {
+                    let mut fields = line.split_whitespace();
+                    let addr = fields.next()?;
+                    matches!(fields.next()?, "t" | "T" | "w" | "W")
+                        .then(|| u64::from_str_radix(addr, 16).ok())
+                        .flatten()
+                })
             })
             == Some(0);
         if zeroed {
             assert!(
                 read > 0 && read < kallsyms / 4,
                 "a profile whose stacks have a kernel half, on a machine whose /proc/kallsyms \
-                 is zeroed, read {read} bytes of its {kallsyms} as it started: its first line \
-                 says the table names nothing"
+                 is zeroed, read {read} bytes of its {kallsyms} as it started: its first \
+                 function says the table names nothing"
             );
             return;
         }

@@ -51,8 +51,8 @@ use super::attach::{self, PerfAttachment, Scope};
 use super::btf::Btf;
 use super::insn::{self, helper, Insn, Program, BPF_DW, BPF_W, R10};
 use super::map::{map_failure, Counters};
-use super::ring::{ring_bytes, RingBuffer};
-use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
+use super::syscall;
+use super::transport::{Output, Transport};
 use super::Support;
 use crate::bpf::program::LICENSE;
 
@@ -996,7 +996,7 @@ fn instructions(
     site: &Site,
     index: u32,
     tgid: Option<u32>,
-    ring_fd: i32,
+    output: Output,
     drops_fd: i32,
     count_fd: Option<i32>,
 ) -> Result<Vec<Insn>, String> {
@@ -1093,12 +1093,9 @@ fn instructions(
     }
     program.push(Insn::stx(BPF_W, R10, RECORD + REC_UNREAD, 8));
 
-    program.extend(Insn::load_map_fd(1, ring_fd));
-    program.push(Insn::mov64_reg(2, R10));
-    program.push(Insn::add64_imm(2, RECORD as i32));
-    program.push(Insn::mov64_imm(3, RECORD_BYTES as i32));
-    program.push(Insn::mov64_imm(4, 0));
-    program.push(Insn::call(helper::RINGBUF_OUTPUT));
+    // The ring buffer where the kernel creates one, a perf event array
+    // otherwise (5.4); r6 is the context the second needs.
+    output.push(&mut program, 6, RECORD, RECORD_BYTES as i32);
     program.jump_to("done", Insn::jsge_imm(0, 0, 0));
     insn::count_drop(&mut program, drops_fd, DROP_KEY, 0, "done");
 
@@ -1249,7 +1246,7 @@ enum Attachment {
 /// Loaded, attached programs for a set of probe sites, and the ring they
 /// share.
 pub struct UsdtProgram {
-    ring: RingBuffer,
+    ring: Transport,
     drops: Counters,
     /// Hits per site, when the programs count rather than stream.
     counts: Option<Counters>,
@@ -1276,9 +1273,7 @@ impl UsdtProgram {
         // names it; the program compares the kernel's id, which in a
         // container is another number (`pidns`).
         let kernel_tgid = super::pidns::kernel_tgid(pid as u32)?;
-        let bytes = ring_bytes(requested_ring_bytes);
-        let ring_map = syscall::map_create(BPF_MAP_TYPE_RINGBUF, 0, 0, bytes as u32, "omn_usdt")
-            .map_err(|error| map_failure("USDT ring buffer", error))?;
+        let ring = Transport::create(requested_ring_bytes, Some(REC_TS as usize), "omn_usdt")?;
         let drops = Counters::create(1, "omn_usdt_drop")
             .map_err(|error| map_failure("USDT drop counter", error))?;
         let counts = match shape {
@@ -1298,7 +1293,7 @@ impl UsdtProgram {
                 site,
                 index as u32,
                 Some(kernel_tgid),
-                ring_map.as_raw_fd(),
+                ring.output(),
                 drops.as_raw_fd(),
                 counts.as_ref().map(Counters::as_raw_fd),
             )?;
@@ -1367,8 +1362,6 @@ impl UsdtProgram {
             attachments.push(Attachment::Perf(attachment));
         }
 
-        let ring = RingBuffer::map(ring_map, bytes)
-            .map_err(|error| format!("cannot map the USDT ring buffer: {error}"))?;
         Ok(Self {
             ring,
             drops,
@@ -1840,9 +1833,10 @@ mod tests {
             ]
         }
         .join(" ");
-        let program = instructions(btf, &site(&full), 3, Some(42), 5, 6, None).expect("a program");
-        let counting =
-            instructions(btf, &site(&full), 3, Some(42), 5, 6, Some(7)).expect("a program");
+        let program = instructions(btf, &site(&full), 3, Some(42), Output::Ring(5), 6, None)
+            .expect("a program");
+        let counting = instructions(btf, &site(&full), 3, Some(42), Output::Ring(5), 6, Some(7))
+            .expect("a program");
         // A counting program reads no argument and publishes nothing.
         assert!(!counting
             .iter()

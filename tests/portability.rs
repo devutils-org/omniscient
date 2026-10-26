@@ -836,7 +836,17 @@ impl Facts {
             paranoid: number("sysctl/kernel.perf_event_paranoid"),
             unprivileged_bpf_disabled: number("sysctl/kernel.unprivileged_bpf_disabled"),
             lockdown: ok("security/lockdown"),
-            tracefs_mounted: ok("tracing/tracefs").map(|v| v != "not mounted"),
+            // Mounted, or reachable through debugfs: 4.19's
+            // `/sys/kernel/debug/tracing` is an automount, mounted by the first
+            // look inside it -- which envprobe's own directory check makes
+            // after it read the mounts, so Debian 10 listed tracefs not
+            // mounted and that directory readable. Not `/sys/kernel/tracing`
+            // readable alone: in a container it is sysfs's empty mount point.
+            tracefs_mounted: ok("tracing/tracefs").map(|v| {
+                v != "not mounted"
+                    || (ok("tracing/debugfs").is_some_and(|fs| fs != "not mounted")
+                        && ok("tracing/debug_tracing_dir").is_some_and(|dir| dir == "readable"))
+            }),
             cgroup_v2: ok("cgroups/mode")
                 .map(|mode| mode == "v2")
                 .or_else(|| entries.contains_key("cgroups/mode").then_some(false)),
@@ -932,7 +942,14 @@ fn reasons_disagree_with_envprobe(sweep: &Sweep, facts: &Facts) -> Vec<String> {
         let confidential = lockdown == "confidentiality";
         let said = texts
             .iter()
-            .any(|(_, text)| text.contains("withholds bpf_probe_read_kernel"));
+            // Since the read helpers are rewritten before 5.5 the reason
+            // names both: "withholds every read helper ... bpf_probe_read_kernel
+            // and bpf_probe_read alike".
+            .any(|(_, text)| {
+                text.contains("withholds bpf_probe_read_kernel")
+                    || (text.contains("withholds every read helper")
+                        && text.contains("bpf_probe_read_kernel"))
+            });
         if confidential && !said {
             out.push(
                 "envprobe read lockdown=confidentiality, and no reason says the kernel withholds \

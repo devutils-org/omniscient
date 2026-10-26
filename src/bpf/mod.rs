@@ -292,11 +292,109 @@ fn loads_a_read(helper: i32) -> bool {
 /// of a read helper made after it ([`reads_through_probe_read`]) is the
 /// helper it replaced. The verifier holds both to the same arguments, and
 /// before 5.5 `bpf_probe_read` is what reads kernel and user memory alike.
+///
+/// And before 5.8, a helper declared to return an `int` hands it back
+/// zero-extended: `-EEXIST` arrives in `r0` as `0xffffffef`, which no
+/// `r0 == -17` matches and every `r0 >= 0` takes for a success. Measured on
+/// Ubuntu 20.04's 5.4, where `io.fsync`'s nested stamps were counted as a full
+/// map. So after each call of such a helper the result is sign-extended
+/// ([`with_int_results_widened`]), as a compiler does for a helper it knows
+/// returns an `int`.
 pub fn portable(instructions: &[insn::Insn]) -> std::borrow::Cow<'_, [insn::Insn]> {
-    if !instructions.iter().any(|insn| old_read(insn).is_some()) || !reads_through_probe_read() {
+    let reads =
+        instructions.iter().any(|insn| old_read(insn).is_some()) && reads_through_probe_read();
+    let widen = helpers_return_32_bits() && instructions.iter().any(returns_int);
+    if !reads && !widen {
         return std::borrow::Cow::Borrowed(instructions);
     }
-    std::borrow::Cow::Owned(with_old_reads(instructions))
+    let mut rewritten = if reads {
+        with_old_reads(instructions)
+    } else {
+        instructions.to_vec()
+    };
+    if widen {
+        rewritten = with_int_results_widened(&rewritten);
+    }
+    std::borrow::Cow::Owned(rewritten)
+}
+
+/// Whether this kernel predates 5.8, whose helpers return `long`: before it,
+/// a helper's `int` result reaches the program zero-extended. A release that
+/// cannot be read is taken as old, since widening a result that fits in an
+/// `int` changes nothing.
+fn helpers_return_32_bits() -> bool {
+    static ANSWER: OnceLock<bool> = OnceLock::new();
+    *ANSWER.get_or_init(|| {
+        std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .ok()
+            .and_then(|release| crate::capabilities::KernelVersion::parse(release.trim()))
+            .is_none_or(|version| {
+                version < crate::capabilities::KernelVersion { major: 5, minor: 8 }
+            })
+    })
+}
+
+/// A call of a helper whose result is an `int` the programs compare: a map
+/// update or delete, a read, an output, a stack id, the comm.
+fn returns_int(insn: &insn::Insn) -> bool {
+    use insn::helper;
+    insn.code == 0x85
+        && insn.regs >> 4 == 0
+        && matches!(
+            insn.imm,
+            helper::MAP_UPDATE_ELEM
+                | helper::MAP_DELETE_ELEM
+                | helper::GET_CURRENT_COMM
+                | helper::GET_STACKID
+                | helper::PROBE_READ_USER
+                | helper::PROBE_READ_KERNEL
+                | helper::PROBE_READ_USER_STR
+                | helper::PROBE_READ_KERNEL_STR
+                | helper::RINGBUF_OUTPUT
+                | BPF_PROBE_READ
+                | BPF_PROBE_READ_STR
+                | BPF_PERF_EVENT_OUTPUT
+        )
+}
+
+/// `bpf_perf_event_output`, which `bpf::transport` calls where there is no
+/// ring buffer.
+const BPF_PERF_EVENT_OUTPUT: i32 = 25;
+
+/// Inserts `r0 <<= 32; r0 s>>= 32` after every call [`returns_int`] names,
+/// and moves every jump's offset over what was inserted. A jump to the
+/// instruction after such a call lands on that instruction, past the two:
+/// only the call's own fall-through carries its result.
+fn with_int_results_widened(instructions: &[insn::Insn]) -> Vec<insn::Insn> {
+    // Where each original instruction lands, and one past the end.
+    let mut at = Vec::with_capacity(instructions.len() + 1);
+    let mut next = 0i64;
+    for insn in instructions {
+        at.push(next);
+        next += if returns_int(insn) { 3 } else { 1 };
+    }
+    at.push(next);
+    let mut widened = Vec::with_capacity(next as usize);
+    for (index, insn) in instructions.iter().enumerate() {
+        let mut insn = *insn;
+        let class = insn.code & 0x07;
+        let operation = insn.code & 0xf0;
+        // A jump of either width, not a call or an exit: its offset counts
+        // instructions from the next one.
+        let jumps = (class == 0x05 || class == 0x06) && operation != 0x80 && operation != 0x90;
+        if jumps {
+            let target = index as i64 + 1 + i64::from(insn.off);
+            if let Some(&lands) = at.get(target as usize) {
+                insn.off = (lands - at[index] - 1) as i16;
+            }
+        }
+        widened.push(insn);
+        if returns_int(&insn) {
+            widened.push(insn::Insn::lsh64_imm(0, 32));
+            widened.push(insn::Insn::arsh64_imm(0, 32));
+        }
+    }
+    widened
 }
 
 /// The helper before 5.5 that a call of a read helper stands for. A helper
@@ -704,6 +802,34 @@ mod tests {
     /// Before 5.5 every read helper is the one it replaced, and nothing else
     /// moves: not another helper, and not a call to the program's own
     /// function, whose immediate is an offset that may equal a helper's id.
+    /// An `int` result is sign-extended right after its call, and every jump
+    /// keeps its target: one over the call lands where it did, and one to the
+    /// instruction after the call lands on it, past the two inserted.
+    #[test]
+    fn an_int_result_is_widened_and_every_jump_keeps_its_target() {
+        use insn::{helper, Insn};
+        let original = vec![
+            Insn::jeq_imm(1, 0, 2),              // 0 -> 3
+            Insn::call(helper::MAP_UPDATE_ELEM), // 1
+            Insn::jsge_imm(0, 0, 1),             // 2 -> 4
+            Insn::mov64_imm(0, 1),               // 3
+            Insn::call(helper::KTIME_GET_NS),    // 4
+            Insn::exit(),                        // 5
+        ];
+        let widened = with_int_results_widened(&original);
+        assert_eq!(widened.len(), original.len() + 2);
+        assert_eq!(widened[1], Insn::call(helper::MAP_UPDATE_ELEM));
+        assert_eq!(widened[2], Insn::lsh64_imm(0, 32));
+        assert_eq!(widened[3], Insn::arsh64_imm(0, 32));
+        // 0 jumped to `mov r0, 1`, now at 5.
+        assert_eq!(widened[0].off, 4);
+        // 2, now at 4, jumped to the ktime call, now at 6.
+        assert_eq!(widened[4].off, 1);
+        // A helper whose result is not an int is left alone.
+        assert_eq!(widened[6], Insn::call(helper::KTIME_GET_NS));
+        assert_eq!(widened[7], Insn::exit());
+    }
+
     #[test]
     fn a_read_helper_is_the_old_one_and_nothing_else_moves() {
         use insn::{helper, Insn};
