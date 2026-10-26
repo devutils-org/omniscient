@@ -677,8 +677,16 @@ pub struct EventStream {
 /// One program and what holds it attached: a raw tracepoint's link, or a
 /// classic tracepoint's perf event.
 pub(super) enum Attached {
-    Raw { program: OwnedFd, _link: OwnedFd },
+    Raw {
+        program: OwnedFd,
+        _link: OwnedFd,
+    },
     Classic(super::attach::PerfAttachment),
+    /// A second link of a program another entry holds: its runs are that
+    /// entry's.
+    Link {
+        _link: OwnedFd,
+    },
 }
 
 impl Attached {
@@ -721,10 +729,13 @@ impl Attached {
         .map(Attached::Classic)
     }
 
-    pub(super) fn program(&self) -> &OwnedFd {
+    /// The program, for what the kernel counts about it; none for a second
+    /// link, whose program is counted once, by the entry that holds it.
+    pub(super) fn program(&self) -> Option<&OwnedFd> {
         match self {
-            Attached::Raw { program, .. } => program,
-            Attached::Classic(attachment) => attachment.program(),
+            Attached::Raw { program, .. } => Some(program),
+            Attached::Classic(attachment) => Some(attachment.program()),
+            Attached::Link { .. } => None,
         }
     }
 }
@@ -744,7 +755,7 @@ impl EventStream {
     /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
     /// program's own counters can say an occurrence was never seen.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::program::skipped(self.attached.iter().map(Attached::program))
+        crate::bpf::program::skipped(self.attached.iter().filter_map(Attached::program))
     }
 
     /// Creates the two maps, builds the program with their descriptors, loads

@@ -311,17 +311,72 @@ pub fn prog_load_exactly(
 ) -> Result<OwnedFd, LoadError> {
     let license = CString::new(license).expect("a license has no interior NUL");
     let mut log = vec![0u8; LOG_BYTES];
+    // Level 1 is the rejection and the state around it. Level 2 is every
+    // instruction the verifier walked, which is megabytes for anything real.
+    let loaded = load_logging(
+        prog_type,
+        expected_attach_type,
+        instructions,
+        name,
+        &license,
+        &mut log,
+        1,
+    );
+    match loaded {
+        // Before 5.2 a level-1 log records the state at every branch, and a
+        // log that fills fails the load with `ENOSPC` however valid the
+        // program: Debian 10 refused `sched.runqlat`'s switch program so.
+        // Loaded again without one, a valid program loads, and a refused one
+        // keeps the first attempt's log, which is what it was refused with.
+        Err(error) if error.raw_os_error() == Some(libc::ENOSPC) => {
+            match load_logging(
+                prog_type,
+                expected_attach_type,
+                instructions,
+                name,
+                &license,
+                &mut [],
+                0,
+            ) {
+                Ok(fd) => Ok(fd),
+                Err(_) => Err(load_error(error, &log)),
+            }
+        }
+        Err(error) => Err(load_error(error, &log)),
+        Ok(fd) => Ok(fd),
+    }
+}
+
+fn load_error(error: io::Error, log: &[u8]) -> LoadError {
+    let end = log.iter().position(|byte| *byte == 0).unwrap_or(log.len());
+    LoadError {
+        error,
+        verifier_log: String::from_utf8_lossy(&log[..end]).trim().to_owned(),
+    }
+}
+
+/// One `BPF_PROG_LOAD`, with the verifier writing into `log` at `log_level`.
+fn load_logging(
+    prog_type: u32,
+    expected_attach_type: u32,
+    instructions: &[crate::bpf::insn::Insn],
+    name: &str,
+    license: &CString,
+    log: &mut [u8],
+    log_level: u32,
+) -> io::Result<OwnedFd> {
     let mut attr = ProgLoadAttr {
         prog_type,
         insn_cnt: instructions.len() as u32,
         insns: instructions.as_ptr() as u64,
         license: license.as_ptr() as u64,
-        // Level 1 is the rejection and the state around it. Level 2 is every
-        // instruction the verifier walked, which is megabytes for anything
-        // real.
-        log_level: 1,
+        log_level,
         log_size: log.len() as u32,
-        log_buf: log.as_mut_ptr() as u64,
+        log_buf: if log.is_empty() {
+            0
+        } else {
+            log.as_mut_ptr() as u64
+        },
         prog_name: kernel_name(name),
         expected_attach_type,
         ..Default::default()
@@ -334,12 +389,7 @@ pub fn prog_load_exactly(
         )
     };
     if fd < 0 {
-        let error = io::Error::last_os_error();
-        let end = log.iter().position(|byte| *byte == 0).unwrap_or(log.len());
-        return Err(LoadError {
-            error,
-            verifier_log: String::from_utf8_lossy(&log[..end]).trim().to_owned(),
-        });
+        return Err(io::Error::last_os_error());
     }
     Ok(unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
 }

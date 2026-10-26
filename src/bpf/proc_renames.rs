@@ -26,10 +26,11 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
 use super::insn::{
-    helper, push_task_filter, read_field, Insn, Program, Subject, TaskFields, Whose, BPF_DW, R10,
+    helper, push_current_filter, push_task_filter, read_field, Insn, Program, Subject, TaskFields,
+    Whose, BPF_DW, BPF_W, R10,
 };
+use super::proc_events::Attached;
 use super::syscall;
-use crate::bpf::program::LICENSE;
 
 /// `BPF_MAP_TYPE_LRU_HASH`: a machine that execs faster than the drain keeps
 /// the most recent names rather than refusing new ones.
@@ -101,11 +102,38 @@ fn instructions(btf: &Btf, whose: Whose, renames_fd: i32) -> Result<Vec<Insn>, S
     Ok(instructions)
 }
 
+/// The classic program on `sched:sched_process_exec`, which runs in the
+/// task that exec'd: its id and its new name from the helpers.
+fn classic_instructions(whose: Whose, renames_fd: i32) -> Result<Vec<Insn>, String> {
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    push_current_filter(&mut program, whose, FILTER_SCRATCH, "done");
+    program.push(Insn::st_imm(BPF_DW, R10, KEY, 0));
+    program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
+    program.push(Insn::stx(BPF_W, R10, KEY, 0));
+    program.push(Insn::mov64_reg(1, R10));
+    program.push(Insn::add64_imm(1, VALUE as i32));
+    program.push(Insn::mov64_imm(2, COMM_BYTES as i32));
+    program.push(Insn::call(helper::GET_CURRENT_COMM));
+    program.extend(Insn::load_map_fd(1, renames_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, KEY as i32));
+    program.push(Insn::mov64_reg(3, R10));
+    program.push(Insn::add64_imm(3, VALUE as i32));
+    program.push(Insn::mov64_imm(4, 0));
+    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
 /// A loaded, attached exec program and the map of new names it writes.
 pub struct Renames {
     map: OwnedFd,
-    program: OwnedFd,
-    _link: OwnedFd,
+    attached: Attached,
     /// What the last drain took, applied once more: see [`Renames::take`].
     previous: HashMap<u32, String>,
 }
@@ -115,13 +143,15 @@ impl Renames {
     /// that cpu: an exec whose new name this run did not record, so the rows
     /// of that task keep the name they were made with.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::program::skipped([&self.program])
+        crate::bpf::program::skipped(self.attached.program())
     }
 
     /// Loads and attaches it, narrowed to the same tasks as the program it
     /// corrects.
+    ///
+    /// Through the raw tracepoint where the kernel has it, the classic one
+    /// otherwise: no BTF, or a BTF without the tracepoints' types (5.4's).
     pub fn load(whose: Whose) -> Result<Self, String> {
-        let btf = super::kernel_btf()?;
         let map = syscall::map_create(
             BPF_MAP_TYPE_LRU_HASH,
             4,
@@ -130,19 +160,23 @@ impl Renames {
             "omn_renames",
         )
         .map_err(|error| super::map::map_failure("exec name map", error))?;
-        let instructions = instructions(btf, whose, map.as_raw_fd())?;
-        let program = syscall::prog_load(
-            syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
-            &instructions,
-            "omn_renames",
-            LICENSE,
-        )
-        .map_err(|error| format!("the kernel refused the exec name program: {error}"))?;
-        let link = crate::bpf::program::attach_raw("sched_process_exec", &program)?;
+        let raw = super::kernel_btf().and_then(|btf| {
+            let instructions = instructions(btf, whose, map.as_raw_fd())?;
+            Attached::raw("sched_process_exec", &instructions, "omn_renames")
+        });
+        let attached = match raw {
+            Ok(attached) => attached,
+            Err(raw) => {
+                let instructions = classic_instructions(whose, map.as_raw_fd())?;
+                Attached::classic("sched", "sched_process_exec", &instructions, "omn_renames")
+                    .map_err(|classic| {
+                        format!("{raw}; and through the classic tracepoint, {classic}")
+                    })?
+            }
+        };
         Ok(Self {
             map,
-            program,
-            _link: link,
+            attached,
             previous: HashMap::new(),
         })
     }

@@ -733,10 +733,10 @@ impl WakeupProgram {
     /// Runs the kernel skipped because one of these programs was already
     /// running on that cpu, as every program here reports them.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::program::skipped([self.attached.program()])
+        crate::bpf::program::skipped(self.attached.program())
             + self.descendants.as_ref().map_or(0, Descendants::skipped)
             + self.interrupts.as_ref().map_or(0, |numbers| {
-                crate::bpf::program::skipped(numbers.attached.iter().map(Attached::program))
+                crate::bpf::program::skipped(numbers.attached.iter().filter_map(Attached::program))
             })
     }
 

@@ -29,25 +29,16 @@
 //! conditional subtractions; matching against the sixteen combinations instead
 //! would be a list to extend every time the kernel adds a flag.
 
-use std::os::fd::OwnedFd;
-
-use super::btf::Btf;
+use super::context::Syscall;
 use super::insn::{helper, Insn, Program, Whose, BPF_DW, BPF_W, R10};
 use super::map::{map_failure, row_map, select_rows, Counters, Hash, Rows, StackTraces};
+use super::proc_events::Attached;
 use super::sched_common::{
     bucket_low_ns, count_drop, count_update_failure, load_reading_user_lr,
-    push_current_followed_filter, push_log2_bucket, push_user_lr, read_field, text_of, Descendants,
-    Followed, Log2Labels, BPF_F_USER_STACK, BPF_NOEXIST, E2BIG, EEXIST,
+    push_current_followed_filter, push_log2_bucket, push_user_lr, text_of, Descendants, Followed,
+    Log2Labels, BPF_F_USER_STACK, BPF_NOEXIST, E2BIG, EEXIST,
 };
 use crate::bpf::program::load_raw_tracepoint as load;
-
-/// Arguments of `sys_enter` and `sys_exit`, in the raw tracepoint's context.
-const ARG_REGS: i16 = 0;
-const ARG_ID: i16 = 8;
-
-/// The prototypes these programs are written against.
-pub(super) const ENTER_SIGNATURE: [&str; 2] = ["pt_regs *", "long int"];
-pub(super) const EXIT_SIGNATURE: [&str; 2] = ["pt_regs *", "long int"];
 
 /// The `futex` syscall's number, which is per architecture and has no
 /// architecture-independent name anywhere the kernel publishes.
@@ -260,38 +251,33 @@ fn current_and_filter(
 
 /// The program on `sys_enter`: a thread is about to wait, if this is a wait.
 fn enter_instructions(
-    btf: &Btf,
+    context: Syscall,
     followed: &Followed,
     waiting_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
-    crate::bpf::program::prototype(
-        btf,
-        "sys_enter",
-        &[&ENTER_SIGNATURE],
-        "the register block and the syscall number",
-    )?;
-    let di = btf.syscall_argument(0)?;
-    let si = btf.syscall_argument(1)?;
+    context.check("sys_enter", "the register block and the syscall number")?;
 
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
 
     // The syscall number is the cheapest test there is and it is first: every
     // other syscall on the machine leaves after two instructions.
-    program.push(Insn::ldx(BPF_DW, 1, 6, ARG_ID));
+    program.push(Insn::ldx(BPF_DW, 1, 6, context.nr_at()));
     program.jump_to("done", Insn::jne_imm(1, SYS_FUTEX, 0));
 
     current_and_filter(&mut program, followed, "done", "followed");
-
-    // r9 keeps the register block the syscall arrived with.
-    program.push(Insn::ldx(BPF_DW, 9, 6, ARG_REGS));
+    // The key now: reading an argument may clobber `r7`, which holds it.
+    program.push(Insn::st_imm(BPF_DW, R10, WAIT_KEY, 0));
+    program.push(Insn::stx(BPF_W, R10, WAIT_KEY, 7));
 
     // The second argument is `int op`. Read eight bytes and then four: the
     // register holds sixty-four bits and the kernel reads thirty-two of them,
     // so anything above that is userspace's leftovers and not part of the
     // command.
-    read_field(&mut program, SCRATCH, 8, 9, si);
+    if !context.read_argument(&mut program, 1, SCRATCH) {
+        return Err("this kernel's BTF does not say where a syscall's arguments are".to_owned());
+    }
     program.push(Insn::ldx(BPF_W, 1, R10, SCRATCH));
 
     // The two flag bits, stripped the way the kernel strips them.
@@ -318,11 +304,9 @@ fn enter_instructions(
     // would otherwise carry whatever was on the stack.
     program.push(Insn::st_imm(BPF_W, R10, WAIT_VALUE + WAIT_PAD, 0));
 
-    // The futex word's address is the first argument.
-    read_field(&mut program, WAIT_VALUE + WAIT_ADDR, 8, 9, di);
-
-    program.push(Insn::st_imm(BPF_DW, R10, WAIT_KEY, 0));
-    program.push(Insn::stx(BPF_W, R10, WAIT_KEY, 7));
+    // The futex word's address is the first argument. The command is on the
+    // stack already: this read may clobber the registers that held it.
+    context.read_argument(&mut program, 0, WAIT_VALUE + WAIT_ADDR);
 
     program.push(Insn::call(helper::KTIME_GET_NS));
     program.push(Insn::stx(BPF_DW, R10, WAIT_VALUE + WAIT_TS, 0));
@@ -366,7 +350,7 @@ fn enter_instructions(
 /// inside a syscall is not making another one, so the first `sys_exit` that
 /// finds an entry is that syscall's own return.
 fn exit_instructions(
-    btf: &Btf,
+    context: Syscall,
     followed: &Followed,
     waiting_fd: i32,
     rows_fd: i32,
@@ -374,12 +358,7 @@ fn exit_instructions(
     stacks_fd: i32,
     leaf_lr: bool,
 ) -> Result<Vec<Insn>, String> {
-    crate::bpf::program::prototype(
-        btf,
-        "sys_exit",
-        &[&EXIT_SIGNATURE],
-        "the register block and the syscall number",
-    )?;
+    context.check("sys_exit", "the register block and the syscall number")?;
 
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
@@ -524,10 +503,8 @@ pub struct FutexProgram {
     /// Why the user link register is not read, where the architecture has
     /// one.
     leaf_lr_missing: Option<String>,
-    enter_program: OwnedFd,
-    _enter_link: OwnedFd,
-    exit_program: OwnedFd,
-    _exit_link: OwnedFd,
+    /// The entry program, then the exit one.
+    attached: Vec<Attached>,
 }
 
 impl FutexProgram {
@@ -537,7 +514,7 @@ impl FutexProgram {
     /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
     /// program's own counters can say an occurrence was never seen.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::program::skipped([&self.enter_program, &self.exit_program])
+        crate::bpf::program::skipped(self.attached.iter().filter_map(Attached::program))
             + self.descendants.as_ref().map_or(0, Descendants::skipped)
     }
 
@@ -564,7 +541,22 @@ impl FutexProgram {
     }
 
     pub fn load(whose: Whose) -> Result<Self, String> {
-        let btf = super::kernel_btf()?;
+        Self::load_on(whose, false)
+    }
+
+    /// The classic tracepoints `raw_syscalls:sys_enter` and `sys_exit`
+    /// (`bpf:tp`), for a kernel without BTF; their field offsets come from
+    /// tracefs.
+    pub fn load_classic(whose: Whose) -> Result<Self, String> {
+        Self::load_on(whose, true)
+    }
+
+    fn load_on(whose: Whose, classic: bool) -> Result<Self, String> {
+        let context = if classic {
+            Syscall::classic()?
+        } else {
+            Syscall::Raw(super::kernel_btf()?)
+        };
         // A process target is followed into every process it starts, as
         // `sched.offcpu` and `sched.wakeup` follow it: a program on
         // `sched_process_fork` adds a child to the set before it has run.
@@ -592,29 +584,56 @@ impl FutexProgram {
         let stacks = StackTraces::create(MAX_STACKS, MAX_STACK_DEPTH, "omn_futex_stk")
             .map_err(|error| map_failure("futex stack map", error))?;
 
-        let enter = enter_instructions(btf, &followed, waiting.as_raw_fd(), drops.as_raw_fd())?;
-        let enter_program = load(&enter, "omn_futex_in")?;
-        let (exit_program, leaf_lr_missing) = load_reading_user_lr(
-            "futex",
-            |leaf_lr| {
-                exit_instructions(
-                    btf,
-                    &followed,
-                    waiting.as_raw_fd(),
-                    rows.as_raw_fd(),
-                    drops.as_raw_fd(),
-                    stacks.as_raw_fd(),
-                    leaf_lr,
-                )
-            },
-            |instructions| load(instructions, "omn_futex_out"),
-        )?;
+        let enter = enter_instructions(context, &followed, waiting.as_raw_fd(), drops.as_raw_fd())?;
+        let exit = |leaf_lr| {
+            exit_instructions(
+                context,
+                &followed,
+                waiting.as_raw_fd(),
+                rows.as_raw_fd(),
+                drops.as_raw_fd(),
+                stacks.as_raw_fd(),
+                leaf_lr,
+            )
+        };
 
         // Entries before exits: a wait opened by a program whose partner is not
         // attached yet ages out of the map, whereas an exit seen before any
         // entry was recorded would close a wait nobody opened.
-        let enter_link = crate::bpf::program::attach_raw("sys_enter", &enter_program)?;
-        let exit_link = crate::bpf::program::attach_raw("sys_exit", &exit_program)?;
+        let (attached, leaf_lr_missing) = if classic {
+            // The aarch64 link register is read through a BTF-typed helper,
+            // which no kernel without BTF has.
+            let exit = exit(false)?;
+            let attached = vec![
+                Attached::classic("raw_syscalls", "sys_enter", &enter, "omn_futex_in")?,
+                Attached::classic("raw_syscalls", "sys_exit", &exit, "omn_futex_out")?,
+            ];
+            let missing = cfg!(target_arch = "aarch64").then(|| {
+                "the classic tracepoints: the user link register is read through \
+                 `bpf_task_pt_regs`, which takes a BTF-typed task, and this kernel has no BTF"
+                    .to_owned()
+            });
+            (attached, missing)
+        } else {
+            let enter_program = load(&enter, "omn_futex_in")?;
+            let (exit_program, leaf_lr_missing) =
+                load_reading_user_lr("futex", exit, |instructions| {
+                    load(instructions, "omn_futex_out")
+                })?;
+            let enter_link = crate::bpf::program::attach_raw("sys_enter", &enter_program)?;
+            let exit_link = crate::bpf::program::attach_raw("sys_exit", &exit_program)?;
+            let attached = vec![
+                Attached::Raw {
+                    program: enter_program,
+                    _link: enter_link,
+                },
+                Attached::Raw {
+                    program: exit_program,
+                    _link: exit_link,
+                },
+            ];
+            (attached, leaf_lr_missing)
+        };
 
         Ok(Self {
             descendants,
@@ -623,10 +642,7 @@ impl FutexProgram {
             drops,
             stacks,
             leaf_lr_missing,
-            enter_program,
-            _enter_link: enter_link,
-            exit_program,
-            _exit_link: exit_link,
+            attached,
         })
     }
 
@@ -685,6 +701,7 @@ impl FutexProgram {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bpf::btf::Btf;
 
     fn kernel_btf() -> Option<Btf> {
         match Btf::from_kernel() {
@@ -697,11 +714,12 @@ mod tests {
     }
 
     fn enter(btf: &Btf, whose: Whose) -> Vec<Insn> {
-        enter_instructions(btf, &Followed::only(whose), 3, 4).expect("a program")
+        enter_instructions(Syscall::Raw(btf), &Followed::only(whose), 3, 4).expect("a program")
     }
 
     fn exit(btf: &Btf, whose: Whose) -> Vec<Insn> {
-        exit_instructions(btf, &Followed::only(whose), 3, 4, 5, 6, true).expect("a program")
+        exit_instructions(Syscall::Raw(btf), &Followed::only(whose), 3, 4, 5, 6, true)
+            .expect("a program")
     }
 
     /// Both tracepoints fire on every syscall of every process on the machine.
@@ -838,7 +856,7 @@ mod tests {
         let Some(btf) = kernel_btf() else { return };
         assert_eq!(
             btf.tracepoint_signature("sys_enter").expect("a prototype"),
-            ENTER_SIGNATURE
+            crate::bpf::context::SYS_ENTER
         );
         assert!(crate::bpf::program::prototype(
             &btf,
@@ -951,8 +969,16 @@ mod tests {
     #[test]
     fn the_row_map_is_taken_from_the_slot_once_per_run() {
         let Some(btf) = kernel_btf() else { return };
-        let program = exit_instructions(&btf, &Followed::only(Whose::Process(1)), 3, 4, 5, 6, true)
-            .expect("a program");
+        let program = exit_instructions(
+            Syscall::Raw(&btf),
+            &Followed::only(Whose::Process(1)),
+            3,
+            4,
+            5,
+            6,
+            true,
+        )
+        .expect("a program");
         crate::bpf::map::assert_rows_taken_once(&program, 4);
     }
 }

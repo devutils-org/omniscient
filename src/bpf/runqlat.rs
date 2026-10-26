@@ -32,14 +32,14 @@
 //! bucketing without being re-bucketed into something else, and there is a test
 //! below that crosses the two definitions.
 
-use std::os::fd::OwnedFd;
-
 use super::btf::Btf;
+use super::context::Record;
 use super::insn::{
     self, count_drop, helper, read_field, Insn, Log2Labels, Program, Subject, TaskFields, Whose,
     BPF_DW, BPF_W, R10,
 };
 use super::map::{map_failure, row_map, select_rows, Counters, Hash, Rows};
+use super::proc_events::Attached;
 use super::sched_common::{
     push_followed_filter, push_kernel_wait, push_last_queued, push_rq_clock, push_run_delay,
     Descendants, Followed, KernelClock,
@@ -585,6 +585,177 @@ fn switch_instructions(
     Ok(instructions)
 }
 
+/// What the classic programs need beside their records: the maps, and the
+/// followed threads' map for a process target.
+#[derive(Clone, Copy)]
+struct ClassicMaps {
+    queued_fd: i32,
+    rows_fd: i32,
+    drops_fd: i32,
+    whose: Whose,
+    /// Every thread of the root and of what it started, with its process.
+    threads: Option<i32>,
+}
+
+/// `TASK_REPORT`'s states and `TASK_REPORT_IDLE`: what a classic
+/// `sched_switch` record's `prev_state` holds for a task that left blocked.
+/// A task preempted while runnable is `TASK_REPORT_MAX` there (0x100), not
+/// `TASK_RUNNING`, so runnable is "none of these bits".
+const REPORTED_BLOCKED: i32 = 0xff;
+
+/// Enqueues the thread whose id is at `QUEUED_KEY`, stamped by `ts_reg`,
+/// with its process beside the stamp (where the classic road keeps it, in
+/// place of the kernel's `run_delay` it cannot read).
+fn classic_enqueue(program: &mut Program, maps: ClassicMaps, ts_reg: u8, resume: &'static str) {
+    // The idle task: see `enqueue`.
+    program.push(Insn::ldx(BPF_W, 1, R10, QUEUED_KEY));
+    program.jump_to(resume, Insn::jeq_imm(1, 0, 0));
+    program.push(Insn::stx(BPF_DW, R10, QUEUED_VALUE, ts_reg));
+    program.push(Insn::st_imm(
+        BPF_DW,
+        R10,
+        QUEUED_VALUE + QUEUED_RUN_DELAY,
+        0,
+    ));
+    match (maps.whose, maps.threads) {
+        (Whose::Thread(tid), _) => {
+            program.jump_to(resume, Insn::jne_imm(1, tid as i32, 0));
+        }
+        (_, Some(threads)) => {
+            program.extend(Insn::load_map_fd(1, threads));
+            program.push(Insn::mov64_reg(2, R10));
+            program.push(Insn::add64_imm(2, QUEUED_KEY as i32));
+            program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+            program.jump_to(resume, Insn::jeq_imm(0, 0, 0));
+            program.push(Insn::ldx(BPF_W, 1, 0, 0));
+            program.push(Insn::stx(BPF_W, R10, QUEUED_VALUE + QUEUED_RUN_DELAY, 1));
+        }
+        _ => {}
+    }
+    program.extend(Insn::load_map_fd(1, maps.queued_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, QUEUED_KEY as i32));
+    program.push(Insn::mov64_reg(3, R10));
+    program.push(Insn::add64_imm(3, QUEUED_VALUE as i32));
+    program.push(Insn::mov64_imm(4, 0));
+    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
+    program.jump_to(resume, Insn::jsge_imm(0, 0, 0));
+    count_drop(program, maps.drops_fd, DROP_KEY, DROP_QUEUED, resume);
+}
+
+/// The classic program on `sched:sched_wakeup` and `sched_wakeup_new`.
+fn classic_wakeup_instructions(record: &Record, maps: ClassicMaps) -> Result<Vec<Insn>, String> {
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::mov64_reg(8, 0));
+    program.push(Insn::st_imm(BPF_DW, R10, QUEUED_KEY, 0));
+    record.load(&mut program, 1, 6, "pid", FILTER_SCRATCH)?;
+    program.push(Insn::stx(BPF_W, R10, QUEUED_KEY, 1));
+    classic_enqueue(&mut program, maps, 8, "done");
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
+/// The classic program on `sched:sched_switch`: the wait is the gap between
+/// the two tracepoints, the record's `next_*` fields the waiting task's.
+fn classic_switch_instructions(record: &Record, maps: ClassicMaps) -> Result<Vec<Insn>, String> {
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::mov64_reg(8, 0));
+
+    // ---- the task leaving the cpu, back on the queue when still runnable ----
+    record.load(&mut program, 1, 6, "prev_state", FILTER_SCRATCH)?;
+    program.push(Insn::and64_imm(1, REPORTED_BLOCKED));
+    program.jump_to("arriving", Insn::jne_imm(1, 0, 0));
+    program.push(Insn::st_imm(BPF_DW, R10, QUEUED_KEY, 0));
+    record.load(&mut program, 1, 6, "prev_pid", FILTER_SCRATCH)?;
+    program.push(Insn::stx(BPF_W, R10, QUEUED_KEY, 1));
+    classic_enqueue(&mut program, maps, 8, "arriving");
+    program.label("arriving");
+
+    // ---- the task taking the cpu ----
+    program.push(Insn::st_imm(BPF_DW, R10, QUEUED_KEY, 0));
+    record.load(&mut program, 1, 6, "next_pid", FILTER_SCRATCH)?;
+    program.push(Insn::stx(BPF_W, R10, QUEUED_KEY, 1));
+    program.extend(Insn::load_map_fd(1, maps.queued_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, QUEUED_KEY as i32));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    program.jump_to("done", Insn::jeq_imm(0, 0, 0));
+    program.push(Insn::ldx(BPF_DW, 9, 0, 0));
+    program.push(Insn::ldx(BPF_W, 1, 0, QUEUED_RUN_DELAY));
+    program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_TGID, 1));
+    program.extend(Insn::load_map_fd(1, maps.queued_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, QUEUED_KEY as i32));
+    program.push(Insn::call(helper::MAP_DELETE_ELEM));
+
+    program.push(Insn::mov64_reg(1, 8));
+    program.push(Insn::sub64_reg(1, 9));
+    program.push(Insn::mov64_reg(9, 1));
+    program.push(Insn::stx(BPF_DW, R10, ROW_VALUE + VALUE_WAKE_TO_RUN_NS, 9));
+
+    program.push(Insn::call(helper::GET_SMP_PROCESSOR_ID));
+    program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_CPU, 0));
+    insn::push_log2_bucket(&mut program, 9, &LOG2);
+    program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_BUCKET, 3));
+    program.push(Insn::ldx(BPF_W, 1, R10, QUEUED_KEY));
+    program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_TID, 1));
+    record.load(&mut program, 1, 6, "next_prio", FILTER_SCRATCH)?;
+    program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_PRIO, 1));
+
+    select_rows(&mut program, maps.rows_fd, ROWS_SLOT, "no_rows");
+    program.push(row_map(1, ROWS_SLOT));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, ROW_KEY as i32));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    program.jump_to("first_wait", Insn::jeq_imm(0, 0, 0));
+    program.push(Insn::mov64_imm(1, 1));
+    program.push(Insn::atomic_add(BPF_DW, 0, VALUE_COUNT, 1));
+    program.push(Insn::atomic_add(BPF_DW, 0, VALUE_TOTAL_NS, 9));
+    program.push(Insn::atomic_add(BPF_DW, 0, VALUE_WAKE_TO_RUN_NS, 9));
+    program.jump_to("done", Insn::ja());
+
+    program.label("first_wait");
+    program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_COUNT, 1));
+    program.push(Insn::stx(BPF_DW, R10, ROW_VALUE + VALUE_TOTAL_NS, 9));
+    program.push(Insn::mov64_reg(1, 8));
+    program.push(Insn::sub64_reg(1, 9));
+    program.push(Insn::stx(BPF_DW, R10, ROW_VALUE + VALUE_FIRST_NS, 1));
+    record.copy(
+        &mut program,
+        6,
+        "next_comm",
+        ROW_VALUE + VALUE_COMM,
+        COMM_BYTES,
+    )?;
+    program.push(row_map(1, ROWS_SLOT));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, ROW_KEY as i32));
+    program.push(Insn::mov64_reg(3, R10));
+    program.push(Insn::add64_imm(3, ROW_VALUE as i32));
+    program.push(Insn::mov64_imm(4, 0));
+    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
+    program.jump_to("done", Insn::jsge_imm(0, 0, 0));
+    count_drop(&mut program, maps.drops_fd, DROP_KEY, DROP_ROWS, "done");
+    program.jump_to("done", Insn::ja());
+    program.label("no_rows");
+    count_drop(&mut program, maps.drops_fd, DROP_KEY, DROP_ROWS, "done");
+
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
 /// Two loaded, attached programs and the maps they share.
 ///
 /// Dropping it detaches both: the links, the programs and the maps are file
@@ -598,14 +769,14 @@ pub struct RunqLatProgram {
     queued: Hash,
     rows: Rows,
     drops: Counters,
-    wakeup_program: OwnedFd,
-    _wakeup_link: OwnedFd,
-    /// The same program on `sched_wakeup_new`: a task's first wait, from its
-    /// fork to its first run, is on the run queue like any other, and the
-    /// kernel's `run_delay` counts it.
-    _wakeup_new_link: OwnedFd,
-    switch_program: OwnedFd,
-    _switch_link: OwnedFd,
+    /// The wakeup program, on `sched_wakeup` and on `sched_wakeup_new` -- a
+    /// task's first wait, from its fork to its first run, is on the run
+    /// queue like any other, and the kernel's `run_delay` counts it -- then
+    /// the switch program.
+    attached: Vec<Attached>,
+    /// Through the classic tracepoints: a row's process is found at the
+    /// drain where the program did not know it.
+    classic: bool,
 }
 
 impl RunqLatProgram {
@@ -615,7 +786,7 @@ impl RunqLatProgram {
     /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
     /// program's own counters can say an occurrence was never seen.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::program::skipped([&self.wakeup_program, &self.switch_program])
+        crate::bpf::program::skipped(self.attached.iter().filter_map(Attached::program))
             + self.descendants.as_ref().map_or(0, Descendants::skipped)
     }
 
@@ -684,7 +855,6 @@ impl RunqLatProgram {
         )?;
 
         let wakeup_program = load(&wakeup, "omn_runq_wake")?;
-        let switch_program = load(&switch, "omn_runq_swtch")?;
 
         // Attached in this order on purpose. A wait recorded by a program whose
         // partner is not attached yet is a wait that will never be closed --
@@ -701,7 +871,16 @@ impl RunqLatProgram {
             );
         }
         let wakeup_new_link = crate::bpf::program::attach_raw("sched_wakeup_new", &wakeup_program)?;
-        let switch_link = crate::bpf::program::attach_raw("sched_switch", &switch_program)?;
+        let attached = vec![
+            Attached::Raw {
+                program: wakeup_program,
+                _link: wakeup_link,
+            },
+            Attached::Link {
+                _link: wakeup_new_link,
+            },
+            Attached::raw("sched_switch", &switch, "omn_runq_swtch")?,
+        ];
 
         Ok(Self {
             descendants,
@@ -709,11 +888,83 @@ impl RunqLatProgram {
             queued,
             rows,
             drops,
-            wakeup_program,
-            _wakeup_link: wakeup_link,
-            _wakeup_new_link: wakeup_new_link,
-            switch_program,
-            _switch_link: switch_link,
+            attached,
+            classic: false,
+        })
+    }
+
+    /// The classic tracepoints (`bpf:tp`), for a kernel without BTF: the
+    /// wait is the gap between `sched_wakeup` (or a runnable task's switch
+    /// out) and its switch in, as the tracepoints stamp them, rather than the
+    /// kernel's own account, which no record carries. A cgroup is refused:
+    /// the waiting task's cgroup is in no record either.
+    pub fn load_classic(whose: Whose) -> Result<Self, String> {
+        if let Whose::Cgroup(_) = whose {
+            return Err(
+                "`sched.runqlat` through the classic tracepoints cannot keep a cgroup: the \
+                 waiting task is named by its id alone in `sched_switch`'s record, and the \
+                 cgroup it is in is nowhere in it"
+                    .to_owned(),
+            );
+        }
+        let descendants = match whose {
+            Whose::Process(root) => Some(Descendants::follow_threads(root)?),
+            _ => None,
+        };
+        let queued = Hash::create(
+            QUEUED_KEY_BYTES,
+            QUEUED_VALUE_BYTES,
+            MAX_QUEUED,
+            "omn_runq_wait",
+        )
+        .map_err(|error| map_failure("run queue map", error))?;
+        let rows = Rows::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, "omn_runq_hist")
+            .map_err(|error| map_failure("run queue histogram map", error))?;
+        let drops = Counters::create(3, "omn_runq_drop")
+            .map_err(|error| map_failure("run queue drop counter", error))?;
+        let maps = ClassicMaps {
+            queued_fd: queued.as_raw_fd(),
+            rows_fd: rows.as_raw_fd(),
+            drops_fd: drops.as_raw_fd(),
+            whose,
+            threads: descendants.as_ref().and_then(Descendants::threads_fd),
+        };
+        let wakeup = Record::of("sched", "sched_wakeup")?;
+        let wakeup_new = Record::of("sched", "sched_wakeup_new")?;
+        let switch = Record::of("sched", "sched_switch")?;
+        // In this order, for the reason `load` gives.
+        let attached = vec![
+            Attached::classic(
+                "sched",
+                "sched_wakeup",
+                &classic_wakeup_instructions(&wakeup, maps)?,
+                "omn_runq_wake",
+            )?,
+            Attached::classic(
+                "sched",
+                "sched_wakeup_new",
+                &classic_wakeup_instructions(&wakeup_new, maps)?,
+                "omn_runq_wnew",
+            )?,
+            Attached::classic(
+                "sched",
+                "sched_switch",
+                &classic_switch_instructions(&switch, maps)?,
+                "omn_runq_swtch",
+            )?,
+        ];
+        Ok(Self {
+            descendants,
+            clock_missing: Some(
+                "the classic tracepoints carry no `rq->clock` and no `run_delay`, so a wait is \
+                 the gap between the two tracepoints, as `runqlat` measures it"
+                    .to_owned(),
+            ),
+            queued,
+            rows,
+            drops,
+            attached,
+            classic: true,
         })
     }
 
@@ -744,7 +995,12 @@ impl Drains for RunqLatProgram {
         let mut rows = Vec::with_capacity(drained.entries.len());
         for (key, value) in &drained.entries {
             match RunqLat::decode(key, value) {
-                Some(row) => rows.push(row),
+                Some(mut row) => {
+                    if self.classic && row.tgid == 0 {
+                        row.tgid = super::proc_events::group_of(row.tid).unwrap_or(0);
+                    }
+                    rows.push(row)
+                }
                 // A record the wrong size means this reader and the program
                 // disagree about the layout, which is a bug rather than a
                 // machine condition -- but counting it beats reinterpreting it.
@@ -1162,5 +1418,50 @@ mod tests {
         )
         .expect("a program");
         crate::bpf::map::assert_rows_taken_once(&program, 4);
+    }
+
+    /// The classic programs build against 4.19's records, read a preempted
+    /// task as runnable (`prev_state` 0x100 has no reported-blocked bit) and
+    /// compare a process target's threads through the threads map.
+    #[test]
+    fn the_classic_programs_build_against_the_4_19_records() {
+        let layout = |text: &str| super::super::attach::parse_layout(text);
+        let wakeup = Record::from_layout(
+            "sched:sched_wakeup",
+            layout(
+                "\tfield:char comm[16];\toffset:8;\tsize:16;\tsigned:1;\n\
+                 \tfield:pid_t pid;\toffset:24;\tsize:4;\tsigned:1;\n",
+            ),
+        );
+        let switch = Record::from_layout(
+            "sched:sched_switch",
+            layout(
+                "\tfield:char prev_comm[16];\toffset:8;\tsize:16;\tsigned:1;\n\
+                 \tfield:pid_t prev_pid;\toffset:24;\tsize:4;\tsigned:1;\n\
+                 \tfield:int prev_prio;\toffset:28;\tsize:4;\tsigned:1;\n\
+                 \tfield:long prev_state;\toffset:32;\tsize:8;\tsigned:1;\n\
+                 \tfield:char next_comm[16];\toffset:40;\tsize:16;\tsigned:1;\n\
+                 \tfield:pid_t next_pid;\toffset:56;\tsize:4;\tsigned:1;\n\
+                 \tfield:int next_prio;\toffset:60;\tsize:4;\tsigned:1;\n",
+            ),
+        );
+        for (whose, threads) in [
+            (Whose::Any, None),
+            (Whose::Process(42), Some(9)),
+            (Whose::Thread(42), None),
+        ] {
+            let maps = ClassicMaps {
+                queued_fd: 3,
+                rows_fd: 4,
+                drops_fd: 5,
+                whose,
+                threads,
+            };
+            classic_wakeup_instructions(&wakeup, maps).expect("the wakeup program");
+            let program = classic_switch_instructions(&switch, maps).expect("the switch program");
+            assert!(program.contains(&Insn::ldx(BPF_DW, 1, 6, 32)), "prev_state");
+            assert!(program.contains(&Insn::and64_imm(1, REPORTED_BLOCKED)));
+            assert!(program.contains(&Insn::ldx(BPF_W, 1, 6, 56)), "next_pid");
+        }
     }
 }

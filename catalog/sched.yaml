@@ -85,11 +85,14 @@
       cost: med
       drained: true
     - id: "bpf:tp"
-      requires: ["tracepoint:sched:sched_wakeup", "tracepoint:sched:sched_switch", "bpf"]
+      requires: ["tracepoint:sched:sched_wakeup", "tracepoint:sched:sched_wakeup_new", "tracepoint:sched:sched_switch",
+        "tracepoint:task:task_newtask", "tracepoint:sched:sched_process_free", "bpf"]
       join: {key: "task:tid", match: eq, ttl: 10s}
       cost: med
       drained: true
-      equivalent: true
+      degraded: "a wait is the gap between the tracepoints, as `runqlat` measures it, not the kernel's
+        own `rq->clock` account, which no record carries; and a cgroup target is refused: the waiting
+        task's cgroup is in no record"
   modes: [trace]
   emits: [hist, topk, raw, summary]
   targets: {system: native, pid: bpf_only, tid: bpf_only, cgroup: bpf_only, cpu: native, launch: bpf_only}
@@ -124,15 +127,20 @@
   backends:
     # Every backend adds the blocks up in the kernel and drains the totals on a
     # tick, which is what `drained` says: one event is a hundred blocks.
-    - {id: "bpf:tp:stacks", requires: ["tracepoint:sched:sched_switch", "bpf", "callchain"], cost: high, drained: true}
-    # Same events as `bpf:tp`, attached the way this tool attaches: through
-    # BPF_RAW_TRACEPOINT_OPEN, which needs a name and BTF where the classic
-    # path needs a numeric id out of tracefs. Ordered ahead of it for the
-    # reason docs/DECISIONS.md settled: strictly fewer requirements, same events.
+    # The same events as the classic tracepoints below, attached the way this
+    # tool attaches: through BPF_RAW_TRACEPOINT_OPEN, which needs a name and
+    # BTF where the classic path needs a numeric id out of tracefs. Ordered
+    # ahead of them for the reason docs/DECISIONS.md settled: strictly fewer
+    # requirements, same events.
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "raw_tracepoint:sched_wakeup(task_struct *)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)"], cost: med, drained: true,
        degraded: "user stacks only: the kernel side of a block is always the scheduler, and what it was waiting for is the task state"}
-    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "bpf"], cost: med, drained: true,
-       degraded: "no stacks: tells you how long, not where"}
+    - {id: "bpf:tp:stacks", requires: ["tracepoint:sched:sched_switch", "tracepoint:sched:sched_wakeup", "tracepoint:task:task_newtask",
+         "tracepoint:sched:sched_process_free", "bpf", "callchain"], cost: high, drained: true,
+       degraded: "user stacks only, and no record carries the kernel's clock: `queued_ns` is the wait from
+         `sched_wakeup` to the switch by the tracepoints, and a block begins at the switch"}
+    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "tracepoint:sched:sched_wakeup", "tracepoint:task:task_newtask",
+         "tracepoint:sched:sched_process_free", "bpf"], cost: med, drained: true,
+       degraded: "no stacks: tells you how long, not where; and `queued_ns` is the tracepoints' wait"}
   modes: [trace]
   emits: [hist, stack, topk, raw, summary]
   targets: {pid: bpf_only, tid: bpf_only, cgroup: bpf_only, launch: bpf_only, system: native}
@@ -316,7 +324,8 @@
   unit: ns
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter(pt_regs *, long int)", "raw_tracepoint:sys_exit(pt_regs *, long int)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)", "bpf_map:ringbuf"], cost: high, drained: true}
-    - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit", "bpf"], cost: high, equivalent: true}
+    - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit",
+         "tracepoint:task:task_newtask", "tracepoint:sched:sched_process_free", "bpf"], cost: high, equivalent: true}
   modes: [trace]
   emits: [hist, topk, stack, raw, summary]
   targets: {pid: native, tid: native, launch: native, cgroup: bpf_only}

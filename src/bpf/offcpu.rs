@@ -40,14 +40,17 @@
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
+use super::context::Record;
 use super::insn::{
     self, count_drop, helper, read_field, Insn, Log2Labels, Program, Subject, TaskFields, Whose,
     BPF_DW, BPF_W, R10,
 };
 use super::map::{map_failure, row_map, select_rows, Counters, Hash, Rows, StackTraces};
+use super::proc_events::Attached;
 use super::sched_common::{
-    load_reading_user_lr, push_followed_filter, push_kernel_wait, push_last_queued, push_rq_clock,
-    push_run_delay, push_user_lr, Descendants, Followed, KernelClock,
+    load_reading_user_lr, push_current_followed_filter, push_followed_filter, push_kernel_wait,
+    push_last_queued, push_rq_clock, push_run_delay, push_user_lr, Descendants, Followed,
+    KernelClock,
 };
 use super::syscall;
 use crate::bpf::program::LICENSE;
@@ -791,6 +794,240 @@ fn entry_instructions(entries_fd: i32) -> Result<Vec<Insn>, String> {
     Ok(instructions)
 }
 
+/// What a classic `sched_switch` record's `prev_state` holds: not the
+/// task's state, but a bit per letter `ps` prints (`S` 1, `D` 2, `T` 4, `t`
+/// 8, `X` 16, `Z` 32, `P` 64, `I` 128), and `TASK_REPORT_MAX` (0x100) for a
+/// task preempted while runnable. A task leaving for the last time already
+/// carries its exit state, `X` or `Z`.
+const REPORTED_BLOCKED: i32 = 0xff;
+const REPORTED_EXITED: i32 = 0x30;
+/// `I`, an idle kernel thread, which the raw program sees as
+/// `TASK_UNINTERRUPTIBLE | TASK_NOLOAD`: translated, so that `state_name`
+/// says "idle" whichever road the row came by.
+const REPORTED_IDLE: i32 = 0x80;
+const TASK_IDLE: i32 = 0x0402;
+
+/// The errno a classic program without stacks stores in place of a stack id:
+/// `ENODATA`, which no walk returns.
+pub const NOT_WALKED: i32 = 61;
+
+/// The classic program on `sched:sched_switch`, in the outgoing task's
+/// context, for a kernel without BTF: the leaving task is the current one,
+/// so it is compared by the helpers and its user stack walked from here;
+/// the arriving one is the record's `next_pid`, looked up among the blocks
+/// this run saw begin. Its process rides in the in-flight value, in the slot
+/// the raw program keeps the kernel's `run_delay` in, which no record has.
+fn classic_instructions(
+    record: &Record,
+    followed: Followed,
+    in_flight_fd: i32,
+    totals_fd: i32,
+    drops_fd: i32,
+    stacks_fd: Option<i32>,
+) -> Result<Vec<Insn>, String> {
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::mov64_reg(8, 0));
+
+    // ---- the task leaving the cpu ----
+    record.load(&mut program, 9, 6, "prev_state", FILTER_SCRATCH)?;
+    program.push(Insn::mov64_reg(1, 9));
+    program.push(Insn::and64_imm(1, REPORTED_BLOCKED));
+    program.jump_to("left", Insn::jeq_imm(1, 0, 0));
+    program.jump_to("left", Insn::jset_imm(9, REPORTED_EXITED, 0));
+    program.jump_to("state_read", Insn::jne_imm(9, REPORTED_IDLE, 0));
+    program.push(Insn::mov64_imm(9, TASK_IDLE));
+    program.label("state_read");
+    push_current_followed_filter(
+        &mut program,
+        &followed,
+        7,
+        FILTER_SCRATCH,
+        "left",
+        "leaving_kept",
+    );
+    program.push(Insn::stx(BPF_DW, R10, IN_FLIGHT_VALUE + IN_FLIGHT_TS, 8));
+    program.push(Insn::stx(BPF_DW, R10, IN_FLIGHT_VALUE + IN_FLIGHT_STATE, 9));
+    program.push(Insn::st_imm(
+        BPF_DW,
+        R10,
+        IN_FLIGHT_VALUE + IN_FLIGHT_WOKEN,
+        0,
+    ));
+    program.push(Insn::st_imm(BPF_DW, R10, IN_FLIGHT_VALUE + IN_FLIGHT_LR, 0));
+    program.push(Insn::mov64_reg(1, 7));
+    program.push(Insn::rsh64_imm(1, 32));
+    program.push(Insn::stx(
+        BPF_DW,
+        R10,
+        IN_FLIGHT_VALUE + IN_FLIGHT_RUN_DELAY,
+        1,
+    ));
+    match stacks_fd {
+        Some(stacks_fd) => {
+            program.push(Insn::mov64_reg(1, 6));
+            program.extend(Insn::load_map_fd(2, stacks_fd));
+            program.push(Insn::mov64_imm(3, BPF_F_USER_STACK));
+            program.push(Insn::call(helper::GET_STACKID));
+            program.push(Insn::stx(BPF_DW, R10, IN_FLIGHT_VALUE + IN_FLIGHT_STACK, 0));
+        }
+        // No stack is asked for: the id says so, as an errno no walk returns.
+        None => {
+            program.push(Insn::st_imm(
+                BPF_DW,
+                R10,
+                IN_FLIGHT_VALUE + IN_FLIGHT_STACK,
+                -NOT_WALKED,
+            ));
+        }
+    }
+    program.push(Insn::st_imm(BPF_DW, R10, IN_FLIGHT_KEY, 0));
+    program.push(Insn::stx(BPF_W, R10, IN_FLIGHT_KEY, 7));
+    program.extend(Insn::load_map_fd(1, in_flight_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, IN_FLIGHT_KEY as i32));
+    program.push(Insn::mov64_reg(3, R10));
+    program.push(Insn::add64_imm(3, IN_FLIGHT_VALUE as i32));
+    program.push(Insn::mov64_imm(4, 0));
+    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
+    program.jump_to("left", Insn::jsge_imm(0, 0, 0));
+    count_drop(&mut program, drops_fd, DROP_KEY, DROP_IN_FLIGHT, "left");
+    program.label("left");
+
+    // ---- the task coming back ----
+    program.push(Insn::st_imm(BPF_DW, R10, IN_FLIGHT_KEY, 0));
+    record.load(&mut program, 1, 6, "next_pid", FILTER_SCRATCH)?;
+    program.push(Insn::stx(BPF_W, R10, IN_FLIGHT_KEY, 1));
+    program.extend(Insn::load_map_fd(1, in_flight_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, IN_FLIGHT_KEY as i32));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    program.jump_to("done", Insn::jeq_imm(0, 0, 0));
+    program.push(Insn::ldx(BPF_DW, 1, 0, IN_FLIGHT_TS));
+    program.push(Insn::ldx(BPF_DW, 2, 0, IN_FLIGHT_STATE));
+    program.push(Insn::mov64_reg(9, 8));
+    program.push(Insn::sub64_reg(9, 1));
+    program.push(Insn::stx(BPF_W, R10, TOTAL_KEY + KEY_STATE, 2));
+    program.push(Insn::ldx(BPF_W, 3, 0, IN_FLIGHT_STACK));
+    program.push(Insn::stx(BPF_W, R10, TOTAL_KEY + KEY_STACK, 3));
+    program.push(Insn::st_imm(BPF_DW, R10, TOTAL_KEY + KEY_LR, 0));
+    program.push(Insn::st_imm(BPF_W, R10, TOTAL_KEY + KEY_PAD, 0));
+    program.push(Insn::ldx(BPF_W, 3, 0, IN_FLIGHT_RUN_DELAY));
+    program.push(Insn::stx(BPF_W, R10, TOTAL_KEY + KEY_TGID, 3));
+    program.push(Insn::ldx(BPF_DW, 4, 0, IN_FLIGHT_WOKEN));
+    program.jump_to("no_wakeup", Insn::jeq_imm(4, 0, 0));
+    program.push(Insn::mov64_reg(5, 8));
+    program.push(Insn::sub64_reg(5, 4));
+    program.push(Insn::stx(
+        BPF_DW,
+        R10,
+        TOTAL_VALUE + VALUE_WAKE_TO_RUN_NS,
+        5,
+    ));
+    program.push(Insn::st_imm(BPF_DW, R10, TOTAL_VALUE + VALUE_UNWOKEN, 0));
+    program.jump_to("woken_known", Insn::ja());
+    program.label("no_wakeup");
+    program.push(Insn::st_imm(
+        BPF_DW,
+        R10,
+        TOTAL_VALUE + VALUE_WAKE_TO_RUN_NS,
+        0,
+    ));
+    program.push(Insn::st_imm(BPF_DW, R10, TOTAL_VALUE + VALUE_UNWOKEN, 1));
+    program.label("woken_known");
+    // The tracepoints' account of the queue wait: no record carries the
+    // kernel's.
+    program.push(Insn::ldx(
+        BPF_DW,
+        1,
+        R10,
+        TOTAL_VALUE + VALUE_WAKE_TO_RUN_NS,
+    ));
+    program.push(Insn::stx(BPF_DW, R10, TOTAL_VALUE + VALUE_QUEUED_NS, 1));
+    program.push(Insn::st_imm(BPF_DW, R10, TOTAL_VALUE + VALUE_UNSTAMPED, 0));
+    program.extend(Insn::load_map_fd(1, in_flight_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, IN_FLIGHT_KEY as i32));
+    program.push(Insn::call(helper::MAP_DELETE_ELEM));
+    program.push(Insn::ldx(BPF_W, 1, R10, IN_FLIGHT_KEY));
+    program.push(Insn::stx(BPF_W, R10, TOTAL_KEY + KEY_TID, 1));
+    insn::push_log2_bucket(&mut program, 9, &LOG2);
+    program.push(Insn::stx(BPF_W, R10, TOTAL_KEY + KEY_BUCKET, 3));
+
+    select_rows(&mut program, totals_fd, ROWS_SLOT, "no_rows");
+    program.push(row_map(1, ROWS_SLOT));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, TOTAL_KEY as i32));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    program.jump_to("first_block", Insn::jeq_imm(0, 0, 0));
+    program.push(Insn::atomic_add(BPF_DW, 0, VALUE_TOTAL_NS, 9));
+    for field in [
+        VALUE_QUEUED_NS,
+        VALUE_WAKE_TO_RUN_NS,
+        VALUE_UNSTAMPED,
+        VALUE_UNWOKEN,
+    ] {
+        program.push(Insn::ldx(BPF_DW, 1, R10, TOTAL_VALUE + field));
+        program.push(Insn::atomic_add(BPF_DW, 0, field, 1));
+    }
+    program.push(Insn::mov64_imm(1, 1));
+    program.push(Insn::atomic_add(BPF_DW, 0, VALUE_BLOCKS, 1));
+    program.jump_to("done", Insn::ja());
+    program.label("first_block");
+    program.push(Insn::stx(BPF_DW, R10, TOTAL_VALUE + VALUE_TOTAL_NS, 9));
+    program.push(Insn::st_imm(BPF_DW, R10, TOTAL_VALUE + VALUE_BLOCKS, 1));
+    record.copy(
+        &mut program,
+        6,
+        "next_comm",
+        TOTAL_VALUE + VALUE_COMM,
+        COMM_BYTES,
+    )?;
+    program.push(row_map(1, ROWS_SLOT));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, TOTAL_KEY as i32));
+    program.push(Insn::mov64_reg(3, R10));
+    program.push(Insn::add64_imm(3, TOTAL_VALUE as i32));
+    program.push(Insn::mov64_imm(4, 0));
+    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
+    program.jump_to("done", Insn::jsge_imm(0, 0, 0));
+    count_drop(&mut program, drops_fd, DROP_KEY, DROP_TOTALS, "done");
+    program.jump_to("done", Insn::ja());
+    program.label("no_rows");
+    count_drop(&mut program, drops_fd, DROP_KEY, DROP_TOTALS, "done");
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
+/// The classic program on `sched:sched_wakeup`: the stamp of a blocked
+/// task's wakeup, as `wakeup_instructions` writes it.
+fn classic_wakeup_instructions(record: &Record, in_flight_fd: i32) -> Result<Vec<Insn>, String> {
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::mov64_reg(8, 0));
+    program.push(Insn::st_imm(BPF_DW, R10, IN_FLIGHT_KEY, 0));
+    record.load(&mut program, 1, 6, "pid", FILTER_SCRATCH)?;
+    program.push(Insn::stx(BPF_W, R10, IN_FLIGHT_KEY, 1));
+    program.extend(Insn::load_map_fd(1, in_flight_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, IN_FLIGHT_KEY as i32));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    program.jump_to("done", Insn::jeq_imm(0, 0, 0));
+    program.push(Insn::stx(BPF_DW, 0, IN_FLIGHT_WOKEN, 8));
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
 /// The `__schedule` entry stamps: a per-cpu slot, the program that writes
 /// it, and its link.
 struct Entries {
@@ -841,10 +1078,11 @@ pub struct OffCpuProgram {
     totals: Rows,
     drops: Counters,
     stacks: StackTraces,
-    program: OwnedFd,
-    _link: OwnedFd,
-    wakeup_program: OwnedFd,
-    _wakeup_link: OwnedFd,
+    /// The switch program, then the wakeup one.
+    attached: Vec<Attached>,
+    /// Through the classic tracepoints: a row's process is found at the
+    /// drain where the program did not know it.
+    classic: bool,
 }
 
 /// What one drain found, beside the measurements.
@@ -863,7 +1101,7 @@ impl OffCpuProgram {
     /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
     /// program's own counters can say an occurrence was never seen.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::program::skipped([&self.program, &self.wakeup_program])
+        crate::bpf::program::skipped(self.attached.iter().filter_map(Attached::program))
             + self.descendants.as_ref().map_or(0, Descendants::skipped)
             + self.entries.as_ref().map_or(0, |entries| {
                 crate::bpf::program::skipped([&entries.program])
@@ -988,6 +1226,10 @@ impl OffCpuProgram {
         let (program, leaf_lr_missing) = load_reading_user_lr("off-cpu", build, load)?;
 
         let link = crate::bpf::program::attach_raw("sched_switch", &program)?;
+        let switch = Attached::Raw {
+            program,
+            _link: link,
+        };
 
         let wakeup_instructions = wakeup_instructions(btf, in_flight.as_raw_fd())?;
         let wakeup_program = syscall::prog_load(
@@ -1015,10 +1257,80 @@ impl OffCpuProgram {
             totals,
             drops,
             stacks,
-            program,
-            _link: link,
-            wakeup_program,
-            _wakeup_link: wakeup_link,
+            attached: vec![
+                switch,
+                Attached::Raw {
+                    program: wakeup_program,
+                    _link: wakeup_link,
+                },
+            ],
+            classic: false,
+        })
+    }
+
+    /// The classic tracepoints, for a kernel without BTF: `bpf:tp:stacks`
+    /// walks the blocking user stack, `bpf:tp` walks none. The queue wait is
+    /// the tracepoints' account, and a block begins at the switch.
+    pub fn load_classic(whose: Whose, stacks: bool) -> Result<Self, String> {
+        let descendants = match whose {
+            Whose::Process(root) => Some(Descendants::follow(root)?),
+            _ => None,
+        };
+        let followed = descendants
+            .as_ref()
+            .map_or(Followed::only(whose), |descendants| {
+                descendants.followed(whose)
+            });
+        let in_flight = Hash::create(
+            IN_FLIGHT_KEY_BYTES,
+            IN_FLIGHT_VALUE_BYTES,
+            MAX_IN_FLIGHT,
+            "omn_offcpu_run",
+        )
+        .map_err(|error| map_failure("off-cpu in-flight map", error))?;
+        let totals = Rows::create(
+            TOTAL_KEY_BYTES,
+            TOTAL_VALUE_BYTES,
+            MAX_TOTALS,
+            "omn_offcpu_sum",
+        )
+        .map_err(|error| map_failure("off-cpu total map", error))?;
+        let drops = Counters::create(2, "omn_offcpu_drop")
+            .map_err(|error| map_failure("off-cpu drop counter", error))?;
+        let stack_map = StackTraces::create(MAX_STACKS, MAX_STACK_DEPTH, "omn_offcpu_stk")
+            .map_err(|error| map_failure("off-cpu stack map", error))?;
+        let switch = Record::of("sched", "sched_switch")?;
+        let wakeup = Record::of("sched", "sched_wakeup")?;
+        let switch = classic_instructions(
+            &switch,
+            followed,
+            in_flight.as_raw_fd(),
+            totals.as_raw_fd(),
+            drops.as_raw_fd(),
+            stacks.then(|| stack_map.as_raw_fd()),
+        )?;
+        let wakeup = classic_wakeup_instructions(&wakeup, in_flight.as_raw_fd())?;
+        // The switch first, for the reason `load` gives.
+        let attached = vec![
+            Attached::classic("sched", "sched_switch", &switch, "omn_offcpu")?,
+            Attached::classic("sched", "sched_wakeup", &wakeup, "omn_offcpu_wake")?,
+        ];
+        Ok(Self {
+            descendants,
+            clock_missing: Some(
+                "the classic tracepoints carry no `rq->clock` and no `run_delay`, so `queued_ns` \
+                 is the wait from `sched_wakeup` to the switch, by the tracepoints"
+                    .to_owned(),
+            ),
+            entries: None,
+            entries_missing: None,
+            leaf_lr_missing: None,
+            in_flight,
+            totals,
+            drops,
+            stacks: stack_map,
+            attached,
+            classic: true,
         })
     }
 
@@ -1041,7 +1353,12 @@ impl OffCpuProgram {
         let mut entries = Vec::with_capacity(drained.entries.len());
         for (key, value) in &drained.entries {
             match OffCpu::decode(key, value) {
-                Some(entry) => entries.push(entry),
+                Some(mut entry) => {
+                    if self.classic && entry.tgid == 0 {
+                        entry.tgid = super::proc_events::group_of(entry.tid).unwrap_or(0);
+                    }
+                    entries.push(entry)
+                }
                 // A record the wrong size means this reader and the program
                 // disagree about the layout, which is a bug rather than a
                 // machine condition -- but counting it beats reinterpreting it.
@@ -1433,5 +1750,38 @@ mod tests {
         let Some(btf) = kernel_btf() else { return };
         let program = built(&btf, Whose::Process(1)).expect("a program");
         crate::bpf::map::assert_rows_taken_once(&program, 4);
+    }
+
+    /// The classic switch program builds against 4.19's record with and
+    /// without stacks, reads `prev_state` as the record reports it, and
+    /// stores no stack id where none is walked.
+    #[test]
+    fn the_classic_programs_build_against_the_4_19_records() {
+        let switch = Record::from_layout(
+            "sched:sched_switch",
+            super::super::attach::parse_layout(
+                "\tfield:char prev_comm[16];\toffset:8;\tsize:16;\tsigned:1;\n\
+                 \tfield:pid_t prev_pid;\toffset:24;\tsize:4;\tsigned:1;\n\
+                 \tfield:int prev_prio;\toffset:28;\tsize:4;\tsigned:1;\n\
+                 \tfield:long prev_state;\toffset:32;\tsize:8;\tsigned:1;\n\
+                 \tfield:char next_comm[16];\toffset:40;\tsize:16;\tsigned:1;\n\
+                 \tfield:pid_t next_pid;\toffset:56;\tsize:4;\tsigned:1;\n\
+                 \tfield:int next_prio;\toffset:60;\tsize:4;\tsigned:1;\n",
+            ),
+        );
+        for stacks in [Some(9), None] {
+            let program =
+                classic_instructions(&switch, Followed::only(Whose::Any), 3, 4, 5, stacks)
+                    .expect("the switch program");
+            assert!(program.contains(&Insn::ldx(BPF_DW, 9, 6, 32)), "prev_state");
+            assert!(
+                program.contains(&Insn::jset_imm(9, REPORTED_EXITED, 0))
+                    || program.iter().any(|insn| insn.code
+                        == Insn::jset_imm(9, REPORTED_EXITED, 0).code
+                        && insn.imm == REPORTED_EXITED)
+            );
+            let walks = program.contains(&Insn::call(helper::GET_STACKID));
+            assert_eq!(walks, stacks.is_some());
+        }
     }
 }

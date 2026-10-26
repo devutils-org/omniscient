@@ -56,6 +56,8 @@ pub struct Prepare {
     /// true of the numbers; what it is not yet true of is the cost, which is
     /// written down in `docs/open-findings.md`.
     pub filter: Option<FilterExpr>,
+    /// The classic tracepoints (`bpf:tp`), for a kernel without BTF.
+    pub classic: bool,
 }
 
 impl Prepared for Prepare {
@@ -74,10 +76,13 @@ impl Prepared for Prepare {
         if let Target::Cpu(set) = target {
             let mut collector = RunqLatCollector::new(Whose::Any, self.filter);
             collector.cpus = Some(set.cpus().to_vec());
+            collector.classic = self.classic;
             return Ok(Box::new(collector));
         }
         let filter = super::whose(target, "a run queue wait is attributed per task")?;
-        Ok(Box::new(RunqLatCollector::new(filter, self.filter)))
+        let mut collector = RunqLatCollector::new(filter, self.filter);
+        collector.classic = self.classic;
+        Ok(Box::new(collector))
     }
 }
 
@@ -100,6 +105,9 @@ pub struct RunqLatCollector {
     renames: Option<Renames>,
     /// The end of the last interval, which is the start of this one.
     window_opened_ns: u64,
+    /// Whether the waits are the kernel's `sched_info` account, rather than
+    /// the tracepoints' alone.
+    clock_known: bool,
     /// How many waits this run has bucketed, which is what the event count is
     /// not: each event stands for as many waits as its `count` says.
     waits: u64,
@@ -116,6 +124,8 @@ pub struct RunqLatCollector {
     /// account kept in waits rather than in rows, because a row is not one
     /// measurement here.
     predicate: UserFilter,
+    /// Through the classic tracepoints (`bpf:tp`).
+    classic: bool,
 }
 
 impl RunqLatCollector {
@@ -131,12 +141,14 @@ impl RunqLatCollector {
             unstamped: 0,
             renames: None,
             window_opened_ns: 0,
+            clock_known: true,
             waits: 0,
             rows: 0,
             wait_total_ns: 0,
             wake_to_run_total_ns: 0,
             parents: super::Parents::default(),
             predicate: UserFilter::new(predicate, "waits"),
+            classic: false,
         }
     }
 
@@ -309,11 +321,16 @@ impl Collector for RunqLatCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        let program = RunqLatProgram::load(self.filter)?;
+        let program = if self.classic {
+            RunqLatProgram::load_classic(self.filter)?
+        } else {
+            RunqLatProgram::load(self.filter)?
+        };
         // Said at the start, because `stop` drops the program before the
         // notes are read.
         self.notes
             .extend(program.clock_missing().map(str::to_owned));
+        self.clock_known = program.clock_missing().is_none();
         self.program = Some(program);
         // Optional: without it a row keeps the name its task had when the row
         // was made, which for a launched program's first rows is this tool's.
@@ -389,6 +406,15 @@ impl Collector for RunqLatCollector {
             return Vec::new();
         }
         let mean = |total: u64| total as f64 / self.waits as f64 / 1e3;
+        if !self.clock_known {
+            return vec![format!(
+                "over the {} waits kept, the mean wait from wakeup (or preemption) to running \
+                 was {:.1} us by the tracepoints (`wake_to_run_ns` and `total_ns` alike, what \
+                 `perf sched latency` averages): no `sched_info` clock is read on this road",
+                self.waits,
+                mean(self.wake_to_run_total_ns),
+            )];
+        }
         vec![format!(
             "over the {} waits kept, the mean wait from wakeup (or preemption) to running \
              was {:.1} us by the tracepoints (`wake_to_run_ns`, what `perf sched latency` \
@@ -480,6 +506,7 @@ mod tests {
                 freq: "997hz".parse().expect("a frequency"),
             },
             filter: None,
+            classic: false,
         });
         let Err(error) = prepared.attach(&Target::Pid(vec![1])) else {
             panic!("a sampled mode must be refused");
@@ -492,6 +519,7 @@ mod tests {
         let prepared = Box::new(Prepare {
             mode: Mode::Trace,
             filter: None,
+            classic: false,
         });
         let Err(error) = prepared.attach(&Target::Iface("eth0".to_owned())) else {
             panic!("an interface names no task to attribute a wait to");

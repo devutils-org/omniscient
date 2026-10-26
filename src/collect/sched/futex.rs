@@ -45,6 +45,8 @@ pub struct Prepare {
     /// The request's predicate, applied here because the resolver credits a
     /// `bpf` backend with pushing it down; see `lock::Prepare`.
     pub filter: Option<FilterExpr>,
+    /// The classic tracepoints (`bpf:tp`), for a kernel without BTF.
+    pub classic: bool,
 }
 
 impl Prepared for Prepare {
@@ -71,16 +73,16 @@ impl Prepared for Prepare {
             }
             other => super::whose(other, "a futex wait belongs to a thread of one")?,
         };
-        Ok(Box::new(FutexCollector::new(
-            whose,
-            self.wants_stacks,
-            self.filter,
-        )))
+        let mut collector = FutexCollector::new(whose, self.wants_stacks, self.filter);
+        collector.classic = self.classic;
+        Ok(Box::new(collector))
     }
 }
 
 pub struct FutexCollector {
     whose: Whose,
+    /// Through the classic tracepoints (`bpf:tp`).
+    classic: bool,
     program: Option<FutexProgram>,
     /// Each process's parent, for the rows' `ppid`.
     parents: super::Parents,
@@ -107,6 +109,7 @@ impl FutexCollector {
     pub fn new(whose: Whose, wants_stacks: bool, predicate: Option<FilterExpr>) -> Self {
         Self {
             whose,
+            classic: false,
             program: None,
             parents: super::Parents::default(),
             losses: Losses::default(),
@@ -384,7 +387,11 @@ impl Collector for FutexCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        let program = FutexProgram::load(self.whose)?;
+        let program = if self.classic {
+            FutexProgram::load_classic(self.whose)?
+        } else {
+            FutexProgram::load(self.whose)?
+        };
         self.notes
             .extend(program.leaf_lr_missing().map(str::to_owned));
         self.leaf.enable(program.leaf_lr_missing().is_none());
@@ -479,6 +486,7 @@ mod tests {
             mode,
             wants_stacks: false,
             filter: None,
+            classic: false,
         })
     }
 

@@ -351,6 +351,35 @@ pub fn factories() -> Vec<Factory> {
                 filter: resolved.request.filter.clone(),
                 debuginfod: resolved.request.symbols
                     == Some(crate::stack::unwind::SymbolSource::Debuginfod),
+                classic: None,
+            }))
+        }),
+        Factory::new("sched.offcpu", "bpf:tp", |resolved| {
+            Ok(Box::new(offcpu::Prepare {
+                mode: resolved.request.mode,
+                // Symbolising costs a read of every process's mappings, and a
+                // machine-wide run meets every process; the emit layer keeps
+                // the table only when `stack` was asked for.
+                wants_stacks: resolved.request.emit.contains(&crate::request::Emit::Stack),
+                // Applied per drained row; see `offcpu::Prepare`.
+                filter: resolved.request.filter.clone(),
+                debuginfod: resolved.request.symbols
+                    == Some(crate::stack::unwind::SymbolSource::Debuginfod),
+                classic: Some(false),
+            }))
+        }),
+        Factory::new("sched.offcpu", "bpf:tp:stacks", |resolved| {
+            Ok(Box::new(offcpu::Prepare {
+                mode: resolved.request.mode,
+                // Symbolising costs a read of every process's mappings, and a
+                // machine-wide run meets every process; the emit layer keeps
+                // the table only when `stack` was asked for.
+                wants_stacks: resolved.request.emit.contains(&crate::request::Emit::Stack),
+                // Applied per drained row; see `offcpu::Prepare`.
+                filter: resolved.request.filter.clone(),
+                debuginfod: resolved.request.symbols
+                    == Some(crate::stack::unwind::SymbolSource::Debuginfod),
+                classic: Some(true),
             }))
         }),
         Factory::new("sched.runqlat", "bpf:raw_tp", |resolved| {
@@ -360,6 +389,14 @@ pub fn factories() -> Vec<Factory> {
                 // `bpf` backend with filtering in the kernel and then leaves
                 // its events alone; see `runqlat::Prepare`.
                 filter: resolved.request.filter.clone(),
+                classic: false,
+            }))
+        }),
+        Factory::new("sched.runqlat", "bpf:tp", |resolved| {
+            Ok(Box::new(runqlat::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+                classic: true,
             }))
         }),
         Factory::new("sched.migrations", "bpf:raw_tp", |resolved| {
@@ -398,6 +435,15 @@ pub fn factories() -> Vec<Factory> {
                 mode: resolved.request.mode,
                 wants_stacks: resolved.request.emit.contains(&crate::request::Emit::Stack),
                 filter: resolved.request.filter.clone(),
+                classic: false,
+            }))
+        }),
+        Factory::new("sched.futex", "bpf:tp", |resolved| {
+            Ok(Box::new(futex::Prepare {
+                mode: resolved.request.mode,
+                wants_stacks: resolved.request.emit.contains(&crate::request::Emit::Stack),
+                filter: resolved.request.filter.clone(),
+                classic: true,
             }))
         }),
         Factory::new("sched.irq", "bpf:raw_tp", |resolved| {

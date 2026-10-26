@@ -73,6 +73,9 @@ pub struct Prepare {
     /// where the names come from is the only part of the unwind there is to
     /// choose (`stack::NAMED_BY_CHOICE`).
     pub debuginfod: bool,
+    /// The classic tracepoints (`bpf:tp`, `bpf:tp:stacks`), for a kernel
+    /// without BTF: `Some(true)` walks the blocking stack.
+    pub classic: Option<bool>,
 }
 
 impl Prepared for Prepare {
@@ -85,8 +88,11 @@ impl Prepared for Prepare {
             ));
         }
         let filter = super::whose(target, "blocked time is attributed per task")?;
-        let mut collector = OffCpuCollector::new(filter, self.wants_stacks);
+        // `bpf:tp` walks no stack, so there is nothing to symbolise.
+        let wants_stacks = self.wants_stacks && self.classic != Some(false);
+        let mut collector = OffCpuCollector::new(filter, wants_stacks);
         collector.predicate = UserFilter::new(self.filter, "blocks");
+        collector.classic = self.classic;
         // Refused here, before the target has run an instruction, rather than
         // discovered at the first stack: the same refusal `cpu.profile` gives.
         if self.debuginfod {
@@ -99,6 +105,8 @@ impl Prepared for Prepare {
 pub struct OffCpuCollector {
     /// Whose blocks are kept.
     filter: Whose,
+    /// Through the classic tracepoints, `Some(walks stacks)`.
+    classic: Option<bool>,
     program: Option<OffCpuProgram>,
     /// Each process's parent, for the rows' `ppid`.
     parents: super::Parents,
@@ -168,6 +176,7 @@ impl OffCpuCollector {
     pub fn new(filter: Whose, wants_stacks: bool) -> Self {
         Self {
             filter,
+            classic: None,
             program: None,
             parents: super::Parents::default(),
             losses: Losses::default(),
@@ -556,7 +565,10 @@ impl Collector for OffCpuCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        let program = OffCpuProgram::load(self.filter)?;
+        let program = match self.classic {
+            Some(stacks) => OffCpuProgram::load_classic(self.filter, stacks)?,
+            None => OffCpuProgram::load(self.filter)?,
+        };
         // Said at the start, because `stop` drops the program before the
         // notes are read.
         self.notes
@@ -778,6 +790,7 @@ mod tests {
             wants_stacks: false,
             filter: None,
             debuginfod: false,
+            classic: None,
         });
         let Err(error) = prepared.attach(&Target::Pid(vec![1])) else {
             panic!("a sampled mode must be refused");
@@ -792,6 +805,7 @@ mod tests {
             wants_stacks: false,
             filter: None,
             debuginfod: false,
+            classic: None,
         });
         let Err(error) = prepared.attach(&Target::Iface("eth0".to_owned())) else {
             panic!("an interface names no task to attribute blocked time to");
