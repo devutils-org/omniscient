@@ -273,6 +273,12 @@ fn requests(entry: &serde_json::Value, fixtures: Option<&Path>) -> Vec<Request> 
                 "provider == 'omn_fixture' && probe == 'tick'".into(),
             ],
         ),
+        // Any function the program defines: the fixture's `ticks` is kept
+        // out of line, and its static build carries a `.symtab`.
+        ("runtime.func", Some(f)) => (
+            vec![f, "ticks".into(), "50".into()],
+            vec!["--filter".into(), "function == 'ticks'".into()],
+        ),
         ("net.request", _) => match fixture("omn-vertical/server") {
             Some(server) => (
                 vec![server, "/tmp/omn-matrix-server-data".into(), "0:0".into()],
