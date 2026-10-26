@@ -62,9 +62,14 @@
 
 use crate::bpf::btf::Btf;
 use crate::bpf::fentry::{
-    self, HistogramProgram, HistogramSpec, Narrowing, Timed, BPF_H, FILL_DEV, FILL_OBJECT, SKIP,
+    self, HistogramProgram, HistogramSpec, Kprobe, Narrowing, Timed, BPF_H, FILL_DEV, FILL_OBJECT,
+    SKIP,
 };
-use crate::bpf::insn::{Insn, Program, BPF_DW, BPF_W, R10};
+use crate::bpf::insn::{read_field, read_narrow, read_pointer, Insn, Program, BPF_DW, BPF_W, R10};
+
+/// Eight bytes of an entry program's stack a kprobe's probe reads land in,
+/// clear of the stamp's key and value.
+const KPROBE_SCRATCH: i16 = -32;
 
 /// What a row's `op` says the call was.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,7 +172,14 @@ pub struct VfsProgram {
 }
 
 impl VfsProgram {
-    pub fn load(layer: Layer, narrowing: Narrowing, selected: Option<Op>) -> Result<Self, String> {
+    /// `kprobe`: `io.fs`'s `bpf:kprobe`, a kprobe pair on the same two
+    /// functions for a kernel built without the function tracer (Alpine's).
+    pub fn load(
+        layer: Layer,
+        narrowing: Narrowing,
+        selected: Option<Op>,
+        kprobe: bool,
+    ) -> Result<Self, String> {
         let btf = crate::bpf::kernel_btf()?;
         let mut timed = match layer {
             Layer::Syscall => {
@@ -202,10 +214,20 @@ impl VfsProgram {
             timed.retain(|timed| timed.op == selected as u32);
         }
         let offsets = FileOffsets::read(btf)?;
-        let gate = |program: &mut Program, _: &Timed| {
-            if layer == Layer::Fs {
-                regular_files_only(program, &offsets);
+        let kprobe = match (kprobe, layer) {
+            (false, _) => None,
+            (true, Layer::Fs) => Some(Kprobe {
+                ret: btf.return_register()? as i16,
+            }),
+            (true, Layer::Syscall) => {
+                return Err("`io.syscall` has no kprobe pair; its wrappers are fentry's".to_owned())
             }
+        };
+        let arg0 = btf.function_argument(0)?;
+        let gate = |program: &mut Program, _: &Timed| match (layer, kprobe) {
+            (Layer::Fs, None) => regular_files_only(program, &offsets),
+            (Layer::Fs, Some(_)) => regular_files_only_probed(program, &offsets, arg0),
+            (Layer::Syscall, _) => {}
         };
         let fill = |program: &mut Program, _: &Timed| {
             match layer {
@@ -220,6 +242,7 @@ impl VfsProgram {
                     program.push(Insn::ldx(BPF_DW, 1, 1, offsets.di as i16));
                     program.push(Insn::stx(BPF_W, R10, FILL_OBJECT, 1));
                 }
+                Layer::Fs if kprobe.is_some() => file_identity_probed(program, &offsets, arg0),
                 Layer::Fs => file_identity(program, &offsets),
             }
             Ok(())
@@ -235,6 +258,7 @@ impl VfsProgram {
             fill: &fill,
             max_pending: MAX_PENDING,
             max_rows: MAX_ROWS,
+            kprobe,
         })?;
         Ok(Self { layer, inner })
     }
@@ -309,6 +333,31 @@ fn regular_files_only(program: &mut Program, at: &FileOffsets) {
     // is exact on the zero-extended half-word.
     program.push(Insn::and64_imm(1, S_IFMT));
     program.jump_to(SKIP, Insn::jne_imm(1, S_IFREG, 0));
+}
+
+/// [`regular_files_only`] for a kprobe, which sees the file only as the
+/// register `pt_regs` saved and follows each pointer with a probe read.
+fn regular_files_only_probed(program: &mut Program, at: &FileOffsets, arg0: i32) {
+    program.push(Insn::ldx(BPF_DW, 7, 6, arg0 as i16));
+    read_pointer(program, KPROBE_SCRATCH, 7, 7, at.f_inode);
+    program.jump_to(SKIP, Insn::jeq_imm(7, 0, 0));
+    read_narrow(program, KPROBE_SCRATCH, 2, 7, at.i_mode);
+    program.push(Insn::ldx(BPF_W, 1, R10, KPROBE_SCRATCH));
+    program.push(Insn::and64_imm(1, S_IFMT));
+    program.jump_to(SKIP, Insn::jne_imm(1, S_IFREG, 0));
+}
+
+/// [`file_identity`] for a kprobe, at the entry: the gate has found the
+/// inode, and it is read again here, the gate's registers being its own.
+fn file_identity_probed(program: &mut Program, at: &FileOffsets, arg0: i32) {
+    program.push(Insn::ldx(BPF_DW, 7, 6, arg0 as i16));
+    read_pointer(program, KPROBE_SCRATCH, 7, 7, at.f_inode);
+    program.jump_to("unnamed", Insn::jeq_imm(7, 0, 0));
+    read_field(program, FILL_OBJECT, 8, 7, at.i_ino);
+    read_pointer(program, KPROBE_SCRATCH, 7, 7, at.i_sb);
+    program.jump_to("unnamed", Insn::jeq_imm(7, 0, 0));
+    read_field(program, FILL_DEV, 4, 7, at.s_dev);
+    program.label("unnamed");
 }
 
 /// Writes the inode number and the superblock's device into the row key.

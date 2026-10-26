@@ -75,6 +75,13 @@ pub enum Scope {
     /// Every cpu, which is what a machine-wide measurement means here: a perf
     /// event is opened per cpu, because one event cannot span them.
     System,
+    /// One event, for a program that runs on every cpu whatever cpu the event
+    /// is opened on: a kprobe's. Each perf event of the `kprobe` PMU is a
+    /// probe of its own, and its program runs at every hit before the event's
+    /// cpu is compared (`kprobe_perf_func`), so one event per cpu ran the
+    /// program once per cpu at each call -- measured, `io.fs` through a kprobe
+    /// pair counted 23 orphaned stamps for each of 8038 calls on 24 cpus.
+    Everywhere,
 }
 
 /// A loaded program, attached through one perf event per cpu.
@@ -444,6 +451,7 @@ fn open_and_set(
         // measurement that opened only cpu zero would report a quiet machine
         // whenever the work happened elsewhere.
         Scope::System => online_cpus()?.into_iter().map(|cpu| (-1, cpu)).collect(),
+        Scope::Everywhere => vec![(-1, online_cpus()?.first().copied().unwrap_or(0))],
     };
 
     let mut events = Vec::with_capacity(targets.len());

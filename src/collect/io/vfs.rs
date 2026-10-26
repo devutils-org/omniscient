@@ -26,6 +26,8 @@ pub struct Prepare {
     pub layer: Layer,
     pub mode: Mode,
     pub filter: Option<FilterExpr>,
+    /// `bpf:kprobe`: a kprobe pair rather than a trampoline.
+    pub kprobe: bool,
 }
 
 impl Layer {
@@ -57,13 +59,16 @@ impl Prepared for Prepare {
         }
         let narrowing = narrowing(source, target)?;
         let layer = self.layer;
+        let kprobe = self.kprobe;
         let selected = if layer == Layer::Fs {
             selected_fs_op(self.filter.as_ref())
         } else {
             None
         };
         let rows = Box::new(move || -> Result<Box<dyn Rows>, String> {
-            Ok(Box::new(VfsProgram::load(layer, narrowing, selected)?))
+            Ok(Box::new(VfsProgram::load(
+                layer, narrowing, selected, kprobe,
+            )?))
         });
         Ok(Box::new(HistogramCollector::new(
             Source {

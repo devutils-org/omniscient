@@ -152,6 +152,7 @@ pub fn factories() -> Vec<Factory> {
                 layer: Layer::Syscall,
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
+                kprobe: false,
             }))
         }),
         Factory::new("io.fs", "bpf:fentry", |resolved| {
@@ -159,6 +160,17 @@ pub fn factories() -> Vec<Factory> {
                 layer: Layer::Fs,
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
+                kprobe: false,
+            }))
+        }),
+        // The same two functions through kprobes, for a kernel built
+        // without the function tracer, where no trampoline attaches.
+        Factory::new("io.fs", "bpf:kprobe", |resolved| {
+            Ok(Box::new(vfs::Prepare {
+                layer: Layer::Fs,
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+                kprobe: true,
             }))
         }),
         // Every VFS call, counted by function and timed never: `vfsstat`.

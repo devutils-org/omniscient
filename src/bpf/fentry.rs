@@ -1066,6 +1066,7 @@ const ENTRY_TGID: i16 = -24;
 /// that is not the root is looked up there, so a shell script's children are
 /// timed as the script is: the root compared first, which costs the target's
 /// own calls no lookup.
+#[cfg(test)]
 pub(crate) fn entry_instructions(
     pending_fd: i32,
     drops_fd: i32,
@@ -1074,6 +1075,42 @@ pub(crate) fn entry_instructions(
     narrowing: Narrowing,
     descendants: Option<i32>,
     gate: &dyn Fn(&mut Program),
+) -> Result<Vec<Insn>, String> {
+    entry_carrying(
+        pending_fd,
+        drops_fd,
+        drop_slot,
+        orphan_slot,
+        narrowing,
+        descendants,
+        gate,
+        None,
+    )
+}
+
+/// Where a kprobe entry's wide stamp sits on its stack: the time, then the
+/// three key fields `fill` wrote at [`FILL_OBJECT`], [`FILL_DEV`] and
+/// [`FILL_AUX`] -- one span, so the stamp is them.
+const ENTRY_WIDE_VALUE: i16 = ROW_KEY + KEY_OP;
+/// A kprobe entry's stamp: the time, the object, the device and the aux word.
+const WIDE_VALUE_BYTES: usize = 24;
+
+/// A source's `fill`, run at a kprobe pair's entry.
+type CarriedFill<'a> = &'a dyn Fn(&mut Program) -> Result<(), String>;
+
+/// The entry half, and -- for a kprobe pair, whose exit half sees no
+/// arguments -- the source's `fill` run here, its key fields carried in the
+/// stamp ([`WIDE_VALUE_BYTES`]) to the exit.
+#[allow(clippy::too_many_arguments)]
+fn entry_carrying(
+    pending_fd: i32,
+    drops_fd: i32,
+    drop_slot: u32,
+    orphan_slot: u32,
+    narrowing: Narrowing,
+    descendants: Option<i32>,
+    gate: &dyn Fn(&mut Program),
+    carried: Option<CarriedFill<'_>>,
 ) -> Result<Vec<Insn>, String> {
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
@@ -1116,9 +1153,19 @@ pub(crate) fn entry_instructions(
     // source's gate first lengthened every invocation's recursion-guarded
     // window, including unrelated processes on a preemptible kernel.
     gate(&mut program);
+    let value = match carried {
+        None => ENTRY_PEND_VALUE,
+        Some(fill) => {
+            for slot in 0..(WIDE_VALUE_BYTES as i16 / 8) {
+                program.push(Insn::st_imm(BPF_DW, R10, ENTRY_WIDE_VALUE + slot * 8, 0));
+            }
+            fill(&mut program)?;
+            ENTRY_WIDE_VALUE
+        }
+    };
     program.push(Insn::call(helper::KTIME_GET_NS));
-    program.push(Insn::stx(BPF_DW, R10, ENTRY_PEND_VALUE, 0));
-    stamp(&mut program, pending_fd, BPF_NOEXIST);
+    program.push(Insn::stx(BPF_DW, R10, value, 0));
+    stamp(&mut program, pending_fd, value, BPF_NOEXIST);
     program.jump_to(SKIP, Insn::jeq_imm(0, 0, 0));
     program.jump_to("full", Insn::jne_imm(0, -EEXIST, 0));
     // An exit half that never ran, counted before its stamp is replaced.
@@ -1130,7 +1177,7 @@ pub(crate) fn entry_instructions(
         "restamp",
     );
     program.label("restamp");
-    stamp(&mut program, pending_fd, 0);
+    stamp(&mut program, pending_fd, value, 0);
     program.jump_to(SKIP, Insn::jsge_imm(0, 0, 0));
     // The map is full: this call will never be timed, and nothing else
     // anywhere would record that it was made.
@@ -1146,12 +1193,12 @@ pub(crate) fn entry_instructions(
 
 /// Writes the thread's stamp with the update flags given, leaving the helper's
 /// answer in `r0`.
-fn stamp(program: &mut Program, pending_fd: i32, flags: i32) {
+fn stamp(program: &mut Program, pending_fd: i32, value: i16, flags: i32) {
     program.extend(Insn::load_map_fd(1, pending_fd));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, ENTRY_PEND_KEY as i32));
     program.push(Insn::mov64_reg(3, R10));
-    program.push(Insn::add64_imm(3, ENTRY_PEND_VALUE as i32));
+    program.push(Insn::add64_imm(3, value as i32));
     program.push(Insn::mov64_imm(4, flags));
     program.push(Insn::call(helper::MAP_UPDATE_ELEM));
 }
@@ -1175,6 +1222,35 @@ pub(crate) fn close_stamp(program: &mut Program, pending_fd: i32, key: i16, done
     // when the programs attached, or the entry was not kept.
     program.jump_to(done, Insn::jeq_imm(0, 0, 0));
     program.push(Insn::ldx(BPF_DW, 9, 0, 0));
+    program.extend(Insn::load_map_fd(1, pending_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, key as i32));
+    program.push(Insn::call(helper::MAP_DELETE_ELEM));
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::mov64_reg(8, 0));
+    program.push(Insn::sub64_reg(0, 9));
+    program.push(Insn::mov64_reg(9, 0));
+}
+
+/// [`close_stamp`] for a kprobe pair's wide stamp: the key fields the entry
+/// carried are copied into the row key before the stamp is deleted.
+fn close_wide_stamp(program: &mut Program, pending_fd: i32, key: i16, done: &'static str) {
+    program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
+    program.push(Insn::mov64_reg(7, 0));
+    program.push(Insn::st_imm(BPF_DW, R10, key, 0));
+    program.push(Insn::stx(BPF_W, R10, key, 7));
+    program.extend(Insn::load_map_fd(1, pending_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, key as i32));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    program.jump_to(done, Insn::jeq_imm(0, 0, 0));
+    program.push(Insn::ldx(BPF_DW, 9, 0, 0));
+    program.push(Insn::ldx(BPF_DW, 1, 0, 8));
+    program.push(Insn::stx(BPF_DW, R10, ROW_KEY + KEY_OBJECT, 1));
+    program.push(Insn::ldx(BPF_W, 1, 0, 16));
+    program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_DEV, 1));
+    program.push(Insn::ldx(BPF_W, 1, 0, 20));
+    program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_AUX, 1));
     program.extend(Insn::load_map_fd(1, pending_fd));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, key as i32));
@@ -1305,28 +1381,45 @@ struct ExitMaps {
 /// which it must leave alone; it may use `r1` through `r5` and `r7`, and
 /// writes the source's own key fields at [`FILL_OBJECT`], [`FILL_DEV`] and
 /// [`FILL_AUX`], which are zero when it starts.
+///
+/// A kretprobe's (`kprobe` the return register's offset in `pt_regs`) runs
+/// no `fill`: its key fields came with the stamp.
 fn exit_instructions(
     timed: &Timed,
     maps: ExitMaps,
     fill: &dyn Fn(&mut Program, &Timed) -> Result<(), String>,
+    kprobe: Option<Kprobe>,
 ) -> Result<Vec<Insn>, String> {
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
-    close_stamp(&mut program, maps.pending, EXIT_PEND_KEY, "done");
-
-    for slot in 0..(ROW_KEY_BYTES as i16 / 8) {
-        program.push(Insn::st_imm(BPF_DW, R10, ROW_KEY + slot * 8, 0));
+    let zero_key = |program: &mut Program| {
+        for slot in 0..(ROW_KEY_BYTES as i16 / 8) {
+            program.push(Insn::st_imm(BPF_DW, R10, ROW_KEY + slot * 8, 0));
+        }
+    };
+    if kprobe.is_some() {
+        zero_key(&mut program);
+        close_wide_stamp(&mut program, maps.pending, EXIT_PEND_KEY, "done");
+    } else {
+        close_stamp(&mut program, maps.pending, EXIT_PEND_KEY, "done");
+        zero_key(&mut program);
     }
     program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_TID, 7));
     program.push(Insn::mov64_reg(1, 7));
     program.push(Insn::rsh64_imm(1, 32));
     program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_TGID, 1));
     program.push(Insn::st_imm(BPF_W, R10, ROW_KEY + KEY_OP, timed.op as i32));
-    fill(&mut program, timed)?;
+    if kprobe.is_none() {
+        fill(&mut program, timed)?;
+    }
 
     // What the call returned, read after `fill` so that `fill` may use r8's
     // neighbours freely. Signed: a negative return is an errno.
-    program.push(Insn::ldx(BPF_DW, 8, 6, timed.function.ret()));
+    let ret = match kprobe {
+        Some(kprobe) => kprobe.ret,
+        None => timed.function.ret(),
+    };
+    program.push(Insn::ldx(BPF_DW, 8, 6, ret));
     insn::push_log2_bucket(&mut program, 9, &LOG2);
     program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_BUCKET, 3));
 
@@ -1500,6 +1593,17 @@ pub struct HistogramSpec<'a> {
     pub fill: &'a dyn Fn(&mut Program, &Timed) -> Result<(), String>,
     pub max_pending: u32,
     pub max_rows: u32,
+    /// A kprobe pair rather than a trampoline: `gate` and `fill` read the
+    /// arguments out of `pt_regs` and follow pointers with probe reads, and
+    /// `fill` runs at the entry.
+    pub kprobe: Option<Kprobe>,
+}
+
+/// What a kprobe pair needs that a trampoline pair does not.
+#[derive(Debug, Clone, Copy)]
+pub struct Kprobe {
+    /// The return register's offset in `pt_regs`.
+    pub ret: i16,
 }
 
 /// A loaded, attached histogram and the maps it counts into.
@@ -1537,6 +1641,8 @@ pub struct HistogramProgram {
     flip: std::rc::Rc<Flip>,
     drops: Counters,
     links: Vec<Link>,
+    /// A kprobe pair's: one perf event per cpu, each running the program.
+    probes: Vec<crate::bpf::attach::PerfAttachment>,
     /// The processes a process target started, followed by the entry
     /// programs: a launched shell script's calls are its children's.
     descendants: Option<crate::bpf::sched_common::Descendants>,
@@ -1649,7 +1755,11 @@ impl HistogramProgram {
         }
         let pending = Hash::create(
             PEND_KEY_BYTES,
-            PEND_VALUE_BYTES,
+            if spec.kprobe.is_some() {
+                WIDE_VALUE_BYTES
+            } else {
+                PEND_VALUE_BYTES
+            },
             spec.max_pending,
             &format!("{}_pend", spec.name),
         )
@@ -1696,7 +1806,8 @@ impl HistogramProgram {
         // and none of the programs it ran, and read as an idle program.
         let mut built = Vec::with_capacity(spec.timed.len());
         for timed in &spec.timed {
-            let entry = entry_instructions(
+            let carried = |program: &mut Program| (spec.fill)(program, timed);
+            let entry = entry_carrying(
                 pending.as_raw_fd(),
                 drops.as_raw_fd(),
                 DROP_PENDING,
@@ -1704,8 +1815,10 @@ impl HistogramProgram {
                 spec.narrowing,
                 followed,
                 &|program| (spec.gate)(program, timed),
+                spec.kprobe
+                    .map(|_| &carried as &dyn Fn(&mut Program) -> Result<(), String>),
             )?;
-            let exit = exit_instructions(timed, maps, spec.fill)?;
+            let exit = exit_instructions(timed, maps, spec.fill, spec.kprobe)?;
             built.push((timed, entry, exit));
         }
 
@@ -1715,6 +1828,35 @@ impl HistogramProgram {
         // this one and sometimes is.
         // Each half's batch at once (`attach_many`), the exits' first.
         let (exit_name, entry_name) = (format!("{}_x", spec.name), format!("{}_e", spec.name));
+        let mut probes = Vec::new();
+        if spec.kprobe.is_some() {
+            use crate::bpf::attach::{kprobe, Scope};
+            for (timed, _, exit) in &built {
+                probes.push(kprobe(
+                    &timed.function.name,
+                    0,
+                    true,
+                    exit,
+                    &exit_name,
+                    Scope::Everywhere,
+                )?);
+            }
+            for (timed, entry, _) in &built {
+                probes.push(kprobe(
+                    &timed.function.name,
+                    0,
+                    false,
+                    entry,
+                    &entry_name,
+                    Scope::Everywhere,
+                )?);
+            }
+        }
+        let built = if spec.kprobe.is_some() {
+            Vec::new()
+        } else {
+            built
+        };
         let exits: Vec<_> = built
             .iter()
             .map(|(timed, _, exit)| Request {
@@ -1752,6 +1894,7 @@ impl HistogramProgram {
             },
             drops,
             links,
+            probes,
             descendants,
         })
     }
@@ -1833,6 +1976,11 @@ impl HistogramProgram {
     /// see is a child none of whose calls is timed.
     pub fn missed(&self) -> u64 {
         misses(&self.links)
+            + self
+                .probes
+                .iter()
+                .map(|probe| recursion_misses(probe.program()).unwrap_or(0))
+                .sum::<u64>()
             + self
                 .descendants
                 .as_ref()
@@ -1976,7 +2124,7 @@ mod tests {
             function: index.function("vfs_read").expect("vfs_read"),
             op: 0,
         };
-        let exit = exit_instructions(&timed, maps(), &|_, _| Ok(())).expect("exit");
+        let exit = exit_instructions(&timed, maps(), &|_, _| Ok(()), None).expect("exit");
         let loads = |fd: i32| {
             exit.iter()
                 .enumerate()
@@ -2205,7 +2353,7 @@ mod tests {
         };
         let entry =
             entry_instructions(3, 4, 0, 2, Narrowing::default(), None, &|_| {}).expect("entry");
-        let exit = exit_instructions(&timed, maps(), &|_, _| Ok(())).expect("exit");
+        let exit = exit_instructions(&timed, maps(), &|_, _| Ok(()), None).expect("exit");
         for (what, program) in [("entry", entry), ("exit", exit)] {
             let calls: Vec<i32> = program
                 .iter()
@@ -2233,7 +2381,7 @@ mod tests {
             function: index.function("vfs_read").expect("vfs_read"),
             op: 0,
         };
-        let exit = exit_instructions(&timed, maps(), &|_, _| Ok(())).expect("exit");
+        let exit = exit_instructions(&timed, maps(), &|_, _| Ok(()), None).expect("exit");
         // Four times over: the ordinary path and the one a lost insert race
         // takes, in each of the two row maps.
         assert_eq!(exit.iter().filter(|insn| insn.code == 0xdb).count(), 16);

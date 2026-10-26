@@ -256,6 +256,7 @@ impl SocketProgram {
             fill: &fill,
             max_pending: MAX_PENDING,
             max_rows: MAX_ROWS,
+            kprobe: None,
         })?;
         Ok(Self { inner, missing })
     }

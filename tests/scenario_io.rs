@@ -4165,6 +4165,77 @@ fn a_pipe_wait_is_in_the_syscall_layer_and_not_in_the_file_layer() {
     );
 }
 
+const KPROBE_CALLS: &str = r#"
+import json, os, sys
+path, account = sys.argv[1], sys.argv[2]
+with open(path, "wb") as f:
+    f.write(b"x" * 4096)
+fd = os.open(path, os.O_RDWR)
+reads, writes = 5000, 3000
+for _ in range(reads):
+    os.pread(fd, 1, 0)
+for _ in range(writes):
+    os.pwrite(fd, b"y", 0)
+r, w = os.pipe()
+os.write(w, b"z")
+os.read(r, 1)
+json.dump({"ino": os.fstat(fd).st_ino, "reads": reads, "writes": writes}, open(account, "w"))
+"#;
+
+/// `io.fs` through a kprobe pair (`bpf:kprobe`, for a kernel built without
+/// the function tracer) counts what the trampoline pair counts: every read
+/// and write of the program's file, the file named from probe reads of the
+/// same fields, and nothing lost. Each pinned in a run of its own, so the two
+/// do not attach to the same functions at once. Five thousand reads and three
+/// thousand writes, and the one write that made the file.
+#[test]
+fn a_kprobe_pair_counts_the_calls_the_trampoline_pair_counts() {
+    if let Some(reason) = no_fentry_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let path = scratch("kprobe-fs.bin");
+    let account_path = scratch("kprobe-fs.json");
+    let workload = script("kprobe-fs.py", KPROBE_CALLS);
+    for backend in ["bpf:fentry", "bpf:kprobe"] {
+        let output = run_on_launch_pinned(
+            "kprobe-fs",
+            &[("fs", "io.fs", "trace", "raw")],
+            Some(backend),
+            &[
+                "python3",
+                workload.to_str().expect("a path"),
+                path.to_str().expect("a path"),
+                account_path.to_str().expect("a path"),
+            ],
+        );
+        assert!(output.status.success(), "{backend}: {}", stderr(&output));
+        let did = account(&account_path);
+        let (dev, _) = mounted_device(&path);
+        let file = (dev, did["ino"].as_u64().expect("an inode"));
+        let document = json(&output);
+        let fs = result(&document, "fs");
+        let count = |op: &str| -> u64 {
+            raw_with_keys(fs)
+                .iter()
+                .filter(|(raw, event)| file_key(raw) == Some(file) && attr_text(event, "op") == op)
+                .map(|(_, event)| attr_u64(event, "count"))
+                .sum()
+        };
+        assert_eq!(
+            (count("read"), count("write")),
+            (5000, 3001),
+            "{backend}: every read and write of {file:?}"
+        );
+        assert_eq!(
+            losses(fs)["dropped"].as_u64(),
+            Some(0),
+            "{backend}: {}",
+            losses(fs)
+        );
+    }
+}
+
 const SYNCS: &str = r#"
 import json, mmap, os, sys
 path, account = sys.argv[1], sys.argv[2]

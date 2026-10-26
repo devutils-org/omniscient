@@ -232,6 +232,43 @@ impl Btf {
         }
     }
 
+    /// Where a kernel function's argument `index` is in a kprobe's `pt_regs`:
+    /// the C calling convention, which differs from a syscall's in its fourth
+    /// (`cx`, where a syscall saves `r10`).
+    pub fn function_argument(&self, index: usize) -> Result<i32, String> {
+        const X86_64: [&str; 6] = ["di", "si", "dx", "cx", "r8", "r9"];
+        if index >= X86_64.len() {
+            return Err(format!(
+                "a kprobe reads the first six arguments out of registers, not argument {}",
+                index + 1
+            ));
+        }
+        if cfg!(target_arch = "x86_64") {
+            self.member_offset("pt_regs", X86_64[index])
+        } else if cfg!(target_arch = "aarch64") {
+            Ok(self.member_offset("pt_regs", "regs")? + 8 * index as i32)
+        } else {
+            Err(format!(
+                "this build knows a kprobe's argument registers on x86_64 and aarch64, not on {}",
+                std::env::consts::ARCH
+            ))
+        }
+    }
+
+    /// Where a kretprobe finds the function's return value in `pt_regs`.
+    pub fn return_register(&self) -> Result<i32, String> {
+        if cfg!(target_arch = "x86_64") {
+            self.member_offset("pt_regs", "ax")
+        } else if cfg!(target_arch = "aarch64") {
+            self.member_offset("pt_regs", "regs")
+        } else {
+            Err(format!(
+                "this build knows a kretprobe's return register on x86_64 and aarch64, not on {}",
+                std::env::consts::ARCH
+            ))
+        }
+    }
+
     /// The size in bytes of the struct named `struct_name`, for a program that
     /// steps through an array of them: `mm_struct.rss_stat` is an array of
     /// `percpu_counter`, whose size depends on the kernel's configuration.
