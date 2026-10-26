@@ -16,7 +16,7 @@
 - Follow live measurements, compose sessions and correlate events with explicit evidence.
 - See collection loss, backend selection and measurement cost beside the results.
 
-In development. Installed releases were tested on 16 distro images and 5
+In development. Installed releases were tested on 17 distro images and 5
 variants, spanning Linux 4.15–7.2, with availability probed per source.
 Backend requirements and permissions vary; measurements that cannot be served
 are refused with the reason.
