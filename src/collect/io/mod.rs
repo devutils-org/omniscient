@@ -129,6 +129,15 @@ pub fn factories() -> Vec<Factory> {
                 classic: false,
             }))
         }),
+        Factory::new("io.latency", "bpf:tp", |resolved| {
+            Ok(Box::new(block::Prepare {
+                measure: Measure::Latency,
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+                in_kernel_histogram: false,
+                classic: true,
+            }))
+        }),
         Factory::new("io.queue", "bpf:raw_tp", |resolved| {
             Ok(Box::new(block::Prepare {
                 measure: Measure::Queue,

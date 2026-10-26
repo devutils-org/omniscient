@@ -29,10 +29,12 @@
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
+use super::context::Record;
 use super::insn::{
     count_drop, helper, read_field, Insn, Program, Subject, TaskFields, Whose, BPF_DW, BPF_W, R10,
 };
 use super::map::{map_failure, row_map, select_rows, Counters, Rows};
+use super::proc_events::Attached;
 use crate::bpf::program::LICENSE;
 
 /// `BPF_MAP_TYPE_LRU_HASH`: a wakeup stamp whose task never ran under the
@@ -189,8 +191,33 @@ fn instructions(
     // Every byte of the key written: the kernel hashes all twelve.
     program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_VOLUNTARY, 8));
 
+    count_row(&mut program, rows_fd, drops_fd, |program| {
+        read_field(
+            program,
+            ROW_VALUE + VALUE_COMM,
+            COMM_BYTES as i32,
+            7,
+            comm_offset,
+        );
+        Ok(())
+    })?;
+
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
+/// Counts one switch in the row the key on the stack names, creating it,
+/// with the comm `write_comm` writes, when it is the first; exits through
+/// `done`, which this emits.
+fn count_row(
+    program: &mut Program,
+    rows_fd: i32,
+    drops_fd: i32,
+    write_comm: impl FnOnce(&mut Program) -> Result<(), String>,
+) -> Result<(), String> {
     // The row map of this interval, taken once; see `map::Rows`.
-    select_rows(&mut program, rows_fd, ROWS_SLOT, "no_rows");
+    select_rows(program, rows_fd, ROWS_SLOT, "no_rows");
     program.push(row_map(1, ROWS_SLOT));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, ROW_KEY as i32));
@@ -204,13 +231,7 @@ fn instructions(
 
     program.label("first_switch");
     program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_COUNT, 1));
-    read_field(
-        &mut program,
-        ROW_VALUE + VALUE_COMM,
-        COMM_BYTES as i32,
-        7,
-        comm_offset,
-    );
+    write_comm(program)?;
     program.push(row_map(1, ROWS_SLOT));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, ROW_KEY as i32));
@@ -220,17 +241,74 @@ fn instructions(
     program.push(Insn::call(helper::MAP_UPDATE_ELEM));
     program.jump_to("done", Insn::jsge_imm(0, 0, 0));
     // The map is full: this switch will never be counted.
-    count_drop(&mut program, drops_fd, DROP_KEY, DROP_ROWS, "done");
+    count_drop(program, drops_fd, DROP_KEY, DROP_ROWS, "done");
     program.jump_to("done", Insn::ja());
 
     // The slot held no map, which it always does; counted rather than assumed.
     program.label("no_rows");
-    count_drop(&mut program, drops_fd, DROP_KEY, DROP_ROWS, "done");
+    count_drop(program, drops_fd, DROP_KEY, DROP_ROWS, "done");
 
     program.label("done");
     program.push(Insn::mov64_imm(0, 0));
     program.push(Insn::exit());
+    Ok(())
+}
 
+/// `sched_switch`'s classic `prev_state` for a preempted task:
+/// `TASK_REPORT_MAX`, where the low byte is the state's report letter.
+const REPORTED_PREEMPTED: i32 = 0x100;
+const REPORTED_STATES: i32 = 0xff;
+
+/// The classic program on `sched:sched_switch` (`bpf:tp`), for a kernel
+/// without BTF: the leaving task by its id and comm, its kind by the
+/// report-format `prev_state` -- voluntary when it is not the preempted
+/// value and names a state other than running, `__schedule`'s rule -- and its
+/// thread group the followed threads' map's, or `/proc`'s at the drain.
+fn classic_instructions(
+    record: &Record,
+    whose: Whose,
+    threads: Option<i32>,
+    rows_fd: i32,
+    drops_fd: i32,
+) -> Result<Vec<Insn>, String> {
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    program.push(Insn::st_imm(BPF_DW, R10, ROW_KEY, 0));
+    program.push(Insn::st_imm(BPF_W, R10, ROW_KEY + KEY_VOLUNTARY, 0));
+    record.load(&mut program, 1, 6, "prev_pid", FILTER_SCRATCH)?;
+    // The idle task leaves the cpu too, and is no task's switch.
+    program.jump_to("done", Insn::jeq_imm(1, 0, 0));
+    program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_TID, 1));
+    match (whose, threads) {
+        (Whose::Thread(tid), _) => {
+            program.jump_to("done", Insn::jne_imm(1, tid as i32, 0));
+        }
+        (_, Some(threads)) => {
+            program.extend(Insn::load_map_fd(1, threads));
+            program.push(Insn::mov64_reg(2, R10));
+            program.push(Insn::add64_imm(2, (ROW_KEY + KEY_TID) as i32));
+            program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+            program.jump_to("done", Insn::jeq_imm(0, 0, 0));
+            program.push(Insn::ldx(BPF_W, 1, 0, 0));
+            program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_TGID, 1));
+        }
+        (Whose::Any, None) => {}
+        (other, None) => {
+            return Err(format!(
+                "the classic `sched_switch` counting program cannot keep {other:?}: its record \
+                 names a task by its id alone"
+            ))
+        }
+    }
+    record.load(&mut program, 1, 6, "prev_state", FILTER_SCRATCH)?;
+    program.jump_to("kind", Insn::jset_imm(1, REPORTED_PREEMPTED, 0));
+    program.push(Insn::and64_imm(1, REPORTED_STATES));
+    program.jump_to("kind", Insn::jeq_imm(1, 0, 0));
+    program.push(Insn::st_imm(BPF_W, R10, ROW_KEY + KEY_VOLUNTARY, 1));
+    program.label("kind");
+    count_row(&mut program, rows_fd, drops_fd, |program| {
+        record.copy(program, 6, "prev_comm", ROW_VALUE + VALUE_COMM, COMM_BYTES)
+    })?;
     let instructions = program.build();
     super::insn::audit(&instructions)?;
     Ok(instructions)
@@ -250,8 +328,10 @@ struct Counting {
     descendants: Option<Descendants>,
     rows: Rows,
     drops: Counters,
-    program: OwnedFd,
-    _link: OwnedFd,
+    attached: Attached,
+    /// Whether the program is on the classic tracepoint, whose rows are
+    /// given their thread group at the drain.
+    classic: bool,
 }
 
 impl SwitchCountProgram {
@@ -260,7 +340,7 @@ impl SwitchCountProgram {
     pub fn skipped(&self) -> u64 {
         match &self.0 {
             Loaded::Counting(counting) => {
-                crate::bpf::program::skipped([&counting.program])
+                crate::bpf::program::skipped(counting.attached.program())
                     + counting
                         .descendants
                         .as_ref()
@@ -342,8 +422,49 @@ impl SwitchCountProgram {
             descendants,
             rows,
             drops,
-            program,
-            _link: link,
+            attached: Attached::Raw {
+                program,
+                _link: link,
+            },
+            classic: false,
+        })))
+    }
+
+    /// The counting program on the classic tracepoint (`bpf:tp`), for a
+    /// kernel without BTF. A cgroup cannot be kept: the record names a task
+    /// by its id alone.
+    pub fn load_classic(whose: Whose) -> Result<Self, String> {
+        if let Whose::Cgroup(_) = whose {
+            return Err(
+                "`sched.switches` through the classic tracepoint cannot keep a cgroup: the task \
+                 leaving the cpu is named by its id alone in `sched_switch`'s record, and the \
+                 cgroup it is in is nowhere in it"
+                    .to_owned(),
+            );
+        }
+        let rows = Rows::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, "omn_swc_rows")
+            .map_err(|error| map_failure("switch count map", error))?;
+        let drops = Counters::create(1, "omn_swc_drop")
+            .map_err(|error| map_failure("switch count drop counter", error))?;
+        let descendants = match whose {
+            Whose::Process(root) => Some(Descendants::follow_threads(root)?),
+            _ => None,
+        };
+        let record = Record::of("sched", "sched_switch")?;
+        let instructions = classic_instructions(
+            &record,
+            whose,
+            descendants.as_ref().and_then(Descendants::threads_fd),
+            rows.as_raw_fd(),
+            drops.as_raw_fd(),
+        )?;
+        let attached = Attached::classic("sched", "sched_switch", &instructions, "omn_switch_cnt")?;
+        Ok(Self(Loaded::Counting(Counting {
+            descendants,
+            rows,
+            drops,
+            attached,
+            classic: true,
         })))
     }
 
@@ -363,7 +484,12 @@ impl SwitchCountProgram {
         let mut rows = Vec::with_capacity(drained.entries.len());
         for (key, value) in &drained.entries {
             match SwitchCount::decode(key, value) {
-                Some(row) => rows.push(row),
+                Some(mut row) => {
+                    if counting.classic && row.tgid == 0 {
+                        row.tgid = super::proc_events::group_of(row.tid).unwrap_or(0);
+                    }
+                    rows.push(row)
+                }
                 None => losses.vanished += 1,
             }
         }
@@ -913,6 +1039,43 @@ mod tests {
     /// The per-switch program and the wakeup stamp build against this kernel;
     /// the switch looks a stamp up and deletes it, and the wakeup program
     /// compares the target before it stamps.
+    /// The classic counting program reads 4.19's `sched_switch` record and
+    /// tells the two kinds apart by its report-format `prev_state`.
+    #[test]
+    fn the_classic_counting_program_reads_the_leaving_task_and_its_kind() {
+        let record = Record::from_layout(
+            "sched:sched_switch",
+            super::super::attach::parse_layout(
+                "\tfield:char prev_comm[16];\toffset:8;\tsize:16;\tsigned:1;\n\
+                 \tfield:pid_t prev_pid;\toffset:24;\tsize:4;\tsigned:1;\n\
+                 \tfield:int prev_prio;\toffset:28;\tsize:4;\tsigned:1;\n\
+                 \tfield:long prev_state;\toffset:32;\tsize:8;\tsigned:1;\n\
+                 \tfield:char next_comm[16];\toffset:40;\tsize:16;\tsigned:1;\n\
+                 \tfield:pid_t next_pid;\toffset:56;\tsize:4;\tsigned:1;\n\
+                 \tfield:int next_prio;\toffset:60;\tsize:4;\tsigned:1;\n",
+            ),
+        );
+        for (whose, threads) in [
+            (Whose::Any, None),
+            (Whose::Process(42), Some(9)),
+            (Whose::Thread(42), None),
+        ] {
+            let program = classic_instructions(&record, whose, threads, 3, 4)
+                .unwrap_or_else(|error| panic!("{whose:?}: {error}"));
+            assert!(
+                program.contains(&Insn::ldx(BPF_W, 1, 6, 24)),
+                "the leaving task"
+            );
+            assert!(program.contains(&Insn::ldx(BPF_DW, 1, 6, 32)), "its state");
+            assert!(
+                program
+                    .iter()
+                    .any(|insn| insn.code == 0x45 && insn.imm == REPORTED_PREEMPTED),
+                "a preemption is told apart"
+            );
+        }
+    }
+
     #[test]
     fn the_wakeup_stamp_and_its_reader_build_against_this_kernel() {
         let Ok(btf) = crate::bpf::kernel_btf() else {

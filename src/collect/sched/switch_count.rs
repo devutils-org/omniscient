@@ -36,24 +36,32 @@ pub struct Prepare {
     /// The request's predicate, applied here per drained row; see
     /// `migrations::Prepare`.
     pub filter: Option<FilterExpr>,
+    /// Through the classic `sched:sched_switch` (`bpf:tp`), for a kernel
+    /// without BTF.
+    pub classic: bool,
 }
 
 impl Prepared for Prepare {
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
         if self.mode != Mode::Count {
             return Err(format!(
-                "`bpf:raw_tp` counts switches in the kernel and serves `count` only; `{}` is \
+                "the `sched_switch` program counts switches in the kernel and serves `count` \
+                 only; `{}` is \
                  `pmu:sw`'s, which records each switch as it happens",
                 self.mode
             ));
         }
         let whose = super::whose(target, "a context switch belongs to a task")?;
-        Ok(Box::new(SwitchCountCollector::new(whose, self.filter)))
+        let mut collector = SwitchCountCollector::new(whose, self.filter);
+        collector.classic = self.classic;
+        Ok(Box::new(collector))
     }
 }
 
 pub struct SwitchCountCollector {
     whose: Whose,
+    /// Whether the program goes on the classic tracepoint.
+    classic: bool,
     program: Option<SwitchCountProgram>,
     losses: Losses,
     /// The program's loss counters, as last read (`collect::kernel`).
@@ -76,6 +84,7 @@ impl SwitchCountCollector {
     pub fn new(whose: Whose, predicate: Option<FilterExpr>) -> Self {
         Self {
             whose,
+            classic: false,
             program: None,
             losses: Losses::default(),
             counts: KernelCounts::default(),
@@ -216,7 +225,11 @@ impl Collector for SwitchCountCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        self.program = Some(SwitchCountProgram::load(self.whose)?);
+        self.program = Some(if self.classic {
+            SwitchCountProgram::load_classic(self.whose)?
+        } else {
+            SwitchCountProgram::load(self.whose)?
+        });
         // A process target is followed into the processes it starts, and
         // those exec: the renames are the machine's then, applied by thread
         // id to the rows of the window, which are the target's alone.
@@ -319,6 +332,7 @@ mod tests {
         let Err(error) = Box::new(Prepare {
             mode: Mode::Trace,
             filter: None,
+            classic: false,
         })
         .attach(&Target::System) else {
             panic!("trace is pmu:sw's");
@@ -327,6 +341,7 @@ mod tests {
         assert!(Box::new(Prepare {
             mode: Mode::Count,
             filter: None,
+            classic: false,
         })
         .attach(&Target::System)
         .is_ok());

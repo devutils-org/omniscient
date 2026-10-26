@@ -1694,10 +1694,16 @@ fn every_backend_either_measures_or_says_it_is_not_built() {
     for (source, backends) in &implemented {
         // The chains whose two collectors are measured against each other,
         // and the test that states the relationship.
-        const COMPARED: &[(&str, &str)] = &[(
-            "cpu.cycles",
-            "a_cycle_count_and_its_cpu_clock_fallback_differ_by_the_core_s_frequency",
-        )];
+        const COMPARED: &[(&str, &str)] = &[
+            (
+                "cpu.cycles",
+                "a_cycle_count_and_its_cpu_clock_fallback_differ_by_the_core_s_frequency",
+            ),
+            (
+                "cpu.oncpu_time",
+                "the_program_and_the_stat_file_agree_on_a_spin_to_the_tick",
+            ),
+        ];
         if COMPARED.iter().any(|(compared, _)| compared == source) {
             continue;
         }
@@ -3119,8 +3125,11 @@ fn a_backend_that_cannot_serve_the_mode_is_passed_over_before_the_launch() {
             "the chain says why the file was passed over: {file}"
         );
     } else {
+        // Or, now that no backend of the chain traces, the source itself
+        // refuses the mode: earlier still, and for the same reason.
         assert!(
-            refused.contains("fs:proc") && refused.contains("not `trace`"),
+            (refused.contains("fs:proc") && refused.contains("not `trace`"))
+                || refused.contains("cannot be observed in `trace` mode"),
             "{refused}"
         );
     }
@@ -4915,5 +4924,69 @@ fn a_launched_programs_rows_add_up_to_its_reaped_cpu_time() {
         "the program summed {summed} ns and the reap {reaped} ns: the rows may fall short of \
          the reap by what the child ran before the gate, never by a millisecond, and may \
          exceed it by the reap's truncation, never by more than 2 us; short by {short} ns"
+    );
+}
+
+/// The same launched spin through the two backends that serve a launched
+/// program's `poll`: `bpf:raw_tp`, the scheduler's own increments, and
+/// `fs:proc`, `/proc/<pid>/stat` in ticks. Each is held to its own run's
+/// reap, the one truth both are about, and the relationship is the tick: the
+/// program within a millisecond of the reap, the file within two ticks of it
+/// (one at each edge of the window).
+#[test]
+fn the_program_and_the_stat_file_agree_on_a_spin_to_the_tick() {
+    let spin = "i=0; while [ $i -lt 400000 ]; do i=$((i+1)); done";
+    let measure = |backend: &str| -> Option<(f64, f64)> {
+        let pin = format!("force:{backend}");
+        let document = match run(&[
+            "cpu.oncpu_time",
+            "-m",
+            "poll@100ms",
+            "-e",
+            "summary",
+            "--backend",
+            &pin,
+            "--format",
+            "json",
+            "--",
+            "/bin/sh",
+            "-c",
+            spin,
+        ]) {
+            Outcome::Measured { document, .. } => document,
+            Outcome::Refused { message, .. } => {
+                assert!(
+                    machine_cannot_serve(&message),
+                    "`{backend}` was refused rather than unserved: {message}"
+                );
+                eprintln!("skipped: {}", machine_s_reason(&message));
+                return None;
+            }
+        };
+        let reaped = document["results"][0]["lifetime"]["cpu_ns"]
+            .as_f64()
+            .expect("the reap's cpu figure");
+        let total: f64 = document["results"][0]["outputs"][0]["series"]
+            .as_array()
+            .expect("the summary's series")
+            .iter()
+            .filter_map(|series| series["total"].as_f64())
+            .sum();
+        Some((total, reaped))
+    };
+    let (Some((program, program_reap)), Some((file, file_reap))) =
+        (measure("bpf:raw_tp"), measure("fs:proc"))
+    else {
+        return;
+    };
+    assert!(program_reap > 100e6 && file_reap > 100e6, "not a spin");
+    assert!(
+        (program_reap - program).abs() < 1e6,
+        "the program summed {program} ns of a {program_reap} ns reap"
+    );
+    const TICK_NS: f64 = 10e6;
+    assert!(
+        (file_reap - file).abs() <= 2.0 * TICK_NS,
+        "the file summed {file} ns of a {file_reap} ns reap: more than a tick at each edge"
     );
 }

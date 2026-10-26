@@ -25,13 +25,13 @@
 //! `sched.switches`: a stream of increments costs more than the answer is
 //! worth.
 
-use std::os::fd::OwnedFd;
-
 use super::btf::Btf;
+use super::context::Record;
 use super::insn::{
     count_drop, helper, read_field, Insn, Program, Subject, TaskFields, Whose, BPF_DW, BPF_W, R10,
 };
 use super::map::{map_failure, row_map, select_rows, Counters, Rows};
+use super::proc_events::Attached;
 use super::sched_common::{push_followed_filter, Descendants, Followed};
 use super::syscall;
 use crate::bpf::program::LICENSE;
@@ -153,7 +153,32 @@ fn instructions(
         "kept",
     );
 
-    select_rows(&mut program, rows_fd, ROWS_SLOT, "no_rows");
+    count_row(&mut program, rows_fd, drops_fd, |program| {
+        read_field(
+            program,
+            ROW_VALUE + VALUE_COMM,
+            COMM_BYTES as i32,
+            7,
+            comm_offset,
+        );
+        Ok(())
+    })?;
+
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
+/// Adds the increment in `r8` to the row the key on the stack names,
+/// creating it, with the comm `write_comm` writes, when it is the first;
+/// exits through `done`, which this emits.
+fn count_row(
+    program: &mut Program,
+    rows_fd: i32,
+    drops_fd: i32,
+    write_comm: impl FnOnce(&mut Program) -> Result<(), String>,
+) -> Result<(), String> {
+    select_rows(program, rows_fd, ROWS_SLOT, "no_rows");
     program.push(row_map(1, ROWS_SLOT));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, ROW_KEY as i32));
@@ -169,13 +194,7 @@ fn instructions(
     program.label("first_update");
     program.push(Insn::stx(BPF_DW, R10, ROW_VALUE + VALUE_NS, 8));
     program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_UPDATES, 1));
-    read_field(
-        &mut program,
-        ROW_VALUE + VALUE_COMM,
-        COMM_BYTES as i32,
-        7,
-        comm_offset,
-    );
+    write_comm(program)?;
     program.push(row_map(1, ROWS_SLOT));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, ROW_KEY as i32));
@@ -185,17 +204,60 @@ fn instructions(
     program.push(Insn::call(helper::MAP_UPDATE_ELEM));
     program.jump_to("done", Insn::jsge_imm(0, 0, 0));
     // The row map is full: this increment is in no row.
-    count_drop(&mut program, drops_fd, DROP_KEY, DROP_ROWS, "done");
+    count_drop(program, drops_fd, DROP_KEY, DROP_ROWS, "done");
     program.jump_to("done", Insn::ja());
 
     // The slot held no map, which it always does; counted rather than assumed.
     program.label("no_rows");
-    count_drop(&mut program, drops_fd, DROP_KEY, DROP_ROWS, "done");
+    count_drop(program, drops_fd, DROP_KEY, DROP_ROWS, "done");
 
     program.label("done");
     program.push(Insn::mov64_imm(0, 0));
     program.push(Insn::exit());
+    Ok(())
+}
 
+/// The classic program on `sched:sched_stat_runtime` (`bpf:tp`), for a
+/// kernel without BTF: the same increment, the task by its id and comm, its
+/// thread group the followed threads' map's or `/proc`'s at the drain.
+fn classic_instructions(
+    record: &Record,
+    whose: Whose,
+    threads: Option<i32>,
+    rows_fd: i32,
+    drops_fd: i32,
+) -> Result<Vec<Insn>, String> {
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    record.load(&mut program, 8, 6, "runtime", FILTER_SCRATCH)?;
+    program.push(Insn::st_imm(BPF_DW, R10, ROW_KEY, 0));
+    record.load(&mut program, 1, 6, "pid", FILTER_SCRATCH)?;
+    program.jump_to("done", Insn::jeq_imm(1, 0, 0));
+    program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_TID, 1));
+    match (whose, threads) {
+        (Whose::Thread(tid), _) => {
+            program.jump_to("done", Insn::jne_imm(1, tid as i32, 0));
+        }
+        (_, Some(threads)) => {
+            program.extend(Insn::load_map_fd(1, threads));
+            program.push(Insn::mov64_reg(2, R10));
+            program.push(Insn::add64_imm(2, (ROW_KEY + KEY_TID) as i32));
+            program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+            program.jump_to("done", Insn::jeq_imm(0, 0, 0));
+            program.push(Insn::ldx(BPF_W, 1, 0, 0));
+            program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_TGID, 1));
+        }
+        (Whose::Any, None) => {}
+        (other, None) => {
+            return Err(format!(
+                "the classic `sched_stat_runtime` program cannot keep {other:?}: its record \
+                 names a task by its id alone"
+            ))
+        }
+    }
+    count_row(&mut program, rows_fd, drops_fd, |program| {
+        record.copy(program, 6, "comm", ROW_VALUE + VALUE_COMM, COMM_BYTES)
+    })?;
     let instructions = program.build();
     super::insn::audit(&instructions)?;
     Ok(instructions)
@@ -207,8 +269,10 @@ pub struct OnCpuProgram {
     descendants: Option<Descendants>,
     rows: Rows,
     drops: Counters,
-    program: OwnedFd,
-    _link: OwnedFd,
+    attached: Attached,
+    /// Whether the program is on the classic tracepoint, whose rows are
+    /// given their thread group at the drain.
+    classic: bool,
 }
 
 impl OnCpuProgram {
@@ -246,8 +310,49 @@ impl OnCpuProgram {
             descendants,
             rows,
             drops,
-            program,
-            _link: link,
+            attached: Attached::Raw {
+                program,
+                _link: link,
+            },
+            classic: false,
+        })
+    }
+
+    /// The classic tracepoint's form (`bpf:tp`), for a kernel without BTF.
+    /// A cgroup cannot be kept: the record names a task by its id alone.
+    pub fn load_classic(whose: Whose) -> Result<Self, String> {
+        if let Whose::Cgroup(_) = whose {
+            return Err(
+                "`cpu.oncpu_time` through the classic tracepoint cannot keep a cgroup: the task \
+                 is named by its id alone in `sched_stat_runtime`'s record, and the cgroup it is \
+                 in is nowhere in it"
+                    .to_owned(),
+            );
+        }
+        let rows = Rows::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, "omn_oncpu_rows")
+            .map_err(|error| map_failure("on-cpu row map", error))?;
+        let drops = Counters::create(1, "omn_oncpu_drop")
+            .map_err(|error| map_failure("on-cpu drop counter", error))?;
+        let descendants = match whose {
+            Whose::Process(root) => Some(Descendants::follow_threads(root)?),
+            _ => None,
+        };
+        let record = Record::of("sched", "sched_stat_runtime")?;
+        let instructions = classic_instructions(
+            &record,
+            whose,
+            descendants.as_ref().and_then(Descendants::threads_fd),
+            rows.as_raw_fd(),
+            drops.as_raw_fd(),
+        )?;
+        let attached =
+            Attached::classic("sched", "sched_stat_runtime", &instructions, "omn_oncpu")?;
+        Ok(Self {
+            descendants,
+            rows,
+            drops,
+            attached,
+            classic: true,
         })
     }
 
@@ -264,7 +369,12 @@ impl OnCpuProgram {
         let mut rows = Vec::with_capacity(drained.entries.len());
         for (key, value) in &drained.entries {
             match OnCpu::decode(key, value) {
-                Some(row) => rows.push(row),
+                Some(mut row) => {
+                    if self.classic && row.tgid == 0 {
+                        row.tgid = super::proc_events::group_of(row.tid).unwrap_or(0);
+                    }
+                    rows.push(row)
+                }
                 None => losses.vanished += 1,
             }
         }
@@ -274,7 +384,7 @@ impl OnCpuProgram {
     /// Runs the kernel skipped because this program was already running on
     /// that cpu.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::program::skipped([&self.program])
+        crate::bpf::program::skipped(self.attached.program())
             + self.descendants.as_ref().map_or(0, Descendants::skipped)
     }
 
@@ -309,6 +419,34 @@ mod tests {
 
     /// The increment and the count, each added atomically: a thread's two
     /// increments in a row can come from two cpus.
+    /// The classic program reads 4.19's `sched_stat_runtime` record: the
+    /// increment and the task, for every target it keeps.
+    #[test]
+    fn the_classic_program_reads_the_increment_and_the_task() {
+        let record = Record::from_layout(
+            "sched:sched_stat_runtime",
+            super::super::attach::parse_layout(
+                "\tfield:char comm[16];\toffset:8;\tsize:16;\tsigned:1;\n\
+                 \tfield:pid_t pid;\toffset:24;\tsize:4;\tsigned:1;\n\
+                 \tfield:u64 runtime;\toffset:32;\tsize:8;\tsigned:0;\n\
+                 \tfield:u64 vruntime;\toffset:40;\tsize:8;\tsigned:0;\n",
+            ),
+        );
+        for (whose, threads) in [
+            (Whose::Any, None),
+            (Whose::Process(42), Some(9)),
+            (Whose::Thread(42), None),
+        ] {
+            let program = classic_instructions(&record, whose, threads, 3, 4)
+                .unwrap_or_else(|error| panic!("{whose:?}: {error}"));
+            assert!(
+                program.contains(&Insn::ldx(BPF_DW, 8, 6, 32)),
+                "the increment"
+            );
+            assert!(program.contains(&Insn::ldx(BPF_W, 1, 6, 24)), "the task");
+        }
+    }
+
     #[test]
     fn the_time_and_the_updates_are_accumulated_atomically() {
         let Some(btf) = kernel_btf() else { return };

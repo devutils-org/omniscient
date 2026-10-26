@@ -30,16 +30,24 @@
 //! by the program: a softirq is keyed by its vector, a hard interrupt by its
 //! line, and the numbers overlap.
 
-use std::os::fd::OwnedFd;
-
 use super::btf::Btf;
+use super::context::Record;
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
 use super::map::{map_failure, row_map, select_rows, Counters, Rows};
+use super::proc_events::Attached;
 use super::sched_common::{
     bucket_low_ns, count_drop, count_update_failure, push_log2_bucket, read_field, text_of,
     Log2Labels, E2BIG,
 };
 use crate::bpf::program::load_raw_tracepoint as load;
+
+/// What a program reads its interrupt out of: a raw tracepoint's arguments,
+/// checked against BTF, or a classic `irq` record (`bpf:tp`).
+#[derive(Clone, Copy)]
+enum Source<'a> {
+    Raw(&'a Btf),
+    Classic(&'a Record),
+}
 
 /// Arguments of the tracepoints, in the raw tracepoint's context. A softirq's
 /// only argument is its vector, in the same first slot.
@@ -189,13 +197,15 @@ fn open_slot(program: &mut Program, in_flight_fd: i32, slot: i32) {
 }
 
 /// The program on `irq_handler_entry`: a handler has the cpu.
-fn entry_instructions(btf: &Btf, in_flight_fd: i32) -> Result<Vec<Insn>, String> {
-    crate::bpf::program::prototype(
-        btf,
-        "irq_handler_entry",
-        &[&ENTRY_SIGNATURE],
-        "the interrupt number and its action",
-    )?;
+fn entry_instructions(source: Source, in_flight_fd: i32) -> Result<Vec<Insn>, String> {
+    if let Source::Raw(btf) = source {
+        crate::bpf::program::prototype(
+            btf,
+            "irq_handler_entry",
+            &[&ENTRY_SIGNATURE],
+            "the interrupt number and its action",
+        )?;
+    }
 
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
@@ -221,18 +231,25 @@ fn entry_instructions(btf: &Btf, in_flight_fd: i32) -> Result<Vec<Insn>, String>
 
 /// The program on `irq_handler_exit`: the handler is done and has a length.
 fn exit_instructions(
-    btf: &Btf,
+    source: Source,
     in_flight_fd: i32,
     rows_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
-    crate::bpf::program::prototype(
-        btf,
-        "irq_handler_exit",
-        &[&EXIT_SIGNATURE],
-        "the interrupt number and its action",
-    )?;
-    let name_offset = btf.member_offset("irqaction", "name")?;
+    // The classic exit record has the line and not its action: such a row is
+    // named at the drain, from `/proc/interrupts`.
+    let name_offset = match source {
+        Source::Raw(btf) => {
+            crate::bpf::program::prototype(
+                btf,
+                "irq_handler_exit",
+                &[&EXIT_SIGNATURE],
+                "the interrupt number and its action",
+            )?;
+            Some(btf.member_offset("irqaction", "name")?)
+        }
+        Source::Classic(_) => None,
+    };
 
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
@@ -269,9 +286,14 @@ fn exit_instructions(
     program.push(Insn::add64_reg(1, 9));
     program.push(Insn::stx(BPF_DW, 0, 0, 1));
     program.label("totalled");
-    // r7 keeps the action, which is where the handler's name is.
-    program.push(Insn::ldx(BPF_DW, 7, 6, ARG_ACTION));
-    program.push(Insn::ldx(BPF_DW, 1, 6, ARG_IRQ));
+    match source {
+        Source::Raw(_) => {
+            // r7 keeps the action, which is where the handler's name is.
+            program.push(Insn::ldx(BPF_DW, 7, 6, ARG_ACTION));
+            program.push(Insn::ldx(BPF_DW, 1, 6, ARG_IRQ));
+        }
+        Source::Classic(record) => record.load(&mut program, 1, 6, "irq", SCRATCH)?,
+    }
     program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_IRQ, 1));
     program.push(Insn::st_imm(
         BPF_W,
@@ -280,7 +302,7 @@ fn exit_instructions(
         KIND_HARD as i32,
     ));
 
-    push_row(&mut program, rows_fd, drops_fd, Some(name_offset));
+    push_row(&mut program, rows_fd, drops_fd, name_offset);
 
     let instructions = program.build();
     super::insn::audit(&instructions)?;
@@ -380,13 +402,15 @@ fn push_row(program: &mut Program, rows_fd: i32, drops_fd: i32, name_offset: Opt
 }
 
 /// The program on `softirq_entry`: a softirq vector has the cpu.
-fn soft_entry_instructions(btf: &Btf, in_flight_fd: i32) -> Result<Vec<Insn>, String> {
-    crate::bpf::program::prototype(
-        btf,
-        "softirq_entry",
-        &[&SOFT_SIGNATURE],
-        "the interrupt number and its action",
-    )?;
+fn soft_entry_instructions(source: Source, in_flight_fd: i32) -> Result<Vec<Insn>, String> {
+    if let Source::Raw(btf) = source {
+        crate::bpf::program::prototype(
+            btf,
+            "softirq_entry",
+            &[&SOFT_SIGNATURE],
+            "the interrupt number and its action",
+        )?;
+    }
 
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
@@ -417,17 +441,19 @@ fn soft_entry_instructions(btf: &Btf, in_flight_fd: i32) -> Result<Vec<Insn>, St
 /// The program on `softirq_exit`: the vector is done, and its length is the
 /// time since its entry less the hard handlers that ran inside it.
 fn soft_exit_instructions(
-    btf: &Btf,
+    source: Source,
     in_flight_fd: i32,
     rows_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
-    crate::bpf::program::prototype(
-        btf,
-        "softirq_exit",
-        &[&SOFT_SIGNATURE],
-        "the interrupt number and its action",
-    )?;
+    if let Source::Raw(btf) = source {
+        crate::bpf::program::prototype(
+            btf,
+            "softirq_exit",
+            &[&SOFT_SIGNATURE],
+            "the interrupt number and its action",
+        )?;
+    }
 
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
@@ -464,7 +490,12 @@ fn soft_exit_instructions(
     program.jump_to("done", Insn::ja());
 
     program.label("forwards");
-    program.push(Insn::ldx(BPF_DW, 1, 6, ARG_IRQ));
+    match source {
+        Source::Raw(_) => {
+            program.push(Insn::ldx(BPF_DW, 1, 6, ARG_IRQ));
+        }
+        Source::Classic(record) => record.load(&mut program, 1, 6, "vec", SCRATCH)?,
+    }
     program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_IRQ, 1));
     program.push(Insn::st_imm(
         BPF_W,
@@ -483,6 +514,36 @@ fn soft_exit_instructions(
     Ok(instructions)
 }
 
+/// Each line's handler names from `/proc/interrupts`, by line: what a classic
+/// hard row is named by, where the raw program reads its action's. The names
+/// follow the line's type after a run of spaces, and a shared line's are
+/// separated by a comma and one space, so the last run of two or more spaces
+/// is where they begin.
+fn interrupt_names() -> std::collections::BTreeMap<u32, String> {
+    let text = std::fs::read_to_string("/proc/interrupts").unwrap_or_default();
+    parse_interrupt_names(&text)
+}
+
+fn parse_interrupt_names(text: &str) -> std::collections::BTreeMap<u32, String> {
+    let mut names = std::collections::BTreeMap::new();
+    for line in text.lines() {
+        let Some((line_number, rest)) = line.trim_start().split_once(':') else {
+            continue;
+        };
+        let Ok(line_number) = line_number.parse::<u32>() else {
+            continue;
+        };
+        let Some(at) = rest.trim_end().rfind("  ") else {
+            continue;
+        };
+        let name = rest.trim_end()[at..].trim();
+        if !name.is_empty() {
+            names.insert(line_number, name.to_owned());
+        }
+    }
+    names
+}
+
 /// Handler runs neither map could take, under the kernel's own reason.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct IrqDrops {
@@ -498,8 +559,11 @@ pub struct IrqProgram {
     rows: Rows,
     drops: Counters,
     _in_flight: Counters,
-    programs: Vec<OwnedFd>,
-    _links: Vec<OwnedFd>,
+    /// Each entry before its exit.
+    attached: Vec<Attached>,
+    /// Whether the programs are on the classic tracepoints, whose hard rows
+    /// are named at the drain.
+    classic: bool,
 }
 
 impl IrqProgram {
@@ -509,11 +573,35 @@ impl IrqProgram {
     /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
     /// program's own counters can say an occurrence was never seen.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::program::skipped(self.programs.iter())
+        crate::bpf::program::skipped(self.attached.iter().filter_map(Attached::program))
     }
 
     pub fn load() -> Result<Self, String> {
-        let btf = super::kernel_btf()?;
+        Self::load_with(Some(super::kernel_btf()?))
+    }
+
+    /// The same four programs on the classic `irq` tracepoints (`bpf:tp`),
+    /// for a kernel without BTF.
+    pub fn load_classic() -> Result<Self, String> {
+        Self::load_with(None)
+    }
+
+    /// `btf` is the raw road's; without it, the classic one.
+    fn load_with(btf: Option<&Btf>) -> Result<Self, String> {
+        let records = match btf {
+            Some(_) => None,
+            None => Some([
+                Record::of("irq", "irq_handler_entry")?,
+                Record::of("irq", "irq_handler_exit")?,
+                Record::of("irq", "softirq_entry")?,
+                Record::of("irq", "softirq_exit")?,
+            ]),
+        };
+        let source = |index: usize| match (&records, btf) {
+            (Some(records), _) => Source::Classic(&records[index]),
+            (None, Some(btf)) => Source::Raw(btf),
+            (None, None) => unreachable!("records are read wherever there is no BTF"),
+        };
 
         // A per-cpu array of one `u64`: this build's in-flight timestamp, one
         // per cpu, which is the whole state these two programs share.
@@ -528,13 +616,13 @@ impl IrqProgram {
             (
                 "irq_handler_entry",
                 "omn_irq_in",
-                entry_instructions(btf, in_flight.as_raw_fd())?,
+                entry_instructions(source(0), in_flight.as_raw_fd())?,
             ),
             (
                 "irq_handler_exit",
                 "omn_irq_out",
                 exit_instructions(
-                    btf,
+                    source(1),
                     in_flight.as_raw_fd(),
                     rows.as_raw_fd(),
                     drops.as_raw_fd(),
@@ -543,37 +631,42 @@ impl IrqProgram {
             (
                 "softirq_entry",
                 "omn_softirq_in",
-                soft_entry_instructions(btf, in_flight.as_raw_fd())?,
+                soft_entry_instructions(source(2), in_flight.as_raw_fd())?,
             ),
             (
                 "softirq_exit",
                 "omn_softirq_out",
                 soft_exit_instructions(
-                    btf,
+                    source(3),
                     in_flight.as_raw_fd(),
                     rows.as_raw_fd(),
                     drops.as_raw_fd(),
                 )?,
             ),
         ];
-        let mut programs = Vec::with_capacity(built.len());
-        for (_, name, instructions) in &built {
-            programs.push(load(instructions, name)?);
-        }
         // Each entry before its exit: an exit that finds no timestamp is
         // counted and skipped, where the reverse order would have nothing to
         // stop a handler's length being measured from zero.
-        let mut links = Vec::with_capacity(built.len());
-        for ((tracepoint, _, _), program) in built.iter().zip(&programs) {
-            links.push(crate::bpf::program::attach_raw(tracepoint, program)?);
+        let mut attached = Vec::with_capacity(built.len());
+        for (tracepoint, name, instructions) in &built {
+            attached.push(if records.is_some() {
+                Attached::classic("irq", tracepoint, instructions, name)?
+            } else {
+                let program = load(instructions, name)?;
+                let link = crate::bpf::program::attach_raw(tracepoint, &program)?;
+                Attached::Raw {
+                    program,
+                    _link: link,
+                }
+            });
         }
 
         Ok(Self {
             rows,
             drops,
             _in_flight: in_flight,
-            programs,
-            _links: links,
+            attached,
+            classic: records.is_some(),
         })
     }
 
@@ -587,9 +680,19 @@ impl IrqProgram {
             truncated: drained.truncated,
         };
         let mut rows = Vec::with_capacity(drained.entries.len());
+        let names = if self.classic {
+            interrupt_names()
+        } else {
+            Default::default()
+        };
         for (key, value) in &drained.entries {
             match IrqRun::decode(key, value) {
-                Some(row) => rows.push(row),
+                Some(mut row) => {
+                    if self.classic && row.kind == KIND_HARD {
+                        row.name = names.get(&row.irq).cloned().unwrap_or_default();
+                    }
+                    rows.push(row)
+                }
                 None => losses.vanished += 1,
             }
         }
@@ -624,12 +727,60 @@ mod tests {
     /// interrupted, so nothing here may read the current task: doing so would
     /// charge a disk's interrupt to whatever happened to be on the cpu, which
     /// is the one attribution this source exists to avoid.
+    /// A classic hard row is named from `/proc/interrupts`: the names after
+    /// the line's type, a shared line's all of them.
+    #[test]
+    fn a_line_is_named_as_proc_interrupts_names_it() {
+        let names = parse_interrupt_names(
+            "           CPU0       CPU1\n\
+               0:         38          0   IO-APIC   2-edge      timer\n\
+              16:          0         12   IO-APIC  16-fasteoi   ehci_hcd:usb1, uhci_hcd:usb3\n\
+              24:        900          0   PCI-MSI 512000-edge      ahci[0000:00:1f.2]\n\
+             NMI:          0          0   Non-maskable interrupts\n",
+        );
+        assert_eq!(names.get(&0).map(String::as_str), Some("timer"));
+        assert_eq!(
+            names.get(&16).map(String::as_str),
+            Some("ehci_hcd:usb1, uhci_hcd:usb3")
+        );
+        assert_eq!(
+            names.get(&24).map(String::as_str),
+            Some("ahci[0000:00:1f.2]")
+        );
+        assert_eq!(names.len(), 3, "NMI is no line");
+    }
+
+    /// The classic programs read the line and the vector out of 4.19's
+    /// records.
+    #[test]
+    fn the_classic_programs_read_the_records() {
+        let exit = Record::from_layout(
+            "irq:irq_handler_exit",
+            super::super::attach::parse_layout(
+                "\tfield:int irq;\toffset:8;\tsize:4;\tsigned:1;\n\
+                 \tfield:int ret;\toffset:12;\tsize:4;\tsigned:1;\n",
+            ),
+        );
+        let soft = Record::from_layout(
+            "irq:softirq_exit",
+            super::super::attach::parse_layout(
+                "\tfield:unsigned int vec;\toffset:8;\tsize:4;\tsigned:0;\n",
+            ),
+        );
+        let hard = exit_instructions(Source::Classic(&exit), 3, 4, 5).expect("a hard exit");
+        let soft = soft_exit_instructions(Source::Classic(&soft), 3, 4, 5).expect("a soft exit");
+        for program in [hard, soft] {
+            assert!(program.contains(&Insn::ldx(BPF_W, 1, 6, 8)));
+        }
+        entry_instructions(Source::Classic(&exit), 3).expect("an entry");
+    }
+
     #[test]
     fn neither_program_asks_who_was_running() {
         let Some(btf) = kernel_btf() else { return };
         for program in [
-            entry_instructions(&btf, 3).expect("a program"),
-            exit_instructions(&btf, 3, 4, 5).expect("a program"),
+            entry_instructions(Source::Raw(&btf), 3).expect("a program"),
+            exit_instructions(Source::Raw(&btf), 3, 4, 5).expect("a program"),
         ] {
             let called: Vec<i32> = program
                 .iter()
@@ -649,7 +800,7 @@ mod tests {
     #[test]
     fn the_entry_path_is_a_clock_read_and_one_store() {
         let Some(btf) = kernel_btf() else { return };
-        let program = entry_instructions(&btf, 3).expect("a program");
+        let program = entry_instructions(Source::Raw(&btf), 3).expect("a program");
         let calls: Vec<i32> = program
             .iter()
             .filter(|insn| insn.code == 0x85)
@@ -668,7 +819,7 @@ mod tests {
     #[test]
     fn the_handlers_name_is_followed_rather_than_copied_from_the_structure() {
         let Some(btf) = kernel_btf() else { return };
-        let program = exit_instructions(&btf, 3, 4, 5).expect("a program");
+        let program = exit_instructions(Source::Raw(&btf), 3, 4, 5).expect("a program");
         let calls: Vec<i32> = program
             .iter()
             .filter(|insn| insn.code == 0x85)
@@ -685,7 +836,7 @@ mod tests {
     #[test]
     fn the_name_field_is_cleared_before_it_is_filled() {
         let Some(btf) = kernel_btf() else { return };
-        let program = exit_instructions(&btf, 3, 4, 5).expect("a program");
+        let program = exit_instructions(Source::Raw(&btf), 3, 4, 5).expect("a program");
         let cleared: Vec<i16> = program
             .iter()
             .filter(|insn| {
@@ -802,7 +953,7 @@ mod tests {
     #[test]
     fn the_row_map_is_taken_from_the_slot_once_per_run() {
         let Some(btf) = kernel_btf() else { return };
-        let program = exit_instructions(&btf, 3, 4, 5).expect("a program");
+        let program = exit_instructions(Source::Raw(&btf), 3, 4, 5).expect("a program");
         crate::bpf::map::assert_rows_taken_once(&program, 4);
     }
 }

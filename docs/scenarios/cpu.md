@@ -275,7 +275,7 @@ and not stacks.
 
 `every_backend_either_measures_or_says_it_is_not_built`
 
-**One chain has two, and they are not two roads to the same number.** That is
+**Two chains have two.** The first are not two roads to the same number. That is
 established rather than asserted — the scenario forces each of the twenty-one
 declared backends of the fourteen sources with `--backend force:` and
 classifies what comes back — and it is the test that tells whoever writes a
@@ -290,6 +290,7 @@ declares (*"CPU time, not cycles: blind to DVFS"*). They are compared by
 | Source | Collectors | What one says of the other |
 |---|---|---|
 | `cpu.cycles` | `pmu` over `pmu:sw` | the core's cycles per nanosecond of cpu -- 4.2 GHz on the development machine -- between half cpufreq's minimum and a fifth over its maximum; `pmu:sw`'s own difference between a 100 ms and a 500 ms burn is the 400 ms the workload's own clock burned, to 15 % |
+| `cpu.oncpu_time` | `bpf:raw_tp` over `fs:proc` | the same launched spin, each held to its run's reap: the program within a millisecond of it, the stat file within two ticks (one at each edge); `the_program_and_the_stat_file_agree_on_a_spin_to_the_tick`, since the twenty-seventh wave, when `-m poll` became the sweep's first mode for the source |
 
 The two do not report in the same unit, and the output does not say so yet.
 Since the sixteenth wave the catalog gives `pmu:sw` `unit: ns`
@@ -304,11 +305,11 @@ holds the output to the workload's own clock; it is ignored until those places
 read `Entry::backend_unit` (`docs/open-findings.md`, the sixteenth wave, stream
 cpu), and passes here with `--ignored` once `src/main.rs`'s does.
 
-Seven backends are declared and not built: `cpu.profile pmu` (a cycles
+Six backends are declared and not built: `cpu.profile pmu` (a cycles
 profile is `cpu.cycles -m sample -e stack` since the twenty-fourth wave; this
 row stays unbuilt because a `cpu.profile` sample is read as a period of
 on-cpu time by `omn latency` and `omn diff`),
-`cpu.oncpu_time bpf:tp`, `cpu.oncpu_time fs:cgroup`, `cpu.util fs:cgroup`,
+`cpu.oncpu_time fs:cgroup`, `cpu.util fs:cgroup`,
 `cpu.pressure fs:cgroup`, `cpu.flow pmu:aux:intel_pt`, `cpu.flow
 pmu:aux:cs_etm`. Each has to exit 3 and name both halves of what is missing,
 which is the comparison this family can make:

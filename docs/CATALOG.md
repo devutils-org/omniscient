@@ -345,7 +345,7 @@ never unless asked. Each frame says which of them named it (`elf`,
 | `cpu.cache_misses` | LLC misses | `pmu` (HW_CACHE_MISSES) | count, sample | all | low | low |
 | `cpu.topdown` | TMA: front-end / back-end / bad-spec / retiring | `pmu` (slots + topdown-*) | count | all | low | medium |
 | `cpu.profile` | on-CPU time profile with stacks, `pid` and `comm` on every sample | `pmu:sw` (CPU_CLOCK) + callchain · `pmu` cycles (no collector: `cpu.cycles -m sample`) | sample@freq | all | low / med | low |
-| `cpu.oncpu_time` | effective CPU time | `bpf:raw_tp` sched_stat_runtime (poll, per thread) · `bpf:tp` sched_switch · `fs:cgroup` cpu.stat · `fs:proc` · `pmu:sw` TASK_CLOCK (count: `perf stat`'s task-clock) | trace, poll, count | pid, tid, cgroup, system | low / free | low |
+| `cpu.oncpu_time` | effective CPU time | `bpf:raw_tp` sched_stat_runtime (poll, per thread) · `bpf:tp` sched_stat_runtime · `fs:cgroup` cpu.stat · `fs:proc` · `pmu:sw` TASK_CLOCK (count: `perf stat`'s task-clock) | poll, count | pid, tid, cgroup, system | low / free | low |
 | `cpu.context_switches` | context switches | `pmu:sw` | count, sample | pid, cgroup, cpu | low | low |
 | `cpu.migrations` | cross-core migrations | `pmu:sw` (CPU_MIGRATIONS) | count | pid, cgroup | low | low |
 | `cpu.util` | utilization by state, the window's ticks per state in `fields` | `fs:proc` /proc/stat · `fs:cgroup` cpu.stat | poll | system, cpu, cgroup | low / free | low |

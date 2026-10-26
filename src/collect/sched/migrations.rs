@@ -40,6 +40,9 @@ pub struct Prepare {
     /// events alone, so a predicate this collector ignored would run nowhere
     /// (stream S's finding, `docs/fixes/silent.md`).
     pub filter: Option<FilterExpr>,
+    /// Through the classic `sched:sched_migrate_task` (`bpf:tp`), for a
+    /// kernel without BTF.
+    pub classic: bool,
 }
 
 impl Prepared for Prepare {
@@ -54,6 +57,7 @@ impl Prepared for Prepare {
         let filter = super::whose(target, "a migration happens to a task")?;
         let mut collector = MigrationCollector::new(filter, self.mode);
         collector.predicate = UserFilter::new(self.filter, "migrations");
+        collector.classic = self.classic;
         Ok(Box::new(collector))
     }
 }
@@ -73,6 +77,8 @@ pub struct MigrationCollector {
     /// `count` an alias for `trace`, and a mode that changes nothing is worse
     /// than one that is refused, because the refusal is visible.
     mode: Mode,
+    /// Whether the program goes on the classic tracepoint.
+    classic: bool,
     program: Option<MigrationProgram>,
     losses: Losses,
     /// The program's loss counters, as last read (`collect::kernel`).
@@ -100,6 +106,7 @@ impl MigrationCollector {
         Self {
             filter,
             mode,
+            classic: false,
             program: None,
             losses: Losses::default(),
             counts: KernelCounts::default(),
@@ -282,7 +289,11 @@ impl Collector for MigrationCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        self.program = Some(MigrationProgram::load(self.filter)?);
+        self.program = Some(if self.classic {
+            MigrationProgram::load_classic(self.filter)?
+        } else {
+            MigrationProgram::load(self.filter)?
+        });
         // Optional: without it a row keeps the name its task had when the row
         // was made, which for a launched program's first rows is this tool's.
         // A process target is followed into the processes it starts, and
@@ -380,6 +391,7 @@ mod tests {
                 freq: "997hz".parse().expect("a frequency"),
             },
             filter: None,
+            classic: false,
         });
         let Err(error) = prepared.attach(&Target::Pid(vec![1])) else {
             panic!("a sampled mode must be refused");
@@ -403,9 +415,13 @@ mod tests {
             // A target with no process is the only thing that may be refused
             // here, and `--system` is not one.
             assert!(
-                Box::new(Prepare { mode, filter: None })
-                    .attach(&Target::System)
-                    .is_ok(),
+                Box::new(Prepare {
+                    mode,
+                    filter: None,
+                    classic: false,
+                })
+                .attach(&Target::System)
+                .is_ok(),
                 "`{mode}` is declared and refused"
             );
         }
@@ -416,6 +432,7 @@ mod tests {
         let Err(error) = Box::new(Prepare {
             mode: Mode::Trace,
             filter: None,
+            classic: false,
         })
         .attach(&Target::Iface("eth0".to_owned())) else {
             panic!("an interface names no task to migrate");

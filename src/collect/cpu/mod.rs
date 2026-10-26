@@ -76,6 +76,14 @@ pub fn factories() -> Vec<Factory> {
                     resolved.request.filter.clone(),
                 )?))
             }),
+            Factory::new("cpu.oncpu_time", "bpf:tp", |resolved| {
+                let mut prepared = oncpu_bpf::Prepare::new(
+                    resolved.request.mode,
+                    resolved.request.filter.clone(),
+                )?;
+                prepared.classic = true;
+                Ok(Box::new(prepared))
+            }),
             Factory::new("cpu.pressure", "fs:proc", |resolved| {
                 Ok(Box::new(pressure::Prepare(resolved.request.mode)))
             }),

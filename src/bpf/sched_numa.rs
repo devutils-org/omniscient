@@ -27,11 +27,11 @@
 //! nowhere else to be, so the scenario for it skips with that number rather
 //! than asserting anything; `docs/families/sched.md` says so.
 
-use std::os::fd::OwnedFd;
-
 use super::btf::Btf;
+use super::context::Record;
 use super::insn::{count_drop, helper, Insn, Program, BPF_DW, BPF_W, R10};
 use super::map::{map_failure, row_map, select_rows, Counters, Rows};
+use super::proc_events::Attached;
 use super::sched_common::{count_update_failure, read_field, text_of, E2BIG};
 use super::syscall;
 use crate::bpf::program::LICENSE;
@@ -114,7 +114,19 @@ impl NumaStick {
     }
 }
 
-fn instructions(btf: &Btf, rows_fd: i32, drops_fd: i32) -> Result<Vec<Insn>, String> {
+/// What the program reads a decision out of: the raw tracepoint's tasks,
+/// through BTF, or the classic `sched:sched_stick_numa` record (`bpf:tp`),
+/// which has both tasks' ids and both cpus and no comm.
+enum Source<'a> {
+    Raw(&'a Btf),
+    Classic(&'a Record),
+}
+
+fn instructions(source: Source, rows_fd: i32, drops_fd: i32) -> Result<Vec<Insn>, String> {
+    let btf = match source {
+        Source::Raw(btf) => btf,
+        Source::Classic(record) => return classic_instructions(record, rows_fd, drops_fd),
+    };
     let signature = btf.tracepoint_signature("sched_stick_numa")?;
     if signature != SIGNATURE {
         return Err(format!(
@@ -148,7 +160,31 @@ fn instructions(btf: &Btf, rows_fd: i32, drops_fd: i32) -> Result<Vec<Insn>, Str
     // The row map of this interval, taken once: a drain may swap it at any
     // instruction, and a lookup and an insert that named two maps would put
     // one occurrence in each. See `map::Rows`.
-    select_rows(&mut program, rows_fd, ROWS_SLOT, "no_rows");
+    count_row(&mut program, rows_fd, drops_fd, |program| {
+        read_field(
+            program,
+            ROW_VALUE + VALUE_COMM,
+            COMM_BYTES as i32,
+            7,
+            comm_offset,
+        )
+    });
+
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
+/// Counts one decision in the row the key on the stack names, creating it,
+/// with the comm `write_comm` writes, when it is the first; exits through
+/// `done`, which this emits.
+fn count_row(
+    program: &mut Program,
+    rows_fd: i32,
+    drops_fd: i32,
+    write_comm: impl FnOnce(&mut Program),
+) {
+    select_rows(program, rows_fd, ROWS_SLOT, "no_rows");
     program.push(row_map(1, ROWS_SLOT));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, ROW_KEY as i32));
@@ -162,13 +198,7 @@ fn instructions(btf: &Btf, rows_fd: i32, drops_fd: i32) -> Result<Vec<Insn>, Str
     program.label("first_decision");
     program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_COUNT, 1));
     // Read once, when the row is created: a task's name does not change.
-    read_field(
-        &mut program,
-        ROW_VALUE + VALUE_COMM,
-        COMM_BYTES as i32,
-        7,
-        comm_offset,
-    );
+    write_comm(program);
     program.push(row_map(1, ROWS_SLOT));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, ROW_KEY as i32));
@@ -178,7 +208,7 @@ fn instructions(btf: &Btf, rows_fd: i32, drops_fd: i32) -> Result<Vec<Insn>, Str
     program.push(Insn::call(helper::MAP_UPDATE_ELEM));
     program.jump_to("done", Insn::jsge_imm(0, 0, 0));
     count_update_failure(
-        &mut program,
+        program,
         drops_fd,
         DROP_KEY,
         &[(E2BIG, DROP_ROWS_FULL, "rows_not_full")],
@@ -189,12 +219,34 @@ fn instructions(btf: &Btf, rows_fd: i32, drops_fd: i32) -> Result<Vec<Insn>, Str
     program.jump_to("done", Insn::ja());
     // The slot held no map, which it always does; counted rather than assumed.
     program.label("no_rows");
-    count_drop(&mut program, drops_fd, DROP_KEY, DROP_ROWS_BUSY, "done");
+    count_drop(program, drops_fd, DROP_KEY, DROP_ROWS_BUSY, "done");
 
     program.label("done");
     program.push(Insn::mov64_imm(0, 0));
     program.push(Insn::exit());
+}
 
+/// The classic program: the record's source task and both cpus. The comm is
+/// left empty and read from `/proc` at the drain. Before the event took a
+/// pair of tasks (4.19, 5.4) its task fields are `pid` and `tgid`; after, the
+/// source's are `src_pid` and `src_tgid`.
+fn classic_instructions(record: &Record, rows_fd: i32, drops_fd: i32) -> Result<Vec<Insn>, String> {
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    let paired = record.has("src_pid");
+    for (field, at) in [
+        (if paired { "src_pid" } else { "pid" }, KEY_TID),
+        (if paired { "src_tgid" } else { "tgid" }, KEY_TGID),
+        ("src_cpu", KEY_SRC_CPU),
+        ("dst_cpu", KEY_DST_CPU),
+    ] {
+        record.load(&mut program, 1, 6, field, ROWS_SLOT - 8)?;
+        program.push(Insn::stx(BPF_W, R10, ROW_KEY + at, 1));
+    }
+    count_row(&mut program, rows_fd, drops_fd, |program| {
+        program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_COMM, 0));
+        program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_COMM + 8, 0));
+    });
     let instructions = program.build();
     super::insn::audit(&instructions)?;
     Ok(instructions)
@@ -211,8 +263,10 @@ pub struct NumaDrops {
 pub struct NumaProgram {
     rows: Rows,
     drops: Counters,
-    program: OwnedFd,
-    _link: OwnedFd,
+    attached: Attached,
+    /// Whether the program is on the classic tracepoint, whose rows are
+    /// named at the drain.
+    classic: bool,
 }
 
 impl NumaProgram {
@@ -222,7 +276,7 @@ impl NumaProgram {
     /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
     /// program's own counters can say an occurrence was never seen.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::program::skipped([&self.program])
+        crate::bpf::program::skipped(self.attached.program())
     }
 
     pub fn load() -> Result<Self, String> {
@@ -232,7 +286,7 @@ impl NumaProgram {
         let drops = Counters::create(COUNTER_SLOTS, "omn_numa_drop")
             .map_err(|error| map_failure("NUMA balancing drop counter", error))?;
 
-        let instructions = instructions(btf, rows.as_raw_fd(), drops.as_raw_fd())?;
+        let instructions = instructions(Source::Raw(btf), rows.as_raw_fd(), drops.as_raw_fd())?;
         let program = syscall::prog_load(
             syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
             &instructions,
@@ -251,8 +305,33 @@ impl NumaProgram {
         Ok(Self {
             rows,
             drops,
-            program,
-            _link: link,
+            attached: Attached::Raw {
+                program,
+                _link: link,
+            },
+            classic: false,
+        })
+    }
+
+    /// The classic tracepoint's form (`bpf:tp`), for a kernel without BTF.
+    pub fn load_classic() -> Result<Self, String> {
+        let rows = Rows::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, "omn_numa_rows")
+            .map_err(|error| map_failure("NUMA balancing map", error))?;
+        let drops = Counters::create(COUNTER_SLOTS, "omn_numa_drop")
+            .map_err(|error| map_failure("NUMA balancing drop counter", error))?;
+        let record = Record::of("sched", "sched_stick_numa")?;
+        let instructions = instructions(
+            Source::Classic(&record),
+            rows.as_raw_fd(),
+            drops.as_raw_fd(),
+        )?;
+        let attached =
+            Attached::classic("sched", "sched_stick_numa", &instructions, "omn_numa_stick")?;
+        Ok(Self {
+            rows,
+            drops,
+            attached,
+            classic: true,
         })
     }
 
@@ -268,7 +347,14 @@ impl NumaProgram {
         let mut rows = Vec::with_capacity(drained.entries.len());
         for (key, value) in &drained.entries {
             match NumaStick::decode(key, value) {
-                Some(row) => rows.push(row),
+                Some(mut row) => {
+                    if self.classic && row.comm.is_empty() {
+                        row.comm = std::fs::read_to_string(format!("/proc/{}/comm", row.tid))
+                            .map(|comm| comm.trim_end().to_owned())
+                            .unwrap_or_default();
+                    }
+                    rows.push(row)
+                }
                 None => losses.vanished += 1,
             }
         }
@@ -310,11 +396,58 @@ mod tests {
     /// timestamp -- and the clock invariant is checked by its absence. A
     /// reading nothing subtracts from is a number on an event that means
     /// nothing, and worse, invites someone to subtract two of them later.
+    /// The classic program reads 4.19's record: the source task's ids and
+    /// both cpus.
+    #[test]
+    fn the_classic_program_reads_the_source_task_and_both_cpus() {
+        let record = Record::from_layout(
+            "sched:sched_stick_numa",
+            super::super::attach::parse_layout(
+                "\tfield:pid_t src_pid;\toffset:8;\tsize:4;\tsigned:1;\n\
+                 \tfield:pid_t src_tgid;\toffset:12;\tsize:4;\tsigned:1;\n\
+                 \tfield:pid_t src_ngid;\toffset:16;\tsize:4;\tsigned:1;\n\
+                 \tfield:int src_cpu;\toffset:20;\tsize:4;\tsigned:1;\n\
+                 \tfield:int src_nid;\toffset:24;\tsize:4;\tsigned:1;\n\
+                 \tfield:pid_t dst_pid;\toffset:28;\tsize:4;\tsigned:1;\n\
+                 \tfield:pid_t dst_tgid;\toffset:32;\tsize:4;\tsigned:1;\n\
+                 \tfield:pid_t dst_ngid;\toffset:36;\tsize:4;\tsigned:1;\n\
+                 \tfield:int dst_cpu;\toffset:40;\tsize:4;\tsigned:1;\n\
+                 \tfield:int dst_nid;\toffset:44;\tsize:4;\tsigned:1;\n",
+            ),
+        );
+        let program = instructions(Source::Classic(&record), 3, 4).expect("a classic program");
+        for offset in [8, 12, 20, 40] {
+            assert!(
+                program.contains(&Insn::ldx(BPF_W, 1, 6, offset)),
+                "offset {offset}"
+            );
+        }
+        let old = Record::from_layout(
+            "sched:sched_stick_numa",
+            super::super::attach::parse_layout(
+                "\tfield:pid_t pid;\toffset:8;\tsize:4;\tsigned:1;\n\
+                 \tfield:pid_t tgid;\toffset:12;\tsize:4;\tsigned:1;\n\
+                 \tfield:pid_t ngid;\toffset:16;\tsize:4;\tsigned:1;\n\
+                 \tfield:int src_cpu;\toffset:20;\tsize:4;\tsigned:1;\n\
+                 \tfield:int src_nid;\toffset:24;\tsize:4;\tsigned:1;\n\
+                 \tfield:int dst_cpu;\toffset:28;\tsize:4;\tsigned:1;\n\
+                 \tfield:int dst_nid;\toffset:32;\tsize:4;\tsigned:1;\n",
+            ),
+        );
+        let program = instructions(Source::Classic(&old), 3, 4).expect("4.19's program");
+        for offset in [8, 12, 20, 28] {
+            assert!(
+                program.contains(&Insn::ldx(BPF_W, 1, 6, offset)),
+                "offset {offset}"
+            );
+        }
+    }
+
     #[test]
     fn the_program_reads_no_clock_because_it_measures_no_duration() {
         let Some(btf) = kernel_btf() else { return };
         const KTIME_GET_BOOT_NS: i32 = 125;
-        let called: Vec<i32> = instructions(&btf, 3, 4)
+        let called: Vec<i32> = instructions(Source::Raw(&btf), 3, 4)
             .expect("a program")
             .iter()
             .filter(|insn| insn.code == 0x85)
@@ -330,7 +463,7 @@ mod tests {
     fn the_count_is_accumulated_atomically() {
         let Some(btf) = kernel_btf() else { return };
         assert_eq!(
-            instructions(&btf, 3, 4)
+            instructions(Source::Raw(&btf), 3, 4)
                 .expect("a program")
                 .iter()
                 .filter(|insn| insn.code == 0xdb)
@@ -347,7 +480,7 @@ mod tests {
         let Some(btf) = kernel_btf() else { return };
         const ARG_DST_TASK: i16 = 16;
         assert!(
-            !instructions(&btf, 3, 4)
+            !instructions(Source::Raw(&btf), 3, 4)
                 .expect("a program")
                 .iter()
                 .any(|insn| insn.off == ARG_DST_TASK && (insn.regs >> 4) == 6),
@@ -363,7 +496,7 @@ mod tests {
                 .expect("a prototype"),
             SIGNATURE
         );
-        assert!(instructions(&btf, 3, 4).is_ok());
+        assert!(instructions(Source::Raw(&btf), 3, 4).is_ok());
     }
 
     #[test]
@@ -444,7 +577,7 @@ mod tests {
     #[test]
     fn the_row_map_is_taken_from_the_slot_once_per_run() {
         let Some(btf) = kernel_btf() else { return };
-        let program = instructions(&btf, 3, 4).expect("a program");
+        let program = instructions(Source::Raw(&btf), 3, 4).expect("a program");
         crate::bpf::map::assert_rows_taken_once(&program, 3);
     }
 }

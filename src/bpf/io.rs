@@ -918,9 +918,11 @@ fn classic_open_instructions(
     Ok(instructions)
 }
 
-/// The classic program on `block:block_rq_issue`, for `io.queue` (paired with
-/// the insert by device and sector) and `io.size` (alone): the record's
-/// device, sector, length and letters, the scope this run's own sighting.
+/// The classic program that closes: on `block:block_rq_issue` for `io.queue`
+/// (paired with the insert by device and sector) and `io.size` (alone), on
+/// `block:block_rq_complete` for `io.latency` (paired with the issue): the
+/// record's device, sector, length and letters, the scope this run's own
+/// sighting. The completion record has no `bytes`: its length is its sectors.
 fn classic_close_instructions(
     record: &Record,
     stage: Stage,
@@ -929,7 +931,7 @@ fn classic_close_instructions(
     output: Output,
     counters_fd: i32,
 ) -> Result<Vec<Insn>, String> {
-    let paired = stage == Stage::Queue;
+    let paired = matches!(stage, Stage::Queue | Stage::Latency);
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
     program.push(Insn::call(helper::KTIME_GET_NS));
@@ -944,8 +946,20 @@ fn classic_close_instructions(
     program.push(Insn::stx(BPF_W, R10, EV_DEV, 1));
     record.load(&mut program, 1, 6, "sector", PART)?;
     program.push(Insn::stx(BPF_DW, R10, EV_SECTOR, 1));
-    record.load(&mut program, 1, 6, "bytes", PART)?;
+    if record.has("bytes") {
+        record.load(&mut program, 1, 6, "bytes", PART)?;
+    } else {
+        record.load(&mut program, 1, 6, "nr_sector", PART)?;
+        program.push(Insn::lsh64_imm(1, 9));
+    }
     program.push(Insn::stx(BPF_W, R10, EV_BYTES, 1));
+    if stage == Stage::Latency {
+        program.push(Insn::stx(BPF_W, R10, EV_DONE_BYTES, 1));
+        // A negative errno, `blk_status_to_errno`'s, as the 5.15 raw
+        // tracepoint hands it over.
+        record.load(&mut program, 1, 6, "error", PART)?;
+        program.push(Insn::stx(BPF_W, R10, EV_STATUS, 1));
+    }
     // The operation's letters, where the request identity would be; the
     // drain turns them back into flags.
     record.copy(&mut program, 6, "rwbs", EV_REQ, 8)?;
@@ -977,24 +991,14 @@ fn classic_close_instructions(
         program.jump_to("publish", Insn::ja());
         program.label("unpaired");
     }
-    // Nothing opened this one, so the submitter is the current task, as the
-    // raw program reads it.
-    program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
-    program.push(Insn::stx(BPF_W, R10, EV_TID, 0));
-    program.push(Insn::rsh64_imm(0, 32));
-    program.push(Insn::stx(BPF_W, R10, EV_TGID, 0));
-    program.push(Insn::mov64_reg(1, R10));
-    program.push(Insn::add64_imm(1, EV_COMM as i32));
-    program.push(Insn::mov64_imm(2, 16));
-    program.push(Insn::call(helper::GET_CURRENT_COMM));
-    kept.push(&mut program, EV_TID - VAL_TID, "done", "close_kept");
-    program.push(Insn::stx(BPF_DW, R10, EV_OPEN_TS, 8));
-    let flags = if paired {
-        SCOPE_IS_OURS | NO_OPEN
+    if stage == Stage::Latency {
+        // Issued before the programs attached, or by a task this run does
+        // not keep: no interval, and not a loss.
+        count(&mut program, counters_fd, CLOSE_DROP_KEY, UNPAIRED, "done");
+        program.jump_to("done", Insn::ja());
     } else {
-        SCOPE_IS_OURS
-    };
-    program.push(Insn::st_imm(BPF_W, R10, EV_FLAGS, flags as i32));
+        unpaired_close(&mut program, kept, paired);
+    }
     program.label("publish");
     output.push(&mut program, 6, EVENT, RECORD_BYTES as i32);
     program.jump_to("done", Insn::jsge_imm(0, 0, 0));
@@ -1005,6 +1009,27 @@ fn classic_close_instructions(
     let instructions = program.build();
     super::insn::audit(&instructions)?;
     Ok(instructions)
+}
+
+/// A close that nothing opened, on the issue: the submitter is the current
+/// task, as the raw program reads it, and the record is published from now.
+fn unpaired_close(program: &mut Program, kept: Kept, paired: bool) {
+    program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
+    program.push(Insn::stx(BPF_W, R10, EV_TID, 0));
+    program.push(Insn::rsh64_imm(0, 32));
+    program.push(Insn::stx(BPF_W, R10, EV_TGID, 0));
+    program.push(Insn::mov64_reg(1, R10));
+    program.push(Insn::add64_imm(1, EV_COMM as i32));
+    program.push(Insn::mov64_imm(2, 16));
+    program.push(Insn::call(helper::GET_CURRENT_COMM));
+    kept.push(program, EV_TID - VAL_TID, "done", "close_kept");
+    program.push(Insn::stx(BPF_DW, R10, EV_OPEN_TS, 8));
+    let flags = if paired {
+        SCOPE_IS_OURS | NO_OPEN
+    } else {
+        SCOPE_IS_OURS
+    };
+    program.push(Insn::st_imm(BPF_W, R10, EV_FLAGS, flags as i32));
 }
 
 /// The operation's flags a classic record's `rwbs` letters stand for, as
@@ -1721,8 +1746,10 @@ impl BlockProgram {
     }
 
     /// The classic tracepoints (`bpf:tp`), for a kernel without BTF:
-    /// `io.queue` from `block_rq_insert` to `block_rq_issue`, paired by device
-    /// and sector, and `io.size` at the issue. No record carries a request's
+    /// `io.queue` from `block_rq_insert` to `block_rq_issue` and `io.latency`
+    /// from `block_rq_issue` to `block_rq_complete`, each paired by device and
+    /// sector, and `io.size` at the issue. `io.latency`'s submitter is the
+    /// task current at the issue, where the raw road reads the insert's. No record carries a request's
     /// pointer, its kernel stamp or its identity, so the scope is this run's
     /// own sighting on every event.
     pub fn load_classic(
@@ -1730,12 +1757,6 @@ impl BlockProgram {
         submitter: Submitter,
         requested_ring_bytes: usize,
     ) -> Result<Self, String> {
-        if stage == Stage::Latency {
-            return Err(
-                "`io.latency` has no classic program: diskstats serves it where BTF is missing"
-                    .to_owned(),
-            );
-        }
         let descendants = match submitter {
             Submitter::Process(root) => Some(Descendants::follow(root)?),
             _ => None,
@@ -1748,7 +1769,7 @@ impl BlockProgram {
         let counters = Counters::create(DROP_SLOTS, "omn_blk_count")
             .map_err(|error| map_failure("block drop counter", error))?;
         let inflight = match stage {
-            Stage::Queue => Some(
+            Stage::Queue | Stage::Latency => Some(
                 Hash::create(
                     CLASSIC_KEY_BYTES,
                     ENTRY_VALUE_BYTES,
@@ -1760,9 +1781,9 @@ impl BlockProgram {
             _ => None,
         };
         let inflight_fd = inflight.as_ref().map_or(-1, Hash::as_raw_fd);
-        let issue = Record::of("block", "block_rq_issue")?;
+        let closing = Record::of("block", stage.closes_at())?;
         let close = classic_close_instructions(
-            &issue,
+            &closing,
             stage,
             kept,
             inflight_fd,
@@ -1771,12 +1792,13 @@ impl BlockProgram {
         )?;
         // The open first, for the reason `load_into` gives.
         let mut classic = Vec::new();
-        if stage == Stage::Queue {
-            let insert = Record::of("block", "block_rq_insert")?;
-            let open = classic_open_instructions(&insert, kept, inflight_fd, counters.as_raw_fd())?;
+        if let Some(opens_at) = stage.opens_at() {
+            let opening = Record::of("block", opens_at)?;
+            let open =
+                classic_open_instructions(&opening, kept, inflight_fd, counters.as_raw_fd())?;
             classic.push(super::attach::tracepoint(
                 "block",
-                "block_rq_insert",
+                opens_at,
                 &open,
                 "omn_blk_open",
                 super::attach::Scope::System,
@@ -1784,7 +1806,7 @@ impl BlockProgram {
         }
         classic.push(super::attach::tracepoint(
             "block",
-            "block_rq_issue",
+            stage.closes_at(),
             &close,
             "omn_blk_close",
             super::attach::Scope::System,
@@ -1798,9 +1820,9 @@ impl BlockProgram {
                 .map_err(|error| format!("cannot hold the block program: {error}"))
         };
         let close_program = program(classic.last().expect("the issue program"))?;
-        let open_program = match stage {
-            Stage::Queue => Some(program(&classic[0])?),
-            _ => None,
+        let open_program = match stage.opens_at() {
+            Some(_) => Some(program(&classic[0])?),
+            None => None,
         };
         Ok(Self {
             ring,
@@ -1819,7 +1841,7 @@ impl BlockProgram {
                  scope is this run's own sighting"
                     .to_owned(),
             ),
-            status_is_errno: false,
+            status_is_errno: stage == Stage::Latency,
             descendants,
             _submitters: None,
             insert_program: None,
@@ -2940,5 +2962,33 @@ mod tests {
         // clobbered `dev` on the first Debian 10 run.
         assert!(CLASSIC_KEY + CLASSIC_KEY_BYTES as i16 <= HIST_VALUE);
         assert!(CLASSIC_KEY + CLASSIC_KEY_BYTES as i16 <= ENTRY_VALUE);
+    }
+
+    /// `io.latency`'s classic close reads 4.19's completion record, which has
+    /// no `bytes`: the length is its sectors, and the status its errno.
+    #[test]
+    fn the_classic_completion_reads_its_sectors_and_its_errno() {
+        let complete = Record::from_layout(
+            "block:block_rq_complete",
+            super::super::attach::parse_layout(
+                "\tfield:dev_t dev;\toffset:8;\tsize:4;\tsigned:0;\n\
+                 \tfield:sector_t sector;\toffset:16;\tsize:8;\tsigned:0;\n\
+                 \tfield:unsigned int nr_sector;\toffset:24;\tsize:4;\tsigned:0;\n\
+                 \tfield:int error;\toffset:28;\tsize:4;\tsigned:1;\n\
+                 \tfield:char rwbs[8];\toffset:32;\tsize:8;\tsigned:1;\n",
+            ),
+        );
+        let close = classic_close_instructions(
+            &complete,
+            Stage::Latency,
+            Kept::only(Submitter::Any),
+            3,
+            Output::PerfArray(4),
+            5,
+        )
+        .expect("the completion program");
+        assert!(close.contains(&Insn::ldx(BPF_W, 1, 6, 24)), "nr_sector");
+        assert!(close.contains(&Insn::lsh64_imm(1, 9)), "in bytes");
+        assert!(close.contains(&Insn::ldx(BPF_W, 1, 6, 28)), "error");
     }
 }

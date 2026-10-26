@@ -15,11 +15,14 @@
       requires: ["bpf", "btf", "raw_tracepoint:block_rq_issue(request *)", "raw_tracepoint:block_rq_complete(request *, blk_status_t, unsigned int)|(request *, int, unsigned int)", "bpf_map:ringbuf"]
       join: {key: "blk:rq@open_ts", match: scoped_eq, ttl: 30s}
       cost: med
+    # Paired by device and sector, as biolatency is without BTF: no request
+    # pointer, so no `blk` key to join on, and the submitter is the task the
+    # issue ran in (kblockd's worker, for a request a queue held).
     - id: "bpf:tp"
       requires: ["tracepoint:block:block_rq_issue", "tracepoint:block:block_rq_complete", "bpf"]
-      join: {key: "blk:rq@open_ts", match: scoped_eq, ttl: 30s}
       cost: med
-      equivalent: true
+      degraded: "no request pointer, so no blk key to join on; a request a queue held is
+                 credited to the worker that issued it, not to its submitter"
     - {id: "fs:tracefs", requires: ["tracefs"], cost: med, targets: {system: native},
        degraded: "no per-task attribution, no pushed-down filter"}
     # The block layer's own account, read around the window: the mean time

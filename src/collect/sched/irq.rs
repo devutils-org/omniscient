@@ -41,6 +41,9 @@ const DRAIN_INTERVAL: StdDuration = StdDuration::from_millis(100);
 pub struct Prepare {
     pub mode: Mode,
     pub filter: Option<FilterExpr>,
+    /// Through the classic `irq` tracepoints (`bpf:tp`), for a kernel
+    /// without BTF.
+    pub classic: bool,
 }
 
 impl Prepared for Prepare {
@@ -65,11 +68,15 @@ impl Prepared for Prepare {
                 ))
             }
         };
-        Ok(Box::new(IrqCollector::new(cpus, self.mode, self.filter)))
+        let mut collector = IrqCollector::new(cpus, self.mode, self.filter);
+        collector.classic = self.classic;
+        Ok(Box::new(collector))
     }
 }
 
 pub struct IrqCollector {
+    /// Whether the programs go on the classic tracepoints.
+    classic: bool,
     /// The cpus a `--cpu` run asked about, or none for the machine.
     ///
     /// Applied here rather than in the program, and that is a real difference:
@@ -101,6 +108,7 @@ impl IrqCollector {
         Self {
             cpus,
             mode,
+            classic: false,
             program: None,
             losses: Losses::default(),
             counts: KernelCounts::default(),
@@ -339,7 +347,11 @@ impl Collector for IrqCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        self.program = Some(IrqProgram::load()?);
+        self.program = Some(if self.classic {
+            IrqProgram::load_classic()?
+        } else {
+            IrqProgram::load()?
+        });
         self.window_opened_ns = monotonic_ns();
         self.run_opened_ns = self.window_opened_ns;
         Ok(())
@@ -387,6 +399,14 @@ impl Collector for IrqCollector {
              handlers that landed inside it taken out"
                 .to_owned(),
         );
+        if self.classic {
+            notes.push(
+                "through the classic `irq` tracepoints: a hard row's `name` is its line's \
+                 handlers as /proc/interrupts lists them at the drain -- every handler of a \
+                 shared line, where the raw program names the one that ran"
+                    .to_owned(),
+            );
+        }
         if self.off_target > 0 {
             notes.push(format!(
                 "{} handler runs on other cpus were measured and set aside: the programs run on \
@@ -475,7 +495,11 @@ mod tests {
     }
 
     fn prepare(mode: Mode) -> Box<Prepare> {
-        Box::new(Prepare { mode, filter: None })
+        Box::new(Prepare {
+            mode,
+            filter: None,
+            classic: false,
+        })
     }
 
     /// Both modes the catalog declares must be served, or a request the

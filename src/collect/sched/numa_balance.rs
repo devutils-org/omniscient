@@ -45,6 +45,9 @@ const NODE_ROOT: &str = "/sys/devices/system/node";
 pub struct Prepare {
     pub mode: Mode,
     pub filter: Option<FilterExpr>,
+    /// Through the classic `sched:sched_stick_numa` (`bpf:tp`), for a kernel
+    /// without BTF.
+    pub classic: bool,
 }
 
 impl Prepared for Prepare {
@@ -63,7 +66,9 @@ impl Prepared for Prepare {
                 target.kind()
             ));
         }
-        Ok(Box::new(NumaCollector::new(self.mode, self.filter)))
+        let mut collector = NumaCollector::new(self.mode, self.filter);
+        collector.classic = self.classic;
+        Ok(Box::new(collector))
     }
 }
 
@@ -141,6 +146,8 @@ fn parse_cpulist(text: &str) -> Vec<u32> {
 
 pub struct NumaCollector {
     mode: Mode,
+    /// Whether the program goes on the classic tracepoint.
+    classic: bool,
     program: Option<NumaProgram>,
     nodes: NodeMap,
     losses: Losses,
@@ -157,6 +164,7 @@ impl NumaCollector {
     pub fn new(mode: Mode, predicate: Option<FilterExpr>) -> Self {
         Self {
             mode,
+            classic: false,
             program: None,
             nodes: NodeMap::default(),
             losses: Losses::default(),
@@ -311,7 +319,11 @@ impl Collector for NumaCollector {
     fn start(&mut self) -> Result<(), String> {
         // Read once: a cpu does not change node while a machine is running.
         self.nodes = NodeMap::read();
-        self.program = Some(NumaProgram::load()?);
+        self.program = Some(if self.classic {
+            NumaProgram::load_classic()?
+        } else {
+            NumaProgram::load()?
+        });
         self.window_opened_ns = monotonic_ns();
         self.run_opened_ns = self.window_opened_ns;
         Ok(())
@@ -397,7 +409,11 @@ mod tests {
     }
 
     fn prepare(mode: Mode) -> Box<Prepare> {
-        Box::new(Prepare { mode, filter: None })
+        Box::new(Prepare {
+            mode,
+            filter: None,
+            classic: false,
+        })
     }
 
     #[test]

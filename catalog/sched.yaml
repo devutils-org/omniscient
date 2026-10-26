@@ -239,9 +239,11 @@
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)"], cost: low,
        modes: [count], targets: {system: native, pid: native, tid: native, launch: native, cgroup: native},
        filter_fields: [comm, pid, ppid], equivalent: true, drained: true}
-    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "bpf"], cost: low,
-       modes: [count], targets: {system: native, pid: native, tid: native, launch: native, cgroup: native},
-       filter_fields: [comm, pid, ppid], equivalent: true}
+    # The classic record names a task by its id alone: no cgroup.
+    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "tracepoint:task:task_newtask",
+         "tracepoint:sched:sched_process_free", "bpf"], cost: low,
+       modes: [count], targets: {system: native, pid: native, tid: native, launch: native},
+       filter_fields: [comm, pid, ppid], equivalent: true, drained: true}
   modes: [count, trace]
   emits: [rate, summary, topk, raw]
   targets: {system: native, pid: native, tid: native, cpu: native, launch: native, cgroup: native}
@@ -263,7 +265,11 @@
   unit: count
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_migrate_task(task_struct *, int)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)", "bpf_map:ringbuf"], cost: low, drained: true}
-    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_migrate_task", "bpf"], cost: low, equivalent: true}
+    # The classic record names a task by its id alone, so no cgroup: one is
+    # left to the perf counter below.
+    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_migrate_task", "tracepoint:task:task_newtask",
+         "tracepoint:sched:sched_process_free", "bpf"], cost: low, drained: true,
+       targets: {system: native, pid: native}, equivalent: true}
     # The perf software counter `cpu.migrations` reads, where no program can
     # be loaded: how many times the target moved.
     - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_CPU_MIGRATIONS"], cost: low, modes: [count],
@@ -393,7 +399,10 @@
   unit: ns
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:irq_handler_entry(int, irqaction *)", "raw_tracepoint:irq_handler_exit(int, irqaction *, int)", "raw_tracepoint:softirq_entry(unsigned int)", "raw_tracepoint:softirq_exit(unsigned int)", "bpf_map:ringbuf"], cost: med, drained: true}
-    - {id: "bpf:tp", requires: ["tracepoint:irq:irq_handler_entry", "tracepoint:irq:irq_handler_exit", "tracepoint:irq:softirq_entry", "tracepoint:irq:softirq_exit", "bpf"], cost: med, equivalent: true}
+    # A hard row is named from /proc/interrupts at the drain: a shared line
+    # gives all its handlers, where the raw program names the one that ran.
+    - {id: "bpf:tp", requires: ["tracepoint:irq:irq_handler_entry", "tracepoint:irq:irq_handler_exit", "tracepoint:irq:softirq_entry", "tracepoint:irq:softirq_exit", "bpf"], cost: med, drained: true,
+       degraded: "a shared interrupt line's row names every handler on the line, not the one that ran"}
     # Each cpu's time in interrupt handlers as the scheduler accounts it, in
     # clock ticks: exact where the kernel accounts irq time
     # (CONFIG_IRQ_TIME_ACCOUNTING, the distributions' default), the ticks that
@@ -531,7 +540,10 @@
   unit: count
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_stick_numa(task_struct *, int, task_struct *, int)", "bpf_map:ringbuf"], cost: low, drained: true}
-    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_stick_numa", "bpf"], cost: low, equivalent: true}
+    # The classic record has both tasks' ids and both cpus; a row's comm is
+    # read from /proc at the drain, where the raw program reads the task's.
+    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_stick_numa", "bpf"], cost: low, drained: true,
+       degraded: "a task's comm is read at the drain, so one that exited before it has none"}
   modes: [trace, count]
   emits: [rate, topk, raw, summary]
   targets: {system: native}

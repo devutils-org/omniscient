@@ -404,6 +404,14 @@ pub fn factories() -> Vec<Factory> {
                 mode: resolved.request.mode,
                 // Applied per drained row; see `migrations::Prepare`.
                 filter: resolved.request.filter.clone(),
+                classic: false,
+            }))
+        }),
+        Factory::new("sched.migrations", "bpf:tp", |resolved| {
+            Ok(Box::new(migrations::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+                classic: true,
             }))
         }),
         Factory::new("sched.lock", "bpf:raw_tp", |resolved| {
@@ -450,12 +458,28 @@ pub fn factories() -> Vec<Factory> {
             Ok(Box::new(irq::Prepare {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
+                classic: false,
+            }))
+        }),
+        Factory::new("sched.irq", "bpf:tp", |resolved| {
+            Ok(Box::new(irq::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+                classic: true,
             }))
         }),
         Factory::new("sched.numa_balance", "bpf:raw_tp", |resolved| {
             Ok(Box::new(numa_balance::Prepare {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
+                classic: false,
+            }))
+        }),
+        Factory::new("sched.numa_balance", "bpf:tp", |resolved| {
+            Ok(Box::new(numa_balance::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+                classic: true,
             }))
         }),
         Factory::new("sched.mutex", "preload", |resolved| {
@@ -485,6 +509,14 @@ pub fn factories() -> Vec<Factory> {
                 mode: resolved.request.mode,
                 // Applied per drained row; see `migrations::Prepare`.
                 filter: resolved.request.filter.clone(),
+                classic: false,
+            }))
+        }),
+        Factory::new("sched.switches", "bpf:tp", |resolved| {
+            Ok(Box::new(switch_count::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+                classic: true,
             }))
         }),
         Factory::new("sched.switches", "pmu:sw", |resolved| {

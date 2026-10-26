@@ -184,7 +184,11 @@
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_stat_runtime(task_struct *, u64)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)"],
        cost: low, modes: [poll], drained: true,
        targets: {system: native, cgroup: native, pid: native, tid: native, launch: native}}
-    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "bpf"], cost: low, equivalent: true}
+    # The same increments from the classic record, which names a task by
+    # its id alone: no cgroup, left to cpu.stat below.
+    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_stat_runtime", "tracepoint:task:task_newtask",
+         "tracepoint:sched:sched_process_free", "bpf"], cost: low, modes: [poll], drained: true,
+       targets: {system: native, pid: native, tid: native, launch: native}, equivalent: true}
     - {id: "fs:cgroup", requires: ["cgroup2:cpu.stat"], cost: free, modes: [poll],
        targets: {cgroup: native, container: native}, filter_fields: [],
        degraded: "aggregated per cgroup, no stacks and no per-thread attribution"}
@@ -196,8 +200,8 @@
     - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_TASK_CLOCK"], cost: low, modes: [count],
        targets: {pid: native, tid: native, cgroup: native, launch: native},
        degraded: "the target's threads in one total, read once when the window closes: no series and no per-thread split"}
-  modes: [trace, poll, count]
-  emits: [summary, timeline, hist, rate, raw]
+  modes: [poll, count]
+  emits: [summary, timeline, rate, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, launch: native, container: native}
   keys: [task, cgroup]
   filter_fields: [comm]

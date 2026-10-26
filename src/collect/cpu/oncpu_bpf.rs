@@ -24,13 +24,20 @@ pub struct Prepare {
     /// credits a `bpf` backend with filtering, and this program filters by
     /// target only.
     pub filter: Option<FilterExpr>,
+    /// Through the classic `sched:sched_stat_runtime` (`bpf:tp`), for a
+    /// kernel without BTF.
+    pub classic: bool,
 }
 
 impl Prepare {
     /// Refuses a mode the program does not serve before anything is launched.
     pub fn new(mode: Mode, filter: Option<FilterExpr>) -> Result<Self, String> {
         match mode {
-            Mode::Poll { .. } => Ok(Self { mode, filter }),
+            Mode::Poll { .. } => Ok(Self {
+                mode,
+                filter,
+                classic: false,
+            }),
             other => Err(refusal(other)),
         }
     }
@@ -40,7 +47,7 @@ impl Prepare {
 /// per increment would be a stream nobody asked to pay for.
 fn refusal(mode: Mode) -> String {
     format!(
-        "`cpu.oncpu_time` through `bpf:raw_tp` adds each thread's time up in the kernel and is \
+        "`cpu.oncpu_time` through its eBPF program adds each thread's time up in the kernel and is \
          drained every poll, which is `--mode poll`; `{mode}` would be one event per slice, \
          which no backend of this build records"
     )
@@ -57,12 +64,16 @@ impl Prepared for Prepare {
                  thread with --tid, a cgroup with --cgroup, or use --system"
             )
         })?;
-        Ok(Box::new(OnCpuThreads::new(whose, self.filter)))
+        let mut collector = OnCpuThreads::new(whose, self.filter);
+        collector.classic = self.classic;
+        Ok(Box::new(collector))
     }
 }
 
 pub struct OnCpuThreads {
     whose: Whose,
+    /// Whether the program goes on the classic tracepoint.
+    classic: bool,
     program: Option<OnCpuProgram>,
     predicate: Option<FilterExpr>,
     losses: Losses,
@@ -79,6 +90,7 @@ impl OnCpuThreads {
     pub fn new(whose: Whose, predicate: Option<FilterExpr>) -> Self {
         Self {
             whose,
+            classic: false,
             program: None,
             predicate,
             losses: Losses::default(),
@@ -188,7 +200,11 @@ impl Collector for OnCpuThreads {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        self.program = Some(OnCpuProgram::load(self.whose)?);
+        self.program = Some(if self.classic {
+            OnCpuProgram::load_classic(self.whose)?
+        } else {
+            OnCpuProgram::load(self.whose)?
+        });
         self.last_ns = monotonic_ns();
         Ok(())
     }
