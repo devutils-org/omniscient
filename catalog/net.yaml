@@ -347,8 +347,8 @@
     # at the families' own receive functions, the way the sends already are.
     - {id: "bpf:fentry:families", requires: ["btf", "bpf", "fentry:inet_recvmsg", "fentry:inet_sendmsg"], cost: low, drained: true,
        degraded: "receives timed at the families' own recvmsg, as the sends are: inet, inet6 and unix sockets only, because sock_recvmsg is off this kernel's syscall path"}
-    - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: med, drained: true,
-       degraded: "no BTF: struct offsets are not portable across kernels"}
+    - {id: "bpf:kprobe", requires: ["btf", "kprobe", "bpf", "kprobe:sock_recvmsg", "kprobe:inet_sendmsg"], cost: med, drained: true,
+       degraded: "kprobe pairs rather than trampolines, and no socket cookie -- a kprobe program is not given bpf_get_socket_cookie -- so a call is keyed by its task and interface, not by its socket, and joins nothing keyed by sock"}
   modes: [trace, count]
   emits: [hist, topk, raw, summary]
   targets: {pid: native, tid: native, cgroup: bpf_only, launch: native, container: bpf_only, system: native}

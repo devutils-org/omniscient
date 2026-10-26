@@ -51,7 +51,7 @@
 
 use crate::bpf::btf::Btf;
 use crate::bpf::fentry::{
-    self, HistogramProgram, HistogramSpec, Narrowing, Timed, BPF_H, FILL_AUX, FILL_DEV,
+    self, HistogramProgram, HistogramSpec, Kprobe, Narrowing, Timed, BPF_H, FILL_AUX, FILL_DEV,
     FILL_OBJECT, GET_SOCKET_COOKIE,
 };
 use crate::bpf::insn::{read_narrow, read_pointer, Insn, Program, BPF_DW, BPF_W, R10};
@@ -210,10 +210,47 @@ fn socket_identity(program: &mut Program, at: &Offsets) {
     program.label("fill_done");
 }
 
+/// [`socket_identity`] for a kprobe, at the entry: the socket is a register's
+/// value and every field a probe read. No cookie: `bpf_get_socket_cookie` is
+/// not offered to a kprobe program, and a number in its place that is not
+/// the cookie would join the wrong sockets, so the row is the task's.
+fn socket_identity_probed(program: &mut Program, at: &Offsets, arg0: i16) {
+    program.push(Insn::ldx(BPF_DW, 7, 6, arg0));
+    read_pointer(program, KPROBE_SCRATCH, 7, 7, at.sk);
+    program.jump_to("fill_done", Insn::jeq_imm(7, 0, 0));
+    read_narrow(program, KPROBE_SCRATCH, 2, 7, at.family);
+    program.push(Insn::ldx(BPF_W, 1, R10, KPROBE_SCRATCH));
+    program.push(Insn::lsh64_imm(1, 16));
+    program.push(Insn::stx(BPF_W, R10, FILL_AUX, 1));
+    read_narrow(program, KPROBE_SCRATCH, 2, 7, at.dport);
+    program.push(Insn::ldx(BPF_W, 1, R10, KPROBE_SCRATCH));
+    program.push(Insn::ldx(BPF_W, 2, R10, FILL_AUX));
+    program.push(Insn::add64_reg(1, 2));
+    program.push(Insn::stx(BPF_W, R10, FILL_AUX, 1));
+    route_interface(program, &at.route);
+    program.label("fill_done");
+}
+
+/// Eight bytes of a kprobe entry's stack its probe reads land in, clear of
+/// the stamp and of [`ROUTE_SCRATCH`].
+const KPROBE_SCRATCH: i16 = -32;
+
 impl SocketProgram {
-    pub fn load(narrowing: Narrowing, receives: Receives) -> Result<Self, String> {
+    /// `kprobe`: `bpf:kprobe`, kprobe pairs on the generic receive and the
+    /// families' sends, for a kernel built without the function tracer.
+    pub fn load(narrowing: Narrowing, receives: Receives, kprobe: bool) -> Result<Self, String> {
         let btf = crate::bpf::kernel_btf()?;
         let offsets = Offsets::read(btf)?;
+        let pair = if kprobe {
+            Some((
+                btf.function_argument(0)? as i16,
+                Kprobe {
+                    ret: btf.return_register()? as i16,
+                },
+            ))
+        } else {
+            None
+        };
         let mut timed = Vec::new();
         let mut missing = Vec::new();
         match receives {
@@ -245,7 +282,10 @@ impl SocketProgram {
             }
         }
         let fill = |program: &mut Program, _: &Timed| {
-            socket_identity(program, &offsets);
+            match pair {
+                Some((arg0, _)) => socket_identity_probed(program, &offsets, arg0),
+                None => socket_identity(program, &offsets),
+            }
             Ok(())
         };
         let inner = HistogramProgram::load(HistogramSpec {
@@ -256,7 +296,7 @@ impl SocketProgram {
             fill: &fill,
             max_pending: MAX_PENDING,
             max_rows: MAX_ROWS,
-            kprobe: None,
+            kprobe: pair.map(|(_, kprobe)| kprobe),
         })?;
         Ok(Self { inner, missing })
     }

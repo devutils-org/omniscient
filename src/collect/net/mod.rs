@@ -186,6 +186,17 @@ pub fn factories() -> Vec<Factory> {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
                 receives: crate::bpf::net_socket::Receives::Generic,
+                kprobe: false,
+            }))
+        }),
+        // Kprobe pairs on the same functions, for a kernel built without the
+        // function tracer.
+        Factory::new("net.socket", "bpf:kprobe", |resolved| {
+            Ok(Box::new(socket::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+                receives: crate::bpf::net_socket::Receives::Generic,
+                kprobe: true,
             }))
         }),
         // The same, with the receives at the families' own functions, for a
@@ -195,6 +206,7 @@ pub fn factories() -> Vec<Factory> {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
                 receives: crate::bpf::net_socket::Receives::Families,
+                kprobe: false,
             }))
         }),
         // A request the server declared, followed in the task serving it --

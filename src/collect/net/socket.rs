@@ -24,6 +24,8 @@ pub struct Prepare {
     pub filter: Option<FilterExpr>,
     /// Where the receives are timed: the backend's choice.
     pub receives: Receives,
+    /// `bpf:kprobe`: kprobe pairs, the rows keyed by task with no cookie.
+    pub kprobe: bool,
 }
 
 impl Prepared for Prepare {
@@ -38,8 +40,9 @@ impl Prepared for Prepare {
         }
         let narrowing = narrowing("net.socket", target)?;
         let receives = self.receives;
+        let kprobe = self.kprobe;
         let load = Box::new(move || -> Result<Box<dyn Rows>, String> {
-            let program = SocketProgram::load(narrowing, receives)?;
+            let program = SocketProgram::load(narrowing, receives, kprobe)?;
             if !program.missing.is_empty() {
                 // Said where it is decided rather than guessed at later: a
                 // family whose send function is absent contributes receives
