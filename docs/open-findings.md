@@ -14608,3 +14608,27 @@ with the machine.
   cited on-cpu time was 38 ms from `timer.cpu_ns` where 27 are allowed. Two
   different checks, each passing in the other run: noise on cases measured
   against the live machine, not either one's defect, until one repeats.
+
+### For the flaky tally, after the twenty-ninth and thirtieth waves (2026-10-27)
+
+The waves' last full run (`cargo test --workspace --no-fail-fast` at
+`dd2e7b6`, under `systemd-run`, load 5 to 7 from other sessions): 3325
+passed, 3 failed.
+
+- `cases::every_case_names_its_known_cause_both_ways`:
+  `http-server-stdlib/a-large-listing/mcp`'s cited on-cpu time 29.4 ms from
+  `client.handler_run_ns` where 28.9 are allowed. `sqlite3-durability`'s
+  `cli` checks fail in every run on this machine, before these waves too: the
+  disk syncs faster than the program computes, so the first suspect is on-cpu;
+  and with `perf_event_paranoid` back at 2 the kernel leaf is an address,
+  which the run now says is paranoid's doing rather than `kptr_restrict`'s.
+- `cross_machine::a_memory_limit_turns_a_cached_read_into_device_reads_and_each_byte_carries_its_rung`:
+  half the cgroup's pgsteal outside the program's intervals (14692 of 40036),
+  failing alone too, and one run in two at `d6bd533` without the thirtieth
+  wave: the reclaim landing after the program's window, already filed above.
+- `reference::pairs_sysstat`'s `vmstat-r` (5.8 runnable against 1.5, the
+  machine's other sessions counted): passed alone.
+
+Earlier in the twenty-ninth wave's run, under load 11, `pairs_io`'s
+`vfsstat-reads` and `pairs_bpftrace`'s `biolatency` failed alone too: both
+count the whole machine, which other sessions were reading from and writing to.
