@@ -272,11 +272,32 @@ serde as those strings) and `stack::unwind::Debuginfod`:
 `Module::read` asks only for a file that has no `.symtab` of its own, by the
 build id in its `NT_GNU_BUILD_ID` note, and places the debug file's symbols
 through the *mapped* file's load segments. Each module's `NameOrigin` --
-`SymbolTable`, `DynamicSymbols`, `Debuginfod { build_id, server }` (`server:
+`SymbolTable`, `DynamicSymbols`, `LocalDebug(path)`, `Debuginfod { build_id, server }` (`server:
 None` when the cache answered), `PerfMap { lines }` or `None(reason)` -- is
 kept, and the profile's facts say *"names came from -- calltree-strip:
 debuginfod, http://..., build id ...; libc.so.6: its dynamic symbols only"*. A
 frame still unnamed stays `lib+0xoffset`.
+
+**Separate debug files in local mode.** For a stripped ELF, both symbol modes
+first check `/usr/lib/debug/.build-id/xx/rest.debug` and the existing elfutils
+cache described above. The debug ELF must carry the mapped file's build ID;
+a mismatched or unreadable file is ignored. This lookup does not contact a
+server or create cache directories. Installed debug files carry `debug-file`
+frame provenance; cached debuginfod files carry `debuginfod` with no server.
+
+**LLVM/XLA jitdump.** A runtime may write a binary `jit-<pid>.dump` under
+`JITDUMPDIR` or `~/.debug/jit` instead of a perf map. Omn discovers the full
+path from the runtime's executable mmap marker, so a custom directory needs
+no collector flag. Complete `JIT_CODE_LOAD` and `JIT_CODE_MOVE` records name
+anonymous executable addresses, in either byte order. A partially appended
+record waits for the next read. Malformed records stop that file's reader
+and are reported. The frame's provenance is `jitdump`; the names fact cites
+the dump path. Code bytes, source lines and unwind records are skipped.
+Names use the latest load/move mapping; sample timestamps do not disambiguate
+address reuse, which the collection notes disclose. Existing named stacks
+are not rewritten when code is moved or replaced. Jitdump currently supplies
+names, not additional stack frames. XLA must actually compile and enable its
+LLVM PerfJITEventListener; Omn cannot recover names a runtime never writes.
 
 **The perf map, under `--symbols local` too.** An address in an anonymous
 executable mapping no file names -- a JIT's code, CPython's trampolines -- is

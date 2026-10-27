@@ -67,6 +67,7 @@ pub(super) struct Driven {
     /// closed, or it was never attached.
     pub(super) closed_because: Vec<Option<String>>,
     pub(super) stopped_because: String,
+    pub(super) failures: Vec<Option<String>>,
     /// What the escalation said about each request once the run was over.
     pub(super) escalated: Vec<Vec<String>>,
     pub(super) drains: Vec<Drains>,
@@ -81,6 +82,8 @@ pub(super) enum Finished {
     Gone,
     /// Its window closed, or never opened on anything.
     Window,
+    /// Its window opened, but the collector could not attach.
+    Failed,
 }
 
 /// Drives a set of collectors over one run, and closes it.
@@ -162,6 +165,7 @@ pub(super) fn drive(
             })
             .collect(),
         closed_because: vec![None; count],
+        failures: vec![None; count],
         // Only a run serving several collectors has to share its cpu time
         // out between them, and only then are the two clock reads a round
         // worth taking: with one collector the share is the whole.
@@ -269,7 +273,14 @@ pub(super) fn drive(
             ledger.finished[index].is_some()
                 || (plans[index].held && matches!(slots[index], Slot::Waiting(_)))
         };
-        if !waiting && (0..count).all(settled) && ledger.finished.iter().any(Option::is_some) {
+        if !waiting
+            && (0..count).all(settled)
+            && ledger.finished.iter().any(Option::is_some)
+            // An attach failure must not end a running workload. Wait for its
+            // normal exit (or the requested duration), even if nothing attached.
+            && !(ledger.finished.contains(&Some(Finished::Failed))
+                && (wake.is_some() || notice_exit))
+        {
             let done: Vec<Finished> = ledger.finished.iter().flatten().copied().collect();
             if done.iter().all(|kind| *kind == Finished::Gone) {
                 break "every target of the run went away".to_owned();
@@ -436,6 +447,14 @@ pub(super) fn drive(
         .fold(next_due_ns, |next, at| {
             Some(next.map_or(at, |next| next.min(at)))
         });
+        // A failed last collector leaves no cadence. Keep observing the
+        // workload without busy-spinning until its exit or explicit deadline.
+        let next_due_ns = next_due_ns.or_else(|| {
+            ledger
+                .finished
+                .contains(&Some(Finished::Failed))
+                .then(|| monotonic_ns().saturating_add(50_000_000))
+        });
         if let Some(next_due_ns) = next_due_ns {
             let remaining_ns = next_due_ns.saturating_sub(monotonic_ns());
             if remaining_ns > 0 {
@@ -476,6 +495,7 @@ pub(super) fn drive(
         watched: ledger.watched,
         closed_because: ledger.closed_because,
         stopped_because,
+        failures: ledger.failures,
         escalated,
         drains: ledger.drains,
     }
@@ -510,6 +530,7 @@ pub(super) struct Ledger {
     pub(super) watched: Vec<Watched>,
     pub(super) closed_because: Vec<Option<String>>,
     pub(super) attributing: bool,
+    pub(super) failures: Vec<Option<String>>,
     /// Each request's drops placed in time, and the total they sum to.
     pub(super) drains: Vec<Drains>,
 }
@@ -678,13 +699,15 @@ impl Ledger {
                 // A window that asked for something and got nothing: a loss,
                 // not an empty series that reads as a quiet one.
                 self.losses[index].failed_reads += 1;
+                self.failures[index] = Some(format!("`{source}` could not attach: {reason}"));
                 self.losses[index].note(format!(
                     "`{source}` could not be attached {at:.3} s into the run, so nothing was \
                      collected over its window: {reason}"
                 ));
-                self.closed_because[index] = Some(format!("never attached: {reason}"));
+                self.closed_because[index] =
+                    Some(format!("never attached: attach failed: {reason}"));
                 slots[index] = Slot::Missed;
-                self.finished[index] = Some(Finished::Window);
+                self.finished[index] = Some(Finished::Failed);
             }
         }
     }

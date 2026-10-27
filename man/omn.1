@@ -736,7 +736,8 @@ copies the stack on every sample: far more volume and cost than frame pointers.
 .BI \-\-symbols " SOURCE"
 Where stack names come from:
 .B local
-(default), the files the target mapped, or
+(default), the files the target mapped, matching separate debug files in
+/usr/lib/debug/.build-id and the existing debuginfod cache, or
 .BR debuginfod :
 those first, then the servers in
 .B DEBUGINFOD_URLS
@@ -747,7 +748,19 @@ Read by
 in this build; on any other source it is refused with exit code 3.
 In a session file, a request's
 .BR symbols: .
+.PP
+Anonymous executable frames may be named by /tmp/perf-<pid>.map or a runtime's
+mapped jit-<pid>.dump marker (LLVM/XLA, JITDUMPDIR or ~/.debug/jit).
+Jitdump supplies names from code-load and code-move records, not unwinding.
+Address reuse uses the latest mapping and is not resolved by sample timestamp.
 .SS Output
+.TP
+.BI \-\-program-stdout " FILE"
+Redirect the launched program's standard output to FILE, created or truncated.
+With trace -r N, keep each run as FILE.1 through FILE.N; FILE holds the last run.
+.TP
+.BI \-\-program-stderr " FILE"
+The same for standard error. Using the same FILE combines both streams.
 .TP
 .BI \-\-format " FORMAT"
 .BR text " (default), " json ", " yaml ", " toml ", " ndjson ", " folded ", "

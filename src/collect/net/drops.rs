@@ -420,11 +420,10 @@ impl Collector for DropCollector {
             crate::stack::prime_kernel_symbols();
             let symbolizer = crate::stack::Symbolizer::for_process(std::process::id() as i32);
             if !symbolizer.kernel_symbols_available() {
-                self.notes.push(
-                    "/proc/kallsyms gives no addresses to this process (kptr_restrict), so the \
-                     stacks' frames are addresses rather than names"
-                        .to_owned(),
-                );
+                self.notes.push(format!(
+                    "{}; stacks carry addresses rather than names",
+                    crate::stack::kernel_visibility_note()
+                ));
             }
             self.symbolizer = Some(symbolizer);
         }

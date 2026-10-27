@@ -2490,7 +2490,7 @@ fn hottest(run: &Run, task: &str) -> Option<Naming> {
                 .and_then(|id| results.stacks.get(&(id as u64)))
                 .map(Vec::as_slice)
         });
-    let says = super::diff::hottest(samples, &perf, &program(run))?;
+    let says = super::diff::hottest(samples, &perf, &program(run, task))?;
     Some(Naming {
         source: results.source.clone(),
         evidence: Evidence::Key,
@@ -2502,17 +2502,36 @@ fn hottest(run: &Run, task: &str) -> Option<Naming> {
 
 /// The names the launched program's own frames may be spelled with: the
 /// file its `argv[0]` maps, symlinks followed, then `argv[0]`'s base name
-/// (`diff::executable_names`). None for an attached task.
-fn program(run: &Run) -> Vec<String> {
-    run.served
-        .iter()
-        .find_map(|served| match &served.request.target {
-            Target::Launch(argv) => argv
-                .first()
-                .map(|first| super::diff::executable_names(first)),
-            _ => None,
-        })
-        .unwrap_or_default()
+/// (`diff::executable_names`), preferring the task's recorded executable over
+/// a launcher that may have exec'd another program.
+fn program(run: &Run, task: &str) -> Vec<String> {
+    // Names from a symbol table no longer contain their module. Use the
+    // executable recorded while this task was alive, including after exec
+    // through a wrapper shell, so better symbol coverage does not erase the
+    // evidence that the program runs in an interpreter.
+    let mut names = Vec::new();
+    for result in &run.output.results {
+        if let Some(executable) = result.provenance.executables.get(task) {
+            for name in super::diff::executable_names(executable) {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+    }
+    if names.is_empty() {
+        names = run
+            .served
+            .iter()
+            .find_map(|served| match &served.request.target {
+                Target::Launch(argv) => argv
+                    .first()
+                    .map(|first| super::diff::executable_names(first)),
+                _ => None,
+            })
+            .unwrap_or_default();
+    }
+    names
 }
 
 /// Where the task's blocks in one state began, by the heaviest stack.
@@ -2537,7 +2556,7 @@ fn blocking_stack(run: &Run, task: &str, state: &str) -> Option<Naming> {
     let (id, amount) = by_stack.into_iter().max_by(|a, b| a.1.total_cmp(&b.1))?;
     let frames = results.stacks.get(&id)?;
     let perf = super::diff::PerfMapNames::of_run(&run.output.results);
-    let leafward = super::diff::leafward(frames, &perf, &program(run));
+    let leafward = super::diff::leafward(frames, &perf, &program(run, task));
     Some(Naming {
         source: results.source.clone(),
         evidence: Evidence::Key,
@@ -3334,6 +3353,31 @@ mod tests {
             caveats: Vec::new(),
             costs: Vec::new(),
         }
+    }
+
+    #[test]
+    fn the_recorded_executable_keeps_a_fully_named_python_profile_recognizable() {
+        let mut run = run_of(Vec::new(), Vec::new(), false);
+        run.output.results[0]
+            .provenance
+            .executables
+            .insert("task:7".to_owned(), "/usr/bin/python3.14".to_owned());
+        run.output.results[0]
+            .provenance
+            .executables
+            .insert("task:8".to_owned(), "/usr/bin/cc1".to_owned());
+        let frames = [
+            vec!["_PyEval_EvalFrameDefault.cold".to_owned()],
+            vec!["_PyObject_Free".to_owned()],
+            vec!["_Py_Dealloc".to_owned()],
+        ];
+        let samples = frames.iter().map(|frames| Some(frames.as_slice()));
+        let says =
+            super::super::diff::hottest(samples, &Default::default(), &program(&run, "task:7"))
+                .unwrap();
+        assert!(says.contains("python interpreter"), "{says}");
+        assert!(!says.starts_with("hottest function"), "{says}");
+        assert_eq!(program(&run, "task:8"), vec!["cc1"]);
     }
 
     fn read_launched(run: &Run) -> Reading {

@@ -49,6 +49,7 @@ pub mod error;
 pub mod event;
 pub mod filter;
 pub mod format;
+mod jitdump;
 pub mod join;
 pub mod lazy;
 pub mod need;

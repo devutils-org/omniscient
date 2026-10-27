@@ -438,11 +438,12 @@ impl Identity {
             }
             Identity::Anonymous => {
                 "code in no file: a JIT's or an interpreter's, named only when the runtime \
-                 writes a perf map (`/tmp/perf-<pid>.map`)"
+                 writes a perf map (`/tmp/perf-<pid>.map`) or jitdump (`JITDUMPDIR`, ~/.debug/jit)"
             }
             Identity::KernelHidden => {
-                "kernel addresses withheld by `kernel.kptr_restrict`: CAP_SYSLOG, or the sysctl \
-                 at 0, names them"
+                "kernel addresses withheld: inspect kernel.kptr_restrict, kernel.perf_event_paranoid \
+                 and effective CAP_SYSLOG; kptr_restrict=0 also needs perf_event_paranoid<=1 \
+                 or CAP_SYSLOG"
             }
             Identity::Unmapped => "addresses in no mapping the run read",
         }
@@ -1086,7 +1087,7 @@ pub fn diff_runs(before: Vec<Profile>, after: Vec<Profile>) -> Diff {
         .count();
     if rare > 0 {
         notes.push(format!(
-            "{rare} function(s) moved beyond the noise with fewer than {FEW_SAMPLES:.0} samples a \
+            "{rare} row(s) moved beyond the noise with fewer than {FEW_SAMPLES:.0} samples a \
              run on both sides: listed, and in no verdict, since a count that small is known to \
              a third at best"
         ));
@@ -1096,7 +1097,7 @@ pub fn diff_runs(before: Vec<Profile>, after: Vec<Profile>) -> Diff {
         .filter(|change| change.significant && change.comparable && !change.few_samples)
         .map(|change| change.function.clone())
         .collect();
-    let sentence = describe(
+    let mut sentence = describe(
         &own,
         &difference,
         unit,
@@ -1104,6 +1105,37 @@ pub fn diff_runs(before: Vec<Profile>, after: Vec<Profile>) -> Diff {
         before.len(),
         after.len(),
     );
+    // A leaf's inclusive cost is just its own. Cite an actual caller,
+    // especially when several unnamed instruction rows sit beneath it.
+    let callers: BTreeSet<&str> = merged_before
+        .stacks
+        .keys()
+        .chain(merged_after.stacks.keys())
+        .filter_map(|chain| chain.rsplit_once(';').map(|(callers, _)| callers))
+        .flat_map(|chain| chain.split(';'))
+        .collect();
+    if let Some(caller) = inclusive
+        .iter()
+        .filter(|change| {
+            change.identity == Identity::Symbol
+                && callers.contains(change.function.as_str())
+                && change.comparable
+                && change.significant
+                && !change.few_samples
+        })
+        .max_by(|a, b| a.sigmas.total_cmp(&b.sigmas))
+    {
+        sentence.push_str(&format!(
+            "; the strongest named inclusive change is `{}` ({:.1} {}, including callees)",
+            short_name(&caller.function),
+            caller.sigmas,
+            if confidence == Confidence::BetweenRuns {
+                "standard errors"
+            } else {
+                "standard deviations"
+            }
+        ));
+    }
     let denominator = format!(
         "a sample is a period of on-cpu time of one of the target's threads, so the totals are \
          cpu summed over every sampled thread -- not wall-clock time, not GPU time -- and a \
@@ -1199,9 +1231,9 @@ fn describe(
                 .ratio
                 .map_or("new".to_owned(), |ratio| format!("x{ratio:.2}"));
             let rest = match names.len() {
-                1 => "; every other comparable function moved within its noise".to_owned(),
+                1 => "; every other comparable row moved within its noise".to_owned(),
                 n => format!(
-                    "; {} other function(s) moved beyond the noise as well: {}",
+                    "; {} other comparable row(s) moved beyond the noise as well: {}",
                     n - 1,
                     names[1..]
                         .iter()
@@ -1210,8 +1242,13 @@ fn describe(
                         .join(", ")
                 ),
             };
+            let kind = if first.identity == Identity::Offset {
+                "the instruction at"
+            } else {
+                "the function"
+            };
             format!(
-                "the difference is `{}`: {} of its own a run ({ratio}, {:.1} {}; {against}){rest}",
+                "the difference is {kind} `{}`: {} of its own a run ({ratio}, {:.1} {}; {against}){rest}",
                 short_name(&first.function),
                 amount(first.delta),
                 first.sigmas,
@@ -1276,7 +1313,7 @@ impl Diff {
                 {
                     "own (leaf frame)"
                 } else {
-                    "own (innermost perf-map frame, else leaf)"
+                    "own (innermost JIT frame, else leaf)"
                 },
                 &self.own,
             ),
@@ -1563,7 +1600,10 @@ impl PerfMapNames {
                     continue;
                 };
                 for (label, by) in labels.iter().zip(named_by) {
-                    if *by == Some(crate::stack::NamedBy::PerfMap) {
+                    if matches!(
+                        by,
+                        Some(crate::stack::NamedBy::PerfMap | crate::stack::NamedBy::JitDump)
+                    ) {
                         names
                             .symbols
                             .insert(label.trim_end_matches(RECOVERED).to_owned());
@@ -1698,7 +1738,7 @@ impl PerfMapNames {
         match (self.read.as_slice(), self.unreadable.as_slice()) {
             ([], []) => None,
             (_, []) => Some(format!(
-                "each sample is charged to the innermost frame the program's perf map named \
+                "each sample is charged to the innermost frame the program's perf map or jitdump named \
                  ({}), not to its leaf: under a perf map the leaf is the runtime's",
                 self.read.join(", ")
             )),
@@ -1894,7 +1934,7 @@ pub fn hottest<'a>(
     if mapped {
         return Some(format!(
             "hottest function `{name}`, {count} of {total} samples ({:.0} %), charged to the \
-             innermost frame the program's perf map named ({through_map} of the {total} samples \
+             innermost frame the program's perf map or jitdump named ({through_map} of the {total} samples \
              had one; the leaf under it is the runtime's){tool}",
             share(count)
         ));
@@ -2127,6 +2167,44 @@ mod tests {
                 .any(|note| note.contains("no stable name")),
             "{:?}",
             diff.notes
+        );
+    }
+
+    #[test]
+    fn the_verdict_calls_offsets_instructions_and_names_the_inclusive_caller() {
+        let mut before = profile("main;CopyThunk;libc.so.6+0x100 100\nmain;CopyThunk;libc.so.6+0x110 100\nmain;other1 2450\nmain;other2 2450\nmain;other3 2450\nmain;other4 2450\n");
+        let mut after = profile("main;CopyThunk;libc.so.6+0x100 1000\nmain;CopyThunk;libc.so.6+0x110 1000\nmain;other1 2000\nmain;other2 2000\nmain;other3 2000\nmain;other4 2000\n");
+        for one in [&mut before, &mut after] {
+            one.build_ids
+                .insert("libc.so.6".to_owned(), "abcd".to_owned());
+        }
+        let diff = diff(before, after);
+        assert!(
+            diff.sentence.contains("the instruction at"),
+            "{}",
+            diff.sentence
+        );
+        assert!(
+            diff.sentence
+                .contains("strongest named inclusive change is `CopyThunk`"),
+            "{}",
+            diff.sentence
+        );
+        assert!(
+            !diff.sentence.contains("other function(s)"),
+            "{}",
+            diff.sentence
+        );
+    }
+
+    #[test]
+    fn the_inclusive_context_is_a_caller_rather_than_a_named_leaf() {
+        let before = profile("main;CopyThunk;memcpy 100\nmain;other 9900\n");
+        let after = profile("main;CopyThunk;memcpy 1000\nmain;other 9000\n");
+        let sentence = diff(before, after).sentence;
+        assert!(
+            sentence.contains("strongest named inclusive change is `CopyThunk`"),
+            "{sentence}"
         );
     }
 
@@ -2617,6 +2695,32 @@ mod tests {
             "perf_maps": perf_maps,
         }))
         .unwrap_or_else(|error| panic!("a minimal Results: {error}"))
+    }
+
+    #[test]
+    fn jitdump_provenance_charges_the_generated_function_instead_of_the_runtime_leaf() {
+        let mut result = profiled(serde_json::json!([]));
+        result.notes.clear();
+        result
+            .stacks
+            .insert(1, labels("main;xla::fused_dot;runtime_stub"));
+        result.provenance.named_by.insert(
+            1,
+            vec![
+                Some(crate::stack::NamedBy::Elf),
+                Some(crate::stack::NamedBy::JitDump),
+                Some(crate::stack::NamedBy::Elf),
+            ],
+        );
+        let names = PerfMapNames::of_run(std::slice::from_ref(&result));
+        assert!(names.named("xla::fused_dot"));
+        assert!(!names.read_back);
+        let frames = result.stacks[&1].as_slice();
+        let says = hottest([Some(frames)], &names, &[]).unwrap();
+        assert!(
+            says.starts_with("hottest function `xla::fused_dot`"),
+            "{says}"
+        );
     }
 
     /// The results say which frame a perf map named: nothing is read back

@@ -15,7 +15,8 @@ use crate::error::ParseError;
 ///
 /// Accepts `ns`, `us` (or `µs`), `ms`, `s`, `m`, `h`. A bare number is refused:
 /// an unlabelled duration is exactly the kind of ambiguity this tool is meant to
-/// eliminate.
+/// eliminate. Decimal fractions are accepted when they represent a whole
+/// number of nanoseconds; values are never rounded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Duration {
     nanos: u64,
@@ -40,18 +41,17 @@ impl FromStr for Duration {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
-        let split = s.find(|c: char| !c.is_ascii_digit()).ok_or_else(|| {
-            ParseError::new(format!("duration `{s}` has no unit (try `30s`, `500ms`)"))
-        })?;
+        let split = s
+            .find(|c: char| !c.is_ascii_digit() && c != '.')
+            .ok_or_else(|| {
+                ParseError::new(format!("duration `{s}` has no unit (try `30s`, `500ms`)"))
+            })?;
         if split == 0 {
             return Err(ParseError::new(format!(
                 "duration `{s}` does not start with a number"
             )));
         }
         let (value, unit) = s.split_at(split);
-        let value: u64 = value
-            .parse()
-            .map_err(|_| ParseError::new(format!("duration `{s}` has an out-of-range value")))?;
         let multiplier = match unit {
             "ns" => 1,
             "us" | "µs" => 1_000,
@@ -65,10 +65,35 @@ impl FromStr for Duration {
                 )))
             }
         };
-        value
-            .checked_mul(multiplier)
-            .map(Self::from_nanos)
-            .ok_or_else(|| ParseError::new(format!("duration `{s}` overflows")))
+        // Decimal arithmetic keeps integer nanoseconds exact, including near u64::MAX.
+        let invalid = || {
+            ParseError::new(format!(
+                "duration `{s}` is invalid or overflows; use an exact number of nanoseconds"
+            ))
+        };
+        let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+        if whole.is_empty() || (value.contains('.') && fraction.is_empty()) {
+            return Err(invalid());
+        }
+        let whole: u64 = whole.parse().map_err(|_| invalid())?;
+        let mut nanos = whole.checked_mul(multiplier).ok_or_else(invalid)?;
+        if !fraction.is_empty() {
+            let digits = fraction.trim_end_matches('0');
+            if !digits.is_empty() {
+                let numerator: u64 = digits.parse().map_err(|_| invalid())?;
+                let denominator = 10u64
+                    .checked_pow(digits.len().try_into().map_err(|_| invalid())?)
+                    .ok_or_else(invalid)?;
+                let scaled = u128::from(numerator) * u128::from(multiplier);
+                if scaled % u128::from(denominator) != 0 {
+                    return Err(invalid());
+                }
+                nanos = nanos
+                    .checked_add((scaled / u128::from(denominator)) as u64)
+                    .ok_or_else(invalid)?;
+            }
+        }
+        Ok(Self::from_nanos(nanos))
     }
 }
 
@@ -187,6 +212,37 @@ pub fn parse_scalar(s: &str) -> Result<i64, ParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decimal_durations_are_exact_and_never_rounded() {
+        for (text, nanos) in [
+            ("3.9s", 3_900_000_000),
+            ("0.000000001s", 1),
+            ("1.5m", 90_000_000_000),
+            ("1.000000000000000000000s", 1_000_000_000),
+            ("18446744073.709551615s", u64::MAX),
+        ] {
+            assert_eq!(
+                text.parse::<Duration>().unwrap().as_nanos(),
+                nanos,
+                "{text}"
+            );
+        }
+        for text in [
+            ".9s",
+            "3.s",
+            "3..9s",
+            "-1s",
+            "1.1ns",
+            "0.0000000001s",
+            "18446744073.709551616s",
+        ] {
+            assert!(text.parse::<Duration>().is_err(), "{text}");
+        }
+        let window: crate::request::Window = "3.9s..4.1s".parse().unwrap();
+        assert_eq!(window.start.unwrap().as_nanos(), 3_900_000_000);
+        assert_eq!(window.stop.unwrap().as_nanos(), 4_100_000_000);
+    }
 
     #[test]
     fn durations_round_trip_through_their_display_form() {

@@ -267,6 +267,20 @@ omn trace cpu.cycles -m count -e summary --format yaml --program-stdout ls.out -
 omn trace cpu.cycles -m count -e summary --format json --program-stdout prog.log --program-stderr prog.log -- ./prog | jq
 ```
 
+With `trace -r N`, the program is launched afresh and each redirected stream
+is also kept as `FILE.1` through `FILE.N` when FILE is a regular file
+(devices such as `/dev/null` remain discard-only). `FILE` holds the final run. The same
+path for stdout and stderr keeps both streams together, including in each
+numbered copy. These rules also apply to `OMN_PROGRAM_STDOUT` and
+`OMN_PROGRAM_STDERR`.
+
+Request windows accept decimal durations, for example `window: "3.9s.."`
+(equivalent to `3900ms..`). Durations must represent an exact whole number of
+nanoseconds. If a collector cannot attach when its window opens, the failure
+is reported and the command exits nonzero. The attach failure does not stop
+a launched workload; it is allowed to exit normally, or runs to an explicitly
+requested duration.
+
 `-o DIR` writes the results and the resolved file (machine, kernel, backend,
 every choice) beside them, and then `omn`'s stdout is free for the program. Keep both: a number without the resolved file
 cannot be compared with another machine's.

@@ -536,6 +536,7 @@ pub(super) fn run_core(
         mut watched,
         mut closed_because,
         stopped_because,
+        failures: attach_failures,
         mut escalated,
         mut drains,
     } = drive(
@@ -700,7 +701,7 @@ pub(super) fn run_core(
                         Vec::new(),
                         Vec::new(),
                         None,
-                        None,
+                        attach_failures[index].clone(),
                     ),
                 };
             let fields = slot_fields(slot);
@@ -745,6 +746,18 @@ pub(super) fn run_core(
             }
         })
         .collect::<Vec<Collection>>();
+    // No measurement is not a successful measurement of zero. This also
+    // covers a workload that exits before every requested window opens.
+    if !collections
+        .iter()
+        .any(|collection| collection.window.attached)
+        && !collections
+            .iter()
+            .any(|collection| collection.failure.is_some())
+    {
+        collections[0].failure =
+            Some("no request attached before the run ended; nothing was measured".to_owned());
+    }
     // What the runner spent once each span was weighed, read last so that
     // before, during and after add up to this process's account.
     let handed_back_cpu_ns = rusage_ns(libc::RUSAGE_SELF);

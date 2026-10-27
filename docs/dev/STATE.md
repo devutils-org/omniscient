@@ -8,6 +8,11 @@ Read `docs/ROADMAP.md` for the plan, `docs/DECISIONS.md` for what is settled,
 `docs/open-findings.md` for the findings that cut across families, and this file
 for where the two meet.
 
+The follow-up to the ZML profile feedback is recorded in
+[`docs/fixes/zml-profile-feedback.md`](../fixes/zml-profile-feedback.md),
+including the implemented fixes, focused validation, and the full suite's
+remaining failures.
+
 ---
 
 ## In one paragraph

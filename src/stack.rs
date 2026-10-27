@@ -206,11 +206,16 @@ pub enum NamedBy {
     Elf,
     /// A debug file found by the mapped file's build id.
     Debuginfod,
+    /// An installed separate debug ELF under /usr/lib/debug.
+    DebugFile,
     /// `/proc/kallsyms`.
     Kallsyms,
     /// `/tmp/perf-<pid>.map`, the file a JIT writes for code that exists in
     /// no file.
     PerfMap,
+    /// A runtime's Linux perf jitdump code-load records.
+    #[serde(rename = "jitdump")]
+    JitDump,
 }
 
 impl NamedBy {
@@ -218,8 +223,10 @@ impl NamedBy {
         match self {
             NamedBy::Elf => "elf",
             NamedBy::Debuginfod => "debuginfod",
+            NamedBy::DebugFile => "debug-file",
             NamedBy::Kallsyms => "kallsyms",
             NamedBy::PerfMap => "perf-map",
+            NamedBy::JitDump => "jitdump",
         }
     }
 }
@@ -694,6 +701,7 @@ pub struct Symbolizer {
     origins: BTreeMap<PathBuf, unwind::NameOrigin>,
     /// `/tmp/perf-<pid>.map`, read as the target appends to it.
     perf_map: PerfMap,
+    jitdumps: BTreeMap<PathBuf, crate::jitdump::Dump>,
     /// When the perf map was last re-read for a miss, on the monotonic clock;
     /// zero after a refresh.
     perf_map_reread_ns: u64,
@@ -736,7 +744,7 @@ impl Symbolizer {
     /// `/proc/0` is nothing at all, so taking it literally would give a
     /// symbolizer that resolves every address to an address.
     pub fn for_process(pid: i32) -> Self {
-        Self {
+        let mut symbols = Self {
             pid,
             regions: read_maps(pid),
             modules: HashMap::new(),
@@ -746,12 +754,15 @@ impl Symbolizer {
             debuginfod: None,
             origins: BTreeMap::new(),
             perf_map: PerfMap::of(pid),
+            jitdumps: BTreeMap::new(),
             perf_map_reread_ns: 0,
             perf_map_grew: false,
             perf_map_named: 0,
             perf_map_wanted: false,
             executable: executable_of(pid),
-        }
+        };
+        symbols.discover_jitdumps();
+        symbols
     }
 
     /// A symbolizer that asks debuginfod for the names of a file that carries
@@ -812,10 +823,44 @@ impl Symbolizer {
             return false;
         }
         self.regions = fresh;
+        self.discover_jitdumps();
         if let Some(executable) = executable_of(self.pid) {
             self.executable = Some(executable);
         }
         true
+    }
+
+    fn discover_jitdumps(&mut self) {
+        // LLVM and perf runtimes mmap their dump as a marker. Its full path
+        // discovers JITDUMPDIR as well as ~/.debug/jit without scanning old runs.
+        for region in &self.regions {
+            let Some(path) = &region.path else {
+                continue;
+            };
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if name.starts_with("jit-") && name.ends_with(".dump") {
+                self.jitdumps
+                    .entry(path.clone())
+                    .or_insert_with(|| crate::jitdump::Dump::new(path.clone()));
+            }
+        }
+    }
+
+    fn jitdump_name(&mut self, addr: u64) -> Option<(String, u64)> {
+        for (path, dump) in &self.jitdumps {
+            if let Some(code) = dump.lookup(addr) {
+                self.origins.insert(
+                    path.clone(),
+                    unwind::NameOrigin::JitDump {
+                        records: dump.records,
+                    },
+                );
+                return Some((code.symbol.clone(), addr - code.address));
+            }
+        }
+        None
     }
 
     /// The file this symbolizer's process executes, as last read while it
@@ -923,15 +968,24 @@ impl Symbolizer {
                 // Code that exists in no file -- a JIT's, an interpreter's
                 // trampolines -- is named, when it is named at all, by the map
                 // the program wrote for it.
-                let mapped = anonymous.then(|| self.perf_map_name(addr)).flatten();
+                let mapped = anonymous
+                    .then(|| {
+                        self.perf_map_name(addr)
+                            .map(|(name, offset)| (name, offset, NamedBy::PerfMap))
+                            .or_else(|| {
+                                self.jitdump_name(addr)
+                                    .map(|(name, offset)| (name, offset, NamedBy::JitDump))
+                            })
+                    })
+                    .flatten();
                 match mapped {
-                    Some((symbol, symbol_offset)) => Frame::named(
+                    Some((symbol, symbol_offset, named_by)) => Frame::named(
                         addr,
                         Context::User,
                         Some(name),
                         symbol,
                         symbol_offset,
-                        NamedBy::PerfMap,
+                        named_by,
                     ),
                     None => Frame {
                         addr,
@@ -964,7 +1018,7 @@ impl Symbolizer {
                 || now.saturating_sub(self.perf_map_reread_ns) >= PERF_MAP_REREAD_NS
             {
                 self.perf_map_reread_ns = now.max(1);
-                if self.perf_map.update() {
+                if self.reread_perf_map() {
                     self.perf_map_grew = true;
                 }
             }
@@ -992,7 +1046,12 @@ impl Symbolizer {
     /// names its last code objects only once it has flushed, and the stacks
     /// sampled in them were interned before that.
     pub fn reread_perf_map(&mut self) -> bool {
-        self.perf_map.update()
+        let mut changed = self.perf_map.update();
+        self.discover_jitdumps();
+        for dump in self.jitdumps.values_mut() {
+            changed |= dump.update();
+        }
+        changed
     }
 
     /// Whether a frame in anonymous executable memory has gone unnamed, so
@@ -1006,6 +1065,7 @@ impl Symbolizer {
     /// interned. Returns how many it named.
     pub fn rename_from_perf_map(&mut self, table: &mut StackTable) -> u64 {
         let mut named = 0;
+        let mut perf_named = 0;
         for stack in &mut table.stacks {
             for frame in &mut stack.frames {
                 if frame.symbol.is_some() || frame.context != Context::User {
@@ -1018,26 +1078,43 @@ impl Symbolizer {
                 if !anonymous {
                     continue;
                 }
-                let Some(line) = self.perf_map.lookup(frame.addr) else {
+                let found = self
+                    .perf_map
+                    .lookup(frame.addr)
+                    .map(|line| {
+                        (
+                            line.symbol.clone(),
+                            frame.addr - line.address,
+                            NamedBy::PerfMap,
+                        )
+                    })
+                    .or_else(|| {
+                        self.jitdump_name(frame.addr)
+                            .map(|(name, offset)| (name, offset, NamedBy::JitDump))
+                    });
+                let Some((symbol, offset, named_by)) = found else {
                     continue;
                 };
                 let renamed = Frame::named(
                     frame.addr,
                     Context::User,
                     frame.module.clone(),
-                    line.symbol.clone(),
-                    frame.addr - line.address,
-                    NamedBy::PerfMap,
+                    symbol,
+                    offset,
+                    named_by,
                 );
                 *frame = Frame {
                     recovered: frame.recovered,
                     ..renamed
                 };
                 named += 1;
+                if named_by == NamedBy::PerfMap {
+                    perf_named += 1;
+                }
             }
         }
-        if named > 0 {
-            self.perf_map_named += named;
+        if perf_named > 0 {
+            self.perf_map_named += perf_named;
             self.origins.insert(
                 self.perf_map.path.clone(),
                 unwind::NameOrigin::PerfMap {
@@ -1057,6 +1134,17 @@ impl Symbolizer {
     /// map replaced under the reader.
     pub fn perf_map_notes(&self) -> Vec<String> {
         let mut notes = Vec::new();
+        for dump in self.jitdumps.values() {
+            if let Some(issue) = &dump.issue {
+                notes.push(format!(
+                    "{}: {issue}; later jitdump records were not read",
+                    dump.path.display()
+                ));
+            }
+            if dump.records > 0 {
+                notes.push(format!("{}: jitdump names use the latest code load/move; address reuse is not resolved by sample timestamp, and debug/unwind records are not used", dump.path.display()));
+            }
+        }
         if self.perf_map.undecoded > 0 {
             notes.push(format!(
                 "{} lines of {} are not `<hex address> <hex size> <symbol>` and name nothing",
@@ -1410,6 +1498,46 @@ impl PerfMap {
     }
 }
 
+/// Diagnose why kallsyms can withhold addresses. CAP_PERFMON does not grant
+/// CAP_SYSLOG, and kptr_restrict=0 still consults perf_event_paranoid.
+pub fn kernel_visibility_note() -> String {
+    let setting = |name: &str| {
+        std::fs::read_to_string(format!("/proc/sys/kernel/{name}"))
+            .ok()
+            .and_then(|value| value.trim().parse::<i32>().ok())
+    };
+    let syslog = std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix("CapEff:"))
+                .and_then(|value| u64::from_str_radix(value.trim(), 16).ok())
+        })
+        .map(|caps| caps & (1 << 34) != 0);
+    visibility_note(
+        setting("kptr_restrict"),
+        setting("perf_event_paranoid"),
+        syslog,
+    )
+}
+
+fn visibility_note(kptr: Option<i32>, paranoid: Option<i32>, syslog: Option<bool>) -> String {
+    let show = |value: Option<i32>| value.map_or("unknown".to_owned(), |v| v.to_string());
+    let cause = match (kptr, paranoid, syslog) {
+        (Some(2..), _, _) => "kernel.kptr_restrict blocks address disclosure",
+        (Some(1), _, Some(false)) => "kernel.kptr_restrict requires CAP_SYSLOG (and matching credentials)",
+        (Some(0), Some(2..), Some(false)) => "kernel.perf_event_paranoid blocks address disclosure without CAP_SYSLOG",
+        _ => "the kernel withholds addresses from /proc/kallsyms; the observed controls do not fully explain why",
+    };
+    format!(
+        "{cause} (kernel.kptr_restrict={}, kernel.perf_event_paranoid={}, effective CAP_SYSLOG={})",
+        show(kptr),
+        show(paranoid),
+        syslog.map_or("unknown", |v| if v { "yes" } else { "no" })
+    )
+}
+
 /// The kernel's own symbol table, read at most once for the whole run.
 ///
 /// `/proc/kallsyms` is 395 318 lines on the development machine, and parsing it
@@ -1623,6 +1751,7 @@ struct Module {
     image: Mapped,
     /// The debug file debuginfod gave, for the names read from it.
     debug: Option<Mapped>,
+    debug_named_by: NamedBy,
     /// Each function's name and prologue verdict, once looked at.
     looked_at: std::cell::RefCell<HashMap<usize, (String, Option<bool>)>>,
 }
@@ -1738,40 +1867,50 @@ impl Module {
             }
         }
         let mut debug = None;
-        if let (Some(client), false) = (debuginfod, elf.has_symtab()) {
+        if !elf.has_symtab() {
             match elf.build_id().map(|id| unwind::hex(&id)) {
-                None => {
+                None if debuginfod.is_some() => {
                     origin = unwind::NameOrigin::None(
-                        "stripped, and it carries no build id to ask debuginfod by".to_owned(),
+                        "stripped, and it carries no build id to locate separate debug info"
+                            .to_owned(),
                     )
                 }
-                Some(build_id) => match client.debuginfo(&build_id) {
-                    Ok((debug_path, fetched)) => {
-                        if let Some(mapped) = Mapped::of(&debug_path) {
-                            if let Some(debug_elf) = Elf::parse(mapped.bytes()) {
-                                for (symbols, strings) in debug_elf.symbol_tables() {
-                                    for symbol in debug_elf.symbol_entries(symbols, strings) {
-                                        if let Some(offset) = elf.file_offset_of(symbol.value) {
-                                            functions.push(Function {
-                                                offset,
-                                                size: symbol.size,
-                                                name_at: symbol.name_at,
-                                                from_debuginfo: true,
-                                            });
+                None => {}
+                Some(build_id) => {
+                    match unwind::local_debuginfo(&build_id)
+                        .map(Ok)
+                        .unwrap_or_else(|| match debuginfod {
+                            Some(client) => client.debuginfo(&build_id),
+                            None => Err("no matching local debug file".to_owned()),
+                        }) {
+                        Ok((debug_path, fetched)) => {
+                            if let Some(mapped) = Mapped::of(&debug_path) {
+                                if let Some(debug_elf) = Elf::parse(mapped.bytes()) {
+                                    for (symbols, strings) in debug_elf.symbol_tables() {
+                                        for symbol in debug_elf.symbol_entries(symbols, strings) {
+                                            if let Some(offset) = elf.file_offset_of(symbol.value) {
+                                                functions.push(Function {
+                                                    offset,
+                                                    size: symbol.size,
+                                                    name_at: symbol.name_at,
+                                                    from_debuginfo: true,
+                                                });
+                                            }
                                         }
                                     }
+                                    origin = fetched;
+                                    debug = Some(mapped);
                                 }
-                                origin = fetched;
-                                debug = Some(mapped);
                             }
                         }
+                        Err(reason) if debuginfod.is_some() => {
+                            origin = unwind::NameOrigin::None(format!(
+                                "its dynamic symbols only; debuginfod: {reason}"
+                            ))
+                        }
+                        Err(_) => {}
                     }
-                    Err(reason) => {
-                        origin = unwind::NameOrigin::None(format!(
-                            "its dynamic symbols only; debuginfod: {reason}"
-                        ))
-                    }
-                },
+                }
             }
         }
         if functions.is_empty() {
@@ -1792,6 +1931,11 @@ impl Module {
             functions,
             image,
             debug,
+            debug_named_by: if matches!(origin, unwind::NameOrigin::LocalDebug(_)) {
+                NamedBy::DebugFile
+            } else {
+                NamedBy::Debuginfod
+            },
             looked_at: std::cell::RefCell::new(HashMap::new()),
         };
         (Some(module), origin)
@@ -1801,7 +1945,7 @@ impl Module {
         let index = self.function_at(file_offset)?;
         let function = &self.functions[index];
         let named_by = if function.from_debuginfo {
-            NamedBy::Debuginfod
+            self.debug_named_by
         } else {
             NamedBy::Elf
         };
@@ -2991,7 +3135,8 @@ impl Unwinder {
             } else {
                 format!(
                     "{} does not exist: a runtime writes it only when asked (`python3 -X perf`, \
-                     `node --perf-basic-prof`, a JVM agent)",
+                     `node --perf-basic-prof`, a JVM agent); LLVM/XLA may instead write jitdump \
+                     (JITDUMPDIR or ~/.debug/jit), discovered through its mapped jit-<pid>.dump marker",
                     path.display()
                 )
             };
@@ -3006,11 +3151,10 @@ impl Unwinder {
         // parse of `/proc/kallsyms`, and a run with no kernel frames is not
         // degraded by names it was never going to print.
         if self.kernel_frames > 0 && !self.symbols.kernel_symbols_available() {
-            notes.push(
-                "kernel addresses are hidden by `kernel.kptr_restrict`, so kernel frames carry \
-                 no names"
-                    .to_owned(),
-            );
+            notes.push(format!(
+                "{}, so kernel frames carry no names",
+                kernel_visibility_note()
+            ));
         }
         notes
     }
@@ -3082,8 +3226,10 @@ pub fn names_fact<'a>(
             matches!(
                 origin,
                 unwind::NameOrigin::Debuginfod { .. }
+                    | unwind::NameOrigin::LocalDebug(_)
                     | unwind::NameOrigin::None(_)
                     | unwind::NameOrigin::PerfMap { .. }
+                    | unwind::NameOrigin::JitDump { .. }
                     | unwind::NameOrigin::DynamicSymbols
             )
         });
@@ -3713,6 +3859,67 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    #[test]
+    fn a_mapped_jitdump_names_anonymous_code_and_keeps_its_origin() {
+        let dir =
+            std::env::temp_dir().join(format!("omn-jitdump-symbolizer-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("jit-123.dump");
+        std::fs::write(&path, crate::jitdump::tests::fixture(false)).unwrap();
+        let mut symbols = Symbolizer::for_process(std::process::id() as i32);
+        symbols.regions = vec![
+            Region {
+                start: 0x1000,
+                end: 0x2000,
+                offset: 0,
+                name: "[anon:jit]".to_owned(),
+                path: None,
+            },
+            Region {
+                start: 0x3000,
+                end: 0x4000,
+                offset: 0,
+                name: path.display().to_string(),
+                path: Some(path.clone()),
+            },
+        ];
+        symbols.discover_jitdumps();
+        let frame = symbols.user_frame(0x1002);
+        assert_eq!(frame.symbol.as_deref(), Some("work"));
+        assert_eq!(frame.offset, 2);
+        assert_eq!(frame.named_by, Some(NamedBy::JitDump));
+        assert_eq!(
+            serde_json::to_string(&NamedBy::JitDump).unwrap(),
+            "\"jitdump\""
+        );
+        assert!(matches!(
+            symbols.origins().get(&path),
+            Some(unwind::NameOrigin::JitDump { records: 1 })
+        ));
+        assert_eq!(
+            symbols.perf_map().1,
+            0,
+            "jitdump must not be attributed to a perf map"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn masked_kernel_addresses_name_the_actual_controls() {
+        let note = visibility_note(Some(0), Some(2), Some(false));
+        assert!(
+            note.starts_with("kernel.perf_event_paranoid blocks"),
+            "{note}"
+        );
+        assert!(note.contains("kptr_restrict=0") && note.contains("CAP_SYSLOG=no"));
+        assert!(visibility_note(Some(1), Some(0), Some(false))
+            .starts_with("kernel.kptr_restrict requires"));
+        assert!(visibility_note(Some(2), Some(0), Some(true))
+            .starts_with("kernel.kptr_restrict blocks"));
+        assert!(visibility_note(Some(0), Some(0), Some(false)).contains("do not fully explain"));
+        assert!(visibility_note(None, None, None).contains("unknown"));
     }
 
     #[test]

@@ -52,7 +52,7 @@ pub struct Cli {
     /// Write the launched program's standard error to this file, created or
     /// truncated, instead of omn's own: what OMN_PROGRAM_STDERR sets, which
     /// this flag overrides. Only beside a program to launch, or a session
-    /// file that may launch one. With `omn latency --runs N`, each launch's
+    /// file that may launch one. With `omn trace -r N` or `omn latency --runs N`, each launch's
     /// stderr is also kept as FILE.1 ... FILE.N, the file itself the last
     /// one's.
     #[arg(long, value_name = "FILE", global = true)]
@@ -62,7 +62,8 @@ pub struct Cli {
     /// truncated, instead of omn's own, so that omn's stdout holds its
     /// document alone: what OMN_PROGRAM_STDOUT sets, which this flag
     /// overrides. The same file as --program-stderr holds both. Only beside a
-    /// program to launch, or a session file that may launch one.
+    /// program to launch, or a session file that may launch one. With `trace -r N`,
+    /// each run is also kept as FILE.1 ... FILE.N; FILE holds the last run.
     #[arg(long, value_name = "FILE", global = true)]
     pub program_stdout: Option<PathBuf>,
 

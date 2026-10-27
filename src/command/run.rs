@@ -276,6 +276,25 @@ pub(crate) fn measure_repeated(
     let bound = (!session.launch.is_empty()).then_some(session.launch.as_slice());
     let mut runs = Vec::with_capacity(repeat as usize);
     let mut broke = Vec::new();
+    let launched = bound.is_some()
+        || session
+            .requests
+            .iter()
+            .any(|request| matches!(request.target, crate::request::Target::Launch(_)));
+    let mut output_files = Vec::new();
+    if launched {
+        for variable in [
+            collect::PROGRAM_STDOUT_VARIABLE,
+            collect::PROGRAM_STDERR_VARIABLE,
+        ] {
+            if let Some(file) = std::env::var_os(variable).filter(|path| !path.is_empty()) {
+                let file = PathBuf::from(file);
+                if !output_files.contains(&file) {
+                    output_files.push(file);
+                }
+            }
+        }
+    }
     for index in 1..=repeat {
         let mut ladder = Ladder::new(catalog, capabilities, resolved);
         let collections = match collect::Run::new(resolved)
@@ -311,6 +330,22 @@ pub(crate) fn measure_repeated(
             }
         };
         RUN_STARTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        for file in &output_files {
+            // Devices and FIFOs are intentional sinks/streams, not log files.
+            // In particular, --program-stdout /dev/null must stay discard-only.
+            // A program that never started wrote no file: nothing to keep.
+            if !std::fs::metadata(file).is_ok_and(|metadata| metadata.is_file()) {
+                continue;
+            }
+            let mut numbered = file.as_os_str().to_os_string();
+            numbered.push(format!(".{index}"));
+            std::fs::copy(file, PathBuf::from(numbered)).map_err(|error| {
+                anyhow::anyhow!(
+                    "cannot keep program output {} for run {index}: {error}",
+                    file.display()
+                )
+            })?;
+        }
         for failure in failures(&collections) {
             if !broke.contains(&failure) {
                 broke.push(failure);

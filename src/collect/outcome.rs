@@ -93,7 +93,8 @@ pub struct Collection {
     /// a collector that is not drained, or that dropped nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub drains: Vec<DrainDrop>,
-    /// The collector broke the program it measured: [`Collector::failure`].
+    /// A collector failed, or no request attached before the run ended.
+    /// Includes [`Collector::failure`] when collection broke the program.
     /// The run's outcome reads it and exits non-zero with the sentence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,

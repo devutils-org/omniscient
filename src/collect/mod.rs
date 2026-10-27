@@ -2528,6 +2528,114 @@ mod tests {
         assert!(*whole_reads.borrow().last().unwrap() >= deadline_ns);
     }
 
+    /// A sole failed request must wait for the workload, rather than closing
+    /// the run immediately and causing the owner to kill its launched child.
+    #[test]
+    fn a_sole_failed_late_attach_waits_for_the_workload() {
+        let mut slots = vec![Slot::Waiting(Box::new(Handing {
+            collector: Err("mmap: Operation not permitted".to_owned()),
+            spin_ns: 0,
+            at_exec: false,
+        }))];
+        let mut paces = vec![Pace::UNSET];
+        let plans = [Plan::of(Some("10ms..".parse().unwrap()))];
+        let mut spending =
+            Spending::weighed_against_this_process(vec![windowed(Some("10ms.."), poll_ms(10))]);
+        let deadline = spending.opened_ns + 60_000_000;
+        let driven = drive(
+            &mut slots,
+            &mut paces,
+            &plans,
+            &[true],
+            None,
+            true,
+            &mut spending,
+            None,
+            None,
+            until(deadline),
+        );
+        assert_eq!(driven.stopped_because, "the deadline");
+        assert!(monotonic_ns() >= deadline);
+        assert!(!driven.watched[0].attached);
+        assert!(driven.closed_because[0]
+            .as_ref()
+            .unwrap()
+            .contains("attach failed: mmap"));
+        assert_eq!(driven.losses[0].failed_reads, 1);
+        assert!(driven.failures[0]
+            .as_ref()
+            .unwrap()
+            .contains("could not attach"));
+    }
+
+    #[test]
+    fn a_failed_late_attach_preserves_the_launched_programs_natural_exit() {
+        let path =
+            std::env::temp_dir().join(format!("omn-late-failed-workload-{}", std::process::id()));
+        let argv = vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "sleep .12; printf complete > \"$1\"; exit 7".to_owned(),
+            "sh".to_owned(),
+            path.display().to_string(),
+        ];
+        let mut child = launch::gated(&argv, &[]).unwrap();
+        let mut slots = vec![Slot::Waiting(Box::new(Handing {
+            collector: Err("mmap: Operation not permitted".to_owned()),
+            spin_ns: 0,
+            at_exec: false,
+        }))];
+        let mut paces = vec![Pace::UNSET];
+        let plans = [Plan::of(Some("10ms..".parse().unwrap()))];
+        let mut spending =
+            Spending::weighed_against_this_process(vec![windowed(Some("10ms.."), poll_ms(10))]);
+        let wake = child.exit_fd();
+        child.release();
+        let safety = monotonic_ns() + 5_000_000_000;
+        let driven = drive(
+            &mut slots,
+            &mut paces,
+            &plans,
+            &[true],
+            wake,
+            wake.is_none(),
+            &mut spending,
+            None,
+            None,
+            || {
+                child
+                    .finished()
+                    .or_else(|| (monotonic_ns() >= safety).then(|| "test timed out".to_owned()))
+            },
+        );
+        assert_eq!(driven.stopped_because, "exit status 7");
+        assert!(!child.lifetime().unwrap().terminated);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "complete");
+        assert!(driven.failures[0]
+            .as_ref()
+            .unwrap()
+            .contains("could not attach"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_run_with_no_attached_request_fails_after_the_program_exits() {
+        let mut resolved = windowed(Some("10s.."), poll_ms(10));
+        resolved.request.duration = None;
+        resolved.request.target = Target::Launch(vec!["/bin/true".to_owned()]);
+        let ran = Run::new(&[resolved]).go().unwrap();
+        let collection = &ran.collections[0];
+        assert!(!collection.window.attached);
+        assert!(collection
+            .failure
+            .as_ref()
+            .unwrap()
+            .contains("no request attached"));
+        assert_eq!(collection.lifetime.unwrap().exit_code, Some(0));
+        assert!(!collection.lifetime.unwrap().terminated);
+        assert!(!crate::command::failures(&ran.collections).is_empty());
+    }
+
     /// A counter that would follow only threads started after it is not
     /// attached late to a process that already has others: the window's loss
     /// says why, rather than a count of one thread passing for the process.

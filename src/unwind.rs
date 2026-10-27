@@ -1052,6 +1052,8 @@ pub enum NameOrigin {
     /// Only its `.dynsym`: the exported functions are named, the rest are
     /// `module+offset`.
     DynamicSymbols,
+    /// A separate debug ELF already installed on this machine.
+    LocalDebug(PathBuf),
     /// A debug file fetched by build id, or found in the cache it is kept in.
     Debuginfod {
         build_id: String,
@@ -1060,6 +1062,9 @@ pub enum NameOrigin {
     },
     /// No names at all: an unreadable file, or none in it.
     None(String),
+    /// A JIT's jitdump (`jit-<pid>.dump`, what LLVM's `PerfJITEventListener`
+    /// writes): the code it loaded or moved, record by record.
+    JitDump { records: u64 },
     /// The target's `/tmp/perf-<pid>.map`, for code in anonymous executable
     /// memory: what a JIT or an interpreter's trampolines say they generated.
     /// Keyed by the map's own path, since the code it names has no file.
@@ -1084,7 +1089,9 @@ impl fmt::Display for NameOrigin {
                 build_id,
                 server: None,
             } => write!(f, "the debuginfod cache, build id {build_id}"),
+            NameOrigin::LocalDebug(path) => write!(f, "local debug file {}", path.display()),
             NameOrigin::None(reason) => write!(f, "no names: {reason}"),
+            NameOrigin::JitDump { records } => write!(f, "jitdump ({records} records)"),
             NameOrigin::PerfMap { lines } => write!(
                 f,
                 "perf-map, the {lines} lines the program wrote for code no file holds"
@@ -1229,6 +1236,35 @@ impl Debuginfod {
             refusals.join("; ")
         ))
     }
+}
+
+/// Find separate debug info without contacting a server or writing to its cache.
+/// Validate the build id before trusting a cache entry for another ELF's addresses.
+pub fn local_debuginfo(build_id: &str) -> Option<(PathBuf, NameOrigin)> {
+    if build_id.len() < 3 || !build_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let id = build_id.to_ascii_lowercase();
+    let installed = PathBuf::from(format!(
+        "/usr/lib/debug/.build-id/{}/{}.debug",
+        &id[..2],
+        &id[2..]
+    ));
+    let cached = default_cache().join(&id).join("debuginfo");
+    [installed, cached.clone()].into_iter().find_map(|path| {
+        if crate::stack::build_id_of(&path).as_deref() != Some(id.as_str()) {
+            return None;
+        }
+        let origin = if path == cached {
+            NameOrigin::Debuginfod {
+                build_id: id.clone(),
+                server: None,
+            }
+        } else {
+            NameOrigin::LocalDebug(path.clone())
+        };
+        Some((path, origin))
+    })
 }
 
 /// `DEBUGINFOD_CACHE_PATH`, else `$XDG_CACHE_HOME/debuginfod_client`, else

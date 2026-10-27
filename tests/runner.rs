@@ -2501,3 +2501,137 @@ fn the_program_s_stderr_flag_without_a_program_is_refused() {
         );
     }
 }
+
+/// Every launch's output must remain available for functional checks, including
+/// the shared stdout/stderr case. Verify distinct pids rather than identical copies.
+#[test]
+fn repeated_trace_keeps_each_program_output() {
+    for shared in [false, true] {
+        let out = scratch(if shared {
+            "repeat-output-shared"
+        } else {
+            "repeat-output-out"
+        });
+        let err = if shared {
+            out.clone()
+        } else {
+            scratch("repeat-output-err")
+        };
+        let result = Command::new(BINARY)
+            .args([
+                "trace", "mem.rss", "-m", "poll", "-e", "summary", "-r", "3", "--format", "json",
+            ])
+            .arg("--program-stdout")
+            .arg(&out)
+            .arg("--program-stderr")
+            .arg(&err)
+            .args([
+                "--",
+                "/bin/sh",
+                "-c",
+                "echo out-$$; echo err-$$ >&2; sleep 0.03",
+            ])
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{}", stderr(&result));
+        let mut pids = std::collections::BTreeSet::new();
+        for index in 1..=3 {
+            let numbered_out = format!("{}.{index}", out.display());
+            let numbered_err = format!("{}.{index}", err.display());
+            let stdout = std::fs::read_to_string(&numbered_out).unwrap();
+            let stderr = std::fs::read_to_string(&numbered_err).unwrap();
+            let pid = stdout
+                .lines()
+                .find_map(|line| line.strip_prefix("out-"))
+                .unwrap();
+            assert!(stderr.lines().any(|line| line == format!("err-{pid}")));
+            assert!(
+                pids.insert(pid.to_owned()),
+                "each file must be from its own launch"
+            );
+            if index == 3 {
+                assert_eq!(std::fs::read_to_string(&out).unwrap(), stdout);
+                assert_eq!(std::fs::read_to_string(&err).unwrap(), stderr);
+            }
+            let _ = std::fs::remove_file(numbered_out);
+            if !shared {
+                let _ = std::fs::remove_file(numbered_err);
+            }
+        }
+        let _: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        let _ = std::fs::remove_file(out);
+        if !shared {
+            let _ = std::fs::remove_file(err);
+        }
+    }
+}
+
+/// All windows missed is a failed measurement even when the program itself
+/// completes normally. Repetition must keep this failure in its exit status.
+#[test]
+fn no_attached_request_is_never_a_successful_empty_measurement() {
+    for repeats in [1, 2] {
+        let file = scratch(&format!("unattached-output-{repeats}"));
+        let result = Command::new(BINARY)
+            .args([
+                "trace", "mem.rss", "-m", "poll", "-e", "summary", "--window", "3.9s..",
+                "--format", "json", "-r",
+            ])
+            .arg(repeats.to_string())
+            .arg("--program-stdout")
+            .arg(&file)
+            .args(["--", "/bin/sh", "-c", "echo completed; exit 0"])
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(1), "{}", stderr(&result));
+        assert!(
+            stderr(&result).contains("no request attached"),
+            "{}",
+            stderr(&result)
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "completed\n");
+        let doc: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        let runs: Vec<&serde_json::Value> = if repeats == 1 {
+            vec![&doc]
+        } else {
+            doc["runs"].as_array().unwrap().iter().collect()
+        };
+        for run in runs {
+            assert_eq!(run["results"][0]["lifetime"]["exit_code"], 0, "{run}");
+            assert_eq!(
+                run["results"][0]["lifetime"]["terminated"],
+                serde_json::Value::Null,
+                "{run}"
+            );
+        }
+        let _ = std::fs::remove_file(&file);
+        if repeats > 1 {
+            for index in 1..=repeats {
+                let _ = std::fs::remove_file(format!("{}.{index}", file.display()));
+            }
+        }
+    }
+}
+
+#[test]
+fn repeated_trace_does_not_copy_a_discard_device() {
+    let result = run(&[
+        "trace",
+        "mem.rss",
+        "-m",
+        "poll",
+        "-e",
+        "summary",
+        "-r",
+        "2",
+        "--program-stdout",
+        "/dev/null",
+        "--program-stderr",
+        "/dev/null",
+        "--",
+        "/bin/sh",
+        "-c",
+        "echo discard; echo discard >&2",
+    ]);
+    assert!(result.status.success(), "{}", stderr(&result));
+}
