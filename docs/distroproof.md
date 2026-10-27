@@ -27,7 +27,7 @@ commit that fixed it. It is meant to be read as distroproof's living proof.
 | Findings in Omniscient | **27 defects** no test on the development machine had shown: **13 in the tool** (the release, the probes, the catalog, a collector) and **14 in its test suite** (a judge, the reference runner, twelve reference pairs) |
 | Claims refuted | **158** runs of a source Omniscient called usable that the kernel refused at start, in the first matrix; **0** after |
 | Cross-checked | every reason Omniscient gives for a refusal agrees with envprobe's independent reading of the same guest, on all 21 targets |
-| Latest run | 2026-10-26, the twenty-seventh wave's binary (`adb1e5d`): **28 of 28** targets passed, the 7 cells before 5.8 swept again after the fixes they found, the 8 containers swept, and the 28 judges of `cargo test --test portability` green. Usable sources per cell, of 123: 40 (Debian 10, Ubuntu 18.04, unprivileged) to 97 (Arch, Fedora, Gentoo, NixOS); root on the kernels without BTF 79 (Debian 10) and 90 (Ubuntu 20.04, Rocky 8); arm64 83 to 89; containers 48 rootless, 61 with the capabilities added, 62 privileged |
+| Latest run | 2026-10-27, the twenty-ninth wave's binary (`d6bd533`, 124 sources with `runtime.func`): **28 of 28** targets, the 8 containers and the host swept again, and the judges of `cargo test --test portability` green. Before it, 2026-10-26, the twenty-seventh wave's binary (`adb1e5d`): **28 of 28** targets passed, the 7 cells before 5.8 swept again after the fixes they found, the 8 containers swept, and the 28 judges of `cargo test --test portability` green. Usable sources per cell, of 123: 40 (Debian 10, Ubuntu 18.04, unprivileged) to 97 (Arch, Fedora, Gentoo, NixOS); root on the kernels without BTF 79 (Debian 10) and 90 (Ubuntu 20.04, Rocky 8); arm64 83 to 89; containers 48 rootless, 61 with the capabilities added, 62 privileged |
 | Back into distroproof | 3 images (Gentoo, Debian sid, Fedora 43), 2 boot fixes, 3 `[run]` options, 2 envprobe facts (pull requests [#4](https://github.com/devutils-org/distroproof/pull/4), [#5](https://github.com/devutils-org/distroproof/pull/5)) |
 
 ## Reproducing it
@@ -58,6 +58,50 @@ agrees with envprobe.
 reference pairs -- Omniscient against `perf`, `bpftrace`, `strace`, the bcc
 tools, on the same workload, within a declared tolerance -- on six
 distributions with the witnesses their own packages carry.
+
+## The hardware cells (2026-10-27)
+
+A VM hides what a measurement on real hardware needs: Intel PT, the topdown
+slots, uncore and `resctrl`, the throttle counters, a GPU's scheduler. The
+sources that read them -- `cpu.flow`, `cpu.topdown`, `mem.bandwidth`,
+`power.throttle`, `gpu.job` -- had never been run anywhere but on the
+development machine, an AMD one that has none of them. So distroproof
+learned to run a target on a machine already running, over ssh
+(distroproof `36b144f`), and the matrix gained cells on bare metal:
+
+```console
+scripts/release.sh && scripts/distroproof/fixtures.sh
+scripts/hardware/matrix.sh                 # the machines in target/hardware/hosts
+scripts/hardware/aws-metal.sh run --yes    # or: an EC2 metal instance, up, swept, terminated
+cargo test --test portability
+```
+
+- `scripts/hardware/matrix.sh` writes distroproof's matrix from
+  `target/hardware/hosts` (an address is not the project's, so it is never
+  committed; `scripts/hardware/hosts.example`) and the guests' own `[run]`,
+  so a hardware cell runs what a guest runs; the cells land beside the
+  guests'. distroproof sends the payload into a fresh directory, ends the
+  agent's session and removes the directory after the run, and deletes the
+  test user it created; what `setup` installs (`/opt/omn`) stays.
+- `scripts/hardware/aws-metal.sh` starts one EC2 metal instance (by default
+  `m7i.metal-24xl`, Sapphire Rapids) and terminates it. Nothing is started
+  without `--yes`; `plan` says what would be. Three nets against an instance
+  left running: `run` terminates it on exit; the instance shuts itself down
+  after `OMN_AWS_HOURS` (2) with shutdown behaviour `terminate`; and every
+  resource is tagged `omn-hardware`, which `sweep-orphans` lists. `DRY_RUN=1`
+  prints every AWS call instead of making it.
+- A new judge, `every_cell_serves_the_hardware_envprobe_saw`: in a cell with
+  the privileges (`caps`, `root`, `host`), the hardware envprobe saw is
+  served -- an `intel_pt` or `cs_etm` PMU and `cpu.flow`, an `uncore_imc`
+  PMU or resctrl with `mbm_total_bytes` and `mem.bandwidth`,
+  `thermal_throttle` and `power.throttle`. envprobe reads the last two
+  (`hardware.resctrl`, `hardware.thermal_throttle`), with the cpufreq driver
+  and its mode and Intel's PMU name, since the same distroproof commit.
+
+No hardware cell has run yet: one waits for a machine, a dedicated Intel
+server or an instance the project pays for by the hour. Until one does, the
+judge holds on the guests trivially, and says how many cells promised
+anything.
 
 ## After the twenty-seventh wave (2026-10-26)
 

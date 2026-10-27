@@ -1,0 +1,8 @@
+# The hardware cells' machines, one per line: name, ssh host, then optionally
+# the port and the private key. Copied to target/hardware/hosts (never
+# committed: an address is not the project's), by hand for a machine of your
+# own, or by aws-metal.sh for an instance it started.
+#
+# name            host                     port  identity
+# xeon-spr-metal  ubuntu@203.0.113.10      22    ~/.ssh/omn-metal
+# intel-client    root@dedicated.example

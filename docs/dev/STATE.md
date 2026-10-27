@@ -350,7 +350,13 @@ item 3 left). What is left, by what it waits on:
    28 of 28 targets, the containers, the 28 judges green; four findings fixed
    on the way, the first of them that a helper's `int` arrives zero-extended
    before 5.8 (`docs/distroproof.md`, "After the twenty-seventh wave").
-2. **A machine**: unchanged from the twenty-sixth wave's item 1 below.
+2. **A machine**: unchanged from the twenty-sixth wave's item 1 below, but
+   now one command away. The hardware cells (`docs/distroproof.md`, "The
+   hardware cells") run the matrix on bare metal over ssh, a dedicated
+   machine or an EC2 metal instance started and terminated by
+   `scripts/hardware/aws-metal.sh`, and a judge holds every cell to the
+   hardware envprobe saw. What waits is the machine itself, and the decision
+   to pay for it.
 3. **What the classic road cannot serve on these kernels**: `net.qdisc`
    (`qdisc_enqueue` is 5.15), `sched.lock`'s tracepoints (5.19), `io.pagecache`
    and `io.readahead` (`mm_filemap_get_pages`, 6.x) -- each a kernel these cells

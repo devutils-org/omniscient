@@ -1088,6 +1088,158 @@ fn every_distroproof_cell_s_reasons_agree_with_envprobe() {
     );
 }
 
+/// What envprobe saw of the machine's hardware: the facts a source's
+/// hardware requirement is answered by.
+#[derive(Debug, Default)]
+struct Hardware {
+    /// `/sys/bus/event_source/devices`: `intel_pt`, `uncore_imc_0`, ...
+    pmus: Vec<String>,
+    thermal_throttle: bool,
+    /// `mounted at /sys/fs/resctrl (llc_occupancy, mbm_total_bytes, ...)`.
+    resctrl: Option<String>,
+}
+
+impl Hardware {
+    fn of(report: &serde_json::Value) -> Hardware {
+        let ok = |section: &str, key: &str| -> Option<String> {
+            report["sections"]
+                .as_array()?
+                .iter()
+                .find(|s| s["name"] == section)?["entries"]
+                .as_array()?
+                .iter()
+                .find(|e| e["key"] == key && e["status"] == "ok")
+                .and_then(|e| e["value"].as_str().map(str::to_owned))
+        };
+        Hardware {
+            pmus: ok("perf", "pmus")
+                .map(|pmus| pmus.split(", ").map(str::to_owned).collect())
+                .unwrap_or_default(),
+            thermal_throttle: ok("hardware", "thermal_throttle").is_some(),
+            resctrl: ok("hardware", "resctrl"),
+        }
+    }
+}
+
+/// What the hardware promises and the cell does not serve: a source whose
+/// hardware envprobe saw, listed anything but usable in a cell whose
+/// privileges allow it (`caps`, `root`, `host`). The converse -- a refusal
+/// naming hardware that is there -- is the reasons judge's.
+fn hardware_promises_unserved(sweep: &Sweep, hardware: &Hardware) -> Vec<String> {
+    if !["caps", "root", "host"].contains(&sweep.cell.config.as_str()) {
+        return Vec::new();
+    }
+    let has_pmu = |prefix: &str| hardware.pmus.iter().any(|pmu| pmu.starts_with(prefix));
+    let promises = [
+        (has_pmu("intel_pt"), "cpu.flow", "an `intel_pt` PMU"),
+        (has_pmu("cs_etm"), "cpu.flow", "a `cs_etm` PMU"),
+        (
+            has_pmu("uncore_imc"),
+            "mem.bandwidth",
+            "an `uncore_imc` PMU",
+        ),
+        (
+            hardware
+                .resctrl
+                .as_deref()
+                .is_some_and(|r| r.contains("mbm_total_bytes")),
+            "mem.bandwidth",
+            "resctrl mounted with memory bandwidth monitoring",
+        ),
+        (
+            hardware.thermal_throttle,
+            "power.throttle",
+            "`thermal_throttle` counters",
+        ),
+    ];
+    let mut out = Vec::new();
+    for (present, id, what) in promises {
+        if !present {
+            continue;
+        }
+        match sweep.sources.iter().find(|source| source.id == id) {
+            Some(source) if source.here == Here::Yes => {}
+            Some(source) => out.push(format!(
+                "{id}: envprobe saw {what}, and the source is listed {:?} here:\n{}",
+                source.here, source.listing
+            )),
+            None => out.push(format!(
+                "{id}: envprobe saw {what}, and the cell has no {id}"
+            )),
+        }
+    }
+    out
+}
+
+/// On every cell with envprobe's report beside it, the hardware it saw is
+/// served. Only a bare-metal cell (an ssh target, `distroproof-hardware.toml`)
+/// can have most of it: a VM hides PT, uncore, resctrl and the throttle
+/// counters.
+#[test]
+fn every_cell_serves_the_hardware_envprobe_saw() {
+    let mut failures = Vec::new();
+    let mut promised = 0;
+    for (path, sweep) in cells_on_disk() {
+        let Ok(text) = fs::read_to_string(path.with_file_name("envprobe.json")) else {
+            continue;
+        };
+        let report: serde_json::Value = serde_json::from_str(&text).expect("envprobe's report");
+        let hardware = Hardware::of(&report);
+        if hardware.thermal_throttle
+            || hardware.resctrl.is_some()
+            || hardware.pmus.iter().any(|p| {
+                ["intel_pt", "cs_etm", "uncore_imc"]
+                    .iter()
+                    .any(|h| p.starts_with(h))
+            })
+        {
+            promised += 1;
+        }
+        for unserved in hardware_promises_unserved(&sweep, &hardware) {
+            failures.push(format!("[{}] {unserved}", sweep.cell.name));
+        }
+    }
+    eprintln!("hardware: {promised} cell(s) whose hardware promised a source");
+    assert!(
+        failures.is_empty(),
+        "{} unserved:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// The hardware judge, against planted cells.
+#[test]
+fn the_hardware_judge_catches_hardware_that_is_there_and_unserved() {
+    let pt = Hardware {
+        pmus: vec!["cpu".into(), "intel_pt".into(), "uncore_imc_0".into()],
+        thermal_throttle: true,
+        resctrl: None,
+    };
+    let cell = honest_cell("6.8", "caps");
+    let found = hardware_promises_unserved(&cell, &pt);
+    assert!(found.iter().any(|f| f.starts_with("cpu.flow")), "{found:?}");
+    assert!(
+        found.iter().any(|f| f.starts_with("mem.bandwidth")),
+        "{found:?}"
+    );
+    assert!(
+        found.iter().any(|f| f.starts_with("power.throttle")),
+        "{found:?}"
+    );
+    let mut served = honest_cell("6.8", "caps");
+    source(&mut served, "cpu.flow").here = Here::Yes;
+    let found = hardware_promises_unserved(&served, &pt);
+    assert!(
+        !found.iter().any(|f| f.starts_with("cpu.flow")),
+        "{found:?}"
+    );
+    // Without the privileges, a refusal is the reasons judge's to weigh.
+    assert!(hardware_promises_unserved(&honest_cell("6.8", "nocaps"), &pt).is_empty());
+    // And a machine without the hardware promises nothing.
+    assert!(hardware_promises_unserved(&cell, &Hardware::default()).is_empty());
+}
+
 /// The judge is checked first against a cell with planted disagreements: a
 /// judge that passes everything proves nothing about the cells it passed.
 #[test]
