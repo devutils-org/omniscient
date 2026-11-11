@@ -110,19 +110,21 @@
   truth: advice_truth::a_wider_affinity_ends_the_wait_for_one_cpu
 
 - id: io.readahead-refused
-  summary: "The workload missed the page cache a thousand times and more, and the kernel read nothing ahead of it."
+  summary: "The workload missed the page cache a thousand times and more, and each missed page was a block request of its own, though every backing device reads ahead: the program asked it not to."
   objectives: [latency, throughput]
   evidence:
-    - {source: io.readahead, mode: trace, stat: total, below: 1}
     - {source: io.pagecache, mode: trace, stat: total, above: 1000}
-  setting: block.read_ahead_kb
+    - {source: io.latency, mode: trace, stat: count, per: {source: io.pagecache, mode: trace, stat: total}, above: 0.5}
+    - {setting: bdi.read_ahead_kb, above: 0, every: true}
+  setting: bdi.read_ahead_kb
   mechanism: >-
     Readahead fetches the pages after the ones a sequential reader asked for, so
     the next read finds them cached. It is off for a file opened with
     posix_fadvise(POSIX_FADV_RANDOM) or madvise(MADV_RANDOM), and for a device whose
-    read_ahead_kb is 0; then every read the cache misses waits for the device.
+    filesystem's backing device has read_ahead_kb at 0; then every read the
+    cache misses waits for the device.
   docs: block/queue-sysfs.rst
-  expect: {source: io.readahead, mode: trace, stat: total, goes: up}
+  expect: {source: io.latency, mode: trace, stat: count, per: {source: io.pagecache, mode: trace, stat: total}, goes: down}
   also:
     - {run: wall_ns, goes: down}
   scope: process
@@ -131,6 +133,65 @@
     POSIX_FADV_SEQUENTIAL for a file read in order; for the device,
     echo <KiB> > /sys/block/<dev>/queue/read_ahead_kb (machine, until reboot)
   caveats:
+    - "Nothing read ahead is read off the block requests: one per page the cache missed, where readahead would have made one of many (8192 requests for 8192 misses under POSIX_FADV_RANDOM, 306 for 9728 without, docs/scenarios/advice.md). The requests are those submitted in the program's own context, which a sequential reader's are."
     - "A reader that is random for real gains nothing from readahead and pays for pages it never reads: the hint may be right."
     - "A file already in the page cache needs no readahead, and reads none: the evidence is only worth something on a cold cache."
   truth: advice_truth::readahead_refused_by_a_hint_returns_without_it
+
+- id: bdi.readahead-off
+  summary: "The workload missed the page cache a thousand times and more, and each missed page was a block request of its own: a backing device's readahead is off."
+  objectives: [latency, throughput]
+  evidence:
+    - {source: io.pagecache, mode: trace, stat: total, above: 1000}
+    - {source: io.latency, mode: trace, stat: count, per: {source: io.pagecache, mode: trace, stat: total}, above: 0.5}
+    - {setting: bdi.read_ahead_kb, is: 0}
+  setting: bdi.read_ahead_kb
+  mechanism: >-
+    A file's readahead is bounded by its filesystem's backing device
+    (/sys/class/bdi): the block device's own for ext4 or xfs, one of its own
+    for btrfs. At read_ahead_kb 0 readahead never runs for a file there, and
+    every page a reader looks up is a read it waits for.
+  docs: ABI/testing/sysfs-class-bdi
+  expect: {source: io.latency, mode: trace, stat: count, per: {source: io.pagecache, mode: trace, stat: total}, goes: down}
+  also:
+    - {run: wall_ns, goes: down}
+  scope: machine
+  change: >-
+    echo 128 > /sys/class/bdi/<bdi>/read_ahead_kb (until reboot): <bdi> is the
+    instance the setting names; for a block device, also
+    /sys/block/<dev>/queue/read_ahead_kb or blockdev --setra 256 /dev/<dev>, or a udev rule
+  caveats:
+    - "The rule holds when any backing device reads nothing ahead, not necessarily the one under the workload's files: the setting's instances name them."
+    - "On btrfs the disk's queue/read_ahead_kb governs nothing a file reads: the filesystem's bdi does (btrfs-N). On an Arch guest, vda at 0 left btrfs reading 1546 pages ahead (docs/scenarios/advice.md)."
+    - "A device set to 0 on purpose -- a database that does its own prefetching on direct I/O -- loses nothing to it."
+  truth: advice_truth::a_device_s_readahead_set_again_reads_ahead
+
+- id: mm.thp-defrag-stall
+  summary: "Memory was compacted for huge pages the program never asked for: the machine's THP policy stalls every fault that wants one."
+  objectives: [latency, tail]
+  evidence:
+    - {source: mem.compaction, mode: trace, target: system, stat: total, above: 10000000}
+    - {setting: mm.thp.defrag, is: always}
+    - {setting: process.madv_hugepage_mappings, is: 0}
+  setting: mm.thp.defrag
+  mechanism: >-
+    With transparent_hugepage/defrag at always, a page fault that could be
+    backed by a huge page and finds no free 2 MiB block stalls to compact
+    memory -- migrating pages to make one -- whether or not the program asked
+    for huge pages. At madvise, only memory madvised MADV_HUGEPAGE stalls; the
+    rest takes small pages and leaves compaction to kcompactd.
+  docs: admin-guide/mm/transhuge.rst
+  expect: {source: mem.compaction, mode: trace, target: system, stat: total, goes: down}
+  also:
+    - {run: wall_ns, goes: down}
+  scope: machine
+  change: >-
+    echo madvise > /sys/kernel/mm/transparent_hugepage/defrag (or defer+madvise)
+    for the machine; for this program alone, prctl(PR_SET_THP_DISABLE) before it
+    allocates, or MADV_NOHUGEPAGE on its large mappings
+  caveats:
+    - "mem.compaction is the machine's: compaction for another process in the window counts. The rule is for a machine the workload has to itself, or a window where nothing else allocates."
+    - "Huge pages are not lost, only no longer waited for: khugepaged can still collapse the memory later, which a workload that lives long enough gets back."
+    - "The program's madvised mappings are read when it starts; memory it madvises later is not in the evidence."
+  truth: advice_truth::defrag_on_madvise_ends_the_compaction_stall
+

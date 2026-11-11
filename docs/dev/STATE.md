@@ -331,14 +331,13 @@ print the rules their own runs hold.
 
 What it leaves, in the order it is worth doing:
 
-1. **The rules that need a machine-wide write**, under `distroproof run` in a
-   guest: the governor and EPP for a latency objective, `vm.swappiness`
-   under a swap-heavy load, IRQ affinity against a network server's cpu,
-   `tcp_notsent_lowat` and the qdisc for a sender, `read_ahead_kb` per
-   device. The settings are read already; each needs its fixture and its
-   test there.
-2. **THP compaction stalls** (`mm.thp.defrag`, `MADV_HUGEPAGE`), which need
-   fragmented memory a user process here cannot make: a guest again.
+1. **The rules that need a machine-wide write**: done for two after the
+   wave, in guests (`distroproof-advice.toml`): `bdi.readahead-off` and
+   `mm.thp-defrag-stall`, on Arch and Debian 13. Left: the governor and EPP
+   (a QEMU guest has no cpufreq: a hardware cell), `vm.swappiness`, IRQ
+   affinity, `tcp_notsent_lowat` -- each needs a fixture whose prediction is
+   one-sided.
+2. ~~THP compaction stalls~~: done, `mm.thp-defrag-stall` above.
 3. ~~The victims of one workload~~: done after the wave -- `mem.oom`'s trace
    backend follows the target's descendants, and the rule reads the
    workload's victims.

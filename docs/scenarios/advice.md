@@ -82,12 +82,13 @@ both sides. It reads the first victim, and the grower stops at 100 MiB.
 the cache by its owner (`POSIX_FADV_DONTNEED`), then its first half read 4 KiB
 at a time.
 
-| Hint | `io.readahead` ahead | Page-cache misses |
+| Hint | Block requests per page-cache miss | `io.readahead` ahead |
 |---|---|---|
-| `POSIX_FADV_RANDOM` | -3: the rule holds | 8192 |
-| none | 1533: as predicted | 9728 |
+| `POSIX_FADV_RANDOM` | 8192 / 8192 = 1.0: the rule holds | -3 |
+| none | 306 / 9728 = 0.03: as predicted | 1533 |
 
-Two attempts failed before this one, and each is a property of the sources:
+The evidence is the requests per miss. Three attempts failed before it, and
+each is a property of the sources:
 
 - **A whole file read to its end says nothing**: pages filled and pages
   looked up agree whatever readahead did, and `ahead` was 0 for both hints
@@ -95,16 +96,62 @@ Two attempts failed before this one, and each is a property of the sources:
 - **A file of one repeated byte is not read from the disk**: btrfs compressed
   64 MiB into about 2 MiB of extents, and `io.size` saw 512 requests of 4 KiB
   for either hint. The fixture writes incompressible bytes.
+- **`ahead` itself is too weak a sign**: a reader with readahead on ends with
+  one window in front of it, 58 pages on ext4 at 128 KiB, 30 on btrfs at
+  128 KiB, and one with it off still had 10 on btrfs. A threshold between
+  them made the hint rule fire on an Arch guest that had no hint. One block
+  request per missed page is unambiguous: 1.0 against 0.001 to 0.03.
 
-The wall clock moved both ways across repeated runs (348 ms and 217 ms with
-the hint, 130 ms and 204 ms without), so it is a side effect the rule
+The wall clock moved both ways across repeated runs here (348 ms and 217 ms
+with the hint, 130 ms and 204 ms without), so it is a side effect the rule
 reports, not a prediction the test holds.
+
+## `bdi.readahead-off` (in a guest)
+
+`distroproof-advice.toml`, as root, Arch (7.2, btrfs) and Debian 13 (6.12,
+ext4), 2 GiB, 4 cpus. Every backing device's `read_ahead_kb` set to 0, the
+same `readseq`, then each put back:
+
+| Guest | Requests per miss, at 0 -> put back | Wall clock |
+|---|---|---|
+| Arch, btrfs | 1.0 -> 0.0014: as predicted | 334 ms -> 50 ms |
+| Debian 13, ext4 | 1.0 -> 0.032: as predicted | 354 ms -> 164 ms |
+
+**The setting is the bdi's, not the disk's.** The first run set
+`/sys/block/vda/queue/read_ahead_kb` to 0: on Debian's ext4 that is the same
+knob, and the rule held; on Arch's btrfs, readahead went on (1546 pages
+ahead), because a btrfs filesystem has a backing device of its own
+(`/sys/class/bdi/btrfs-N`, 4096 KiB there) that the disk's queue does not
+govern. `settings.yaml` reads `bdi.read_ahead_kb` for every bdi, and the
+rule names the instance at 0.
+
+## `mm.thp-defrag-stall` (in a guest)
+
+The same guests, `enabled` at always. `fragment` touches 95 % of what is
+available in small pages (`MADV_NOHUGEPAGE`) and gives back every other one;
+`huge 600` then faults 600 MiB 2 MiB at a time.
+
+| Guest | `defrag` | Compaction (`mem.compaction`, the machine's) | The kernel's `/proc/vmstat` |
+|---|---|---|---|
+| Arch | always | 137 ms: the rule holds | 206 `compact_stall` |
+| Arch | madvise | none: as predicted | 0 more stalls, 197 `thp_fault_fallback` |
+| Debian 13 | always | 111 ms: the rule holds | 216 `compact_stall` |
+| Debian 13 | madvise | none: as predicted | 0 more stalls, 189 `thp_fault_fallback` |
+
+The wall clock went down on Arch (166 -> 17 ms) and up on Debian (170 ->
+203 ms): taking small pages is not free either, and the rule reports it as
+a side effect, not a prediction.
+
+The first two runs proved nothing, and the vmstat lines are why the script
+keeps printing them: fragmenting 60 % then 85 % of the memory left enough
+untouched memory contiguous for every huge page (`thp_fault_alloc` up by
+154, no fallback, no stall). At 95 %, with more faulted than is left
+contiguous, every fault compacts.
 
 ## Not built, and why
 
-- **THP compaction stalls** (`mm.thp.defrag`, `MADV_HUGEPAGE`): the fixture
-  would have to fragment memory reliably, which a user process on a 64 GiB
-  machine with 35 GiB free does not. A guest under `distroproof run` can.
-- **The governor and EPP, `vm.swappiness`, IRQ affinity, `tcp_notsent_lowat`,
-  `read_ahead_kb` per device**: each needs a machine-wide write, which only a
-  distroproof guest may make in a test.
+- **The governor and EPP**: a QEMU guest has no cpufreq, so the setting it
+  would change is not there; a hardware cell is where it can be checked.
+- **`vm.swappiness`, IRQ affinity, `tcp_notsent_lowat`**: each needs a
+  machine-wide write and a workload whose prediction is one-sided, which no
+  fixture here has yet.

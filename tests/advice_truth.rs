@@ -331,8 +331,8 @@ fn a_wider_affinity_ends_the_wait_for_one_cpu() {
 }
 
 /// `io.readahead-refused`: half a cold file read 4 KiB at a time under
-/// POSIX_FADV_RANDOM reads nothing ahead; without the hint, readahead fills
-/// in front of the reader.
+/// POSIX_FADV_RANDOM is one block request per page; without the hint,
+/// readahead makes one request of many pages.
 #[test]
 fn readahead_refused_by_a_hint_returns_without_it() {
     let _alone = alone();
@@ -382,8 +382,13 @@ fn readahead_refused_by_a_hint_returns_without_it() {
     );
     let check = prediction(&after, "io.readahead-refused");
     assert_eq!(check["verdict"], "as_predicted", "{check:#}");
+    // A request per missed page before; a request for many after.
     assert!(
-        check["after"]["number"].as_f64().unwrap() > 100.0,
+        check["before"]["number"].as_f64().unwrap() > 0.5,
+        "{check:#}"
+    );
+    assert!(
+        check["after"]["number"].as_f64().unwrap() < 0.2,
         "{check:#}"
     );
     assert!(!fired(&after, "io.readahead-refused"), "{after:#}");
@@ -476,4 +481,74 @@ fn the_victims_are_the_launched_tree_s_and_no_one_else_s() {
         none.is_empty(),
         "a kill outside the workload was named: {none:?}"
     );
+}
+
+// --- the rules whose setting is the machine's, judged on what a guest
+// brought back (distroproof-advice.toml, scripts/distroproof/advice.sh): the
+// setting is changed there, as root, and never here.
+
+/// Every guest's pair of answers for `pair`, by target, from
+/// `.distroproof/collect/<target>/advice-guest.json`.
+fn guest_pairs(pair: &str) -> Vec<(String, Value, Value)> {
+    let collect = Path::new(env!("CARGO_MANIFEST_DIR")).join(".distroproof/collect");
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(collect).into_iter().flatten().flatten() {
+        let file = entry.path().join("advice-guest.json");
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        let document: Value = serde_json::from_str(&text)
+            .unwrap_or_else(|error| panic!("{}: {error}", file.display()));
+        if let Some(both) = document.get(pair) {
+            found.push((
+                entry.file_name().to_string_lossy().into_owned(),
+                both["before"].clone(),
+                both["after"].clone(),
+            ));
+        }
+    }
+    found
+}
+
+/// The rule held before, its prediction moved after, and its own setting is
+/// among those that differ.
+fn judge_guest_pair(pair: &str, rule: &str, setting: &str) {
+    let pairs = guest_pairs(pair);
+    if pairs.is_empty() {
+        return eprintln!(
+            "skipped: no guest brought back the `{pair}` pair; run distroproof-advice.toml \
+             (`distroproof up -f distroproof-advice.toml`)"
+        );
+    }
+    for (target, before, after) in pairs {
+        assert!(
+            fired(&before, rule),
+            "{target}: {rule} did not hold before: {before:#}"
+        );
+        assert!(
+            changed(&after, setting).is_some(),
+            "{target}: {setting} is not among the settings that differ: {after:#}"
+        );
+        let check = prediction(&after, rule);
+        assert_eq!(check["verdict"], "as_predicted", "{target}: {check:#}");
+        assert!(
+            !fired(&after, rule),
+            "{target}: {rule} still holds after: {after:#}"
+        );
+    }
+}
+
+/// `bdi.readahead-off`: backing devices at `read_ahead_kb` 0 make every
+/// page a sequential reader misses a request of its own; at their own
+/// values they do not.
+#[test]
+fn a_device_s_readahead_set_again_reads_ahead() {
+    judge_guest_pair("readahead", "bdi.readahead-off", "bdi.read_ahead_kb");
+}
+
+/// `mm.thp-defrag-stall`: on fragmented memory, huge-page faults stall in
+/// compaction with `defrag` at always, and do not at madvise.
+#[test]
+fn defrag_on_madvise_ends_the_compaction_stall() {
+    judge_guest_pair("thp", "mm.thp-defrag-stall", "mm.thp.defrag");
 }

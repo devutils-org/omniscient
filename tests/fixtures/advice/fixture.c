@@ -9,6 +9,12 @@
  *   oomtwo DIR ADJ       run DIR/keeper (hold 120 MB) and DIR/grower (grow
  *                        100 MB, with oom_score_adj ADJ), wait for both
  *   spin THREADS ITERS   THREADS threads, each doing ITERS units of work
+ *   fragment MB SECONDS  touch MB in small pages, then give back every other
+ *                        page: memory full of half-used 2 MiB blocks, held
+ *                        SECONDS (a guest's; never run on the development
+ *                        machine, which has too much memory to fragment)
+ *   huge MB              fault MB of anonymous memory 2 MiB at a time, which
+ *                        transparent huge pages back where the policy lets
  *   readseq PATH MB HINT write PATH (MB of incompressible bytes), evict it
  *                        from the cache, and read its first half 4 KiB at
  *                        a time; HINT random or normal. Half, because over
@@ -23,6 +29,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -75,6 +82,32 @@ static pid_t run(const char *path, char *const argv[], int adj)
 
 int main(int argc, char **argv)
 {
+	if (argc >= 4 && !strcmp(argv[1], "fragment")) {
+		size_t bytes = (size_t)atol(argv[2]) << 20, page = 4096;
+		char *area = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		if (area == MAP_FAILED)
+			return 8;
+		madvise(area, bytes, MADV_NOHUGEPAGE);
+		for (size_t at = 0; at < bytes; at += page)
+			area[at] = 1;
+		for (size_t at = 0; at < bytes; at += 2 * page)
+			madvise(area + at, page, MADV_DONTNEED);
+		printf("fixture: fragmented %s MB\n", argv[2]);
+		fflush(stdout);
+		sleep(atoi(argv[3]));
+		return 0;
+	}
+	if (argc >= 3 && !strcmp(argv[1], "huge")) {
+		size_t bytes = (size_t)atol(argv[2]) << 20, step = 2 << 20;
+		char *area = mmap(NULL, bytes + step, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		if (area == MAP_FAILED)
+			return 9;
+		char *aligned = (char *)(((uintptr_t)area + step - 1) & ~(uintptr_t)(step - 1));
+		for (size_t at = 0; at < bytes; at += step)
+			aligned[at] = 1;
+		printf("fixture: faulted %s MB\n", argv[2]);
+		return 0;
+	}
 	if (argc >= 3 && !strcmp(argv[1], "grow")) {
 		grow(atol(argv[2]));
 		printf("fixture: grew %s MB\n", argv[2]);

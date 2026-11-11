@@ -58,14 +58,18 @@ rule's own setting did not is not credited to the rule.
 `omn latency` and `omn saturate` read the settings too, and print the rules
 their own measurements hold under `settings that bear on this`.
 
-The rules today, each with a ground-truth test (`tests/advice_truth.rs`):
+The rules today, each with a ground-truth test (`tests/advice_truth.rs`; the
+last two are judged on what a distroproof guest brought back,
+`distroproof-advice.toml`):
 
 | Rule | Fires on | Setting |
 |---|---|---|
 | `cgroup.memory.swap-denied` | an OOM kill in a cgroup denied swap, on a machine with swap | `memory.swap.max` |
 | `oom.victim-by-size` | an OOM kill among several programs, no victim adjusted | `oom_score_adj` |
 | `sched.shared-cpu` | run-queue waits above 1 ms, an affinity narrower than the machine | the cpu affinity |
-| `io.readahead-refused` | a thousand page-cache misses and nothing read ahead | the readahead hint, `read_ahead_kb` |
+| `io.readahead-refused` | a thousand page-cache misses, one block request each, every bdi reading ahead | the program's readahead hint |
+| `bdi.readahead-off` | the same, with a backing device at `read_ahead_kb` 0 | `/sys/class/bdi/*/read_ahead_kb` |
+| `mm.thp-defrag-stall` | compaction during the run, `defrag` at always, nothing madvised | `transparent_hugepage/defrag` |
 
 What a rule says is in `docs/scenarios/advice.md`, with the numbers its
 ground truth measured and what it does not cover.

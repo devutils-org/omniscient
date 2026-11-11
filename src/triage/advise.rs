@@ -109,6 +109,13 @@ pub struct Item {
     pub below_setting: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goes: Option<Goes>,
+    /// For a setting with several instances: every instance must hold, not
+    /// one of them (the default).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub every: bool,
+    /// A measure this one is divided by: block requests per page-cache miss.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per: Option<Box<Item>>,
 }
 
 impl Item {
@@ -143,9 +150,13 @@ impl Item {
             .stat
             .map(|stat| format!("{stat:?}").to_lowercase())
             .unwrap_or_default();
-        match &self.attr {
+        let own = match &self.attr {
             Some(attr) => format!("{} {stat}({attr})", self.label()),
             None => format!("{} {stat}", self.label()),
+        };
+        match &self.per {
+            Some(per) => format!("{own} per {}", per.reading()),
+            None => own,
         }
     }
 
@@ -200,6 +211,13 @@ impl Rule {
             .chain(std::iter::once(&self.expect))
             .chain(&self.also)
             .filter(|item| item.is_measure())
+    }
+
+    /// Every measure a session must ask for: the rule's, and what each is
+    /// divided by.
+    fn requested(&self) -> impl Iterator<Item = &Item> {
+        self.measures()
+            .flat_map(|item| std::iter::once(item).chain(item.per.as_deref()))
     }
 
     /// Every setting the rule reads.
@@ -296,6 +314,16 @@ fn check_item(item: &Item, place: Place) -> Result<(), String> {
             "an item names exactly one of source, run, setting: {item:?}"
         ));
     }
+    if item.every && item.setting.is_none() {
+        return Err(format!("`every` is for a setting's instances: {item:?}"));
+    }
+    if let Some(per) = &item.per {
+        if per.source.is_none() || per.per.is_some() || per.stat.is_none() || per.mode.is_none() {
+            return Err(format!(
+                "`per` names one measure, with a mode and a stat, divided by nothing: {item:?}"
+            ));
+        }
+    }
     if let Some(run) = &item.run {
         if run != "wall_ns" {
             return Err(format!("`run: {run}` is not a reading: `wall_ns` is"));
@@ -341,7 +369,7 @@ fn check_item(item: &Item, place: Place) -> Result<(), String> {
 /// exists and serves the mode named, every setting is a row.
 pub fn check_against(rules: &[Rule], catalog: &Catalog) -> Result<(), String> {
     for rule in rules {
-        for item in rule.measures() {
+        for item in rule.requested() {
             let Some(source) = &item.source else {
                 continue;
             };
@@ -424,7 +452,7 @@ impl Ask {
     pub fn session(&self) -> Session {
         let mut wanted: BTreeMap<String, (&Item, bool)> = BTreeMap::new();
         for rule in self.rules() {
-            for item in rule.measures().filter(|item| item.source.is_some()) {
+            for item in rule.requested().filter(|item| item.source.is_some()) {
                 let entry = wanted.entry(item.label()).or_insert((item, false));
                 entry.1 |= item.attr.is_some();
             }
@@ -744,8 +772,47 @@ fn text_attr(event: &Event, name: &str) -> Option<String> {
     })
 }
 
-/// One measure, read off the run.
+/// One measure, read off the run; a ratio when it names what it is per.
 fn measure(run: &Run, item: &Item, dropped: &[Dropped]) -> Measured {
+    let Some(per) = &item.per else {
+        return measure_one(run, item, dropped);
+    };
+    let mut own = item.clone();
+    own.per = None;
+    let (top, bottom) = (
+        measure_one(run, &own, dropped),
+        measure_one(run, per, dropped),
+    );
+    match (top.number, bottom.number) {
+        // A ratio of two counts either of which lost events is no bound
+        // either way: neither `above` nor `below` can be decided on it.
+        (Some(_), Some(_)) if top.lower_bound || bottom.lower_bound => Measured::missing(
+            "events were lost on one side of the ratio, so it bounds nothing".to_owned(),
+        ),
+        (Some(top_number), Some(bottom_number)) if bottom_number > 0.0 => Measured {
+            number: Some(top_number / bottom_number),
+            text: None,
+            lower_bound: false,
+            missing: None,
+        },
+        (_, Some(_)) => top.missing.map_or_else(
+            || {
+                Measured::missing(format!(
+                    "{} is zero, and nothing is per nothing",
+                    per.reading()
+                ))
+            },
+            Measured::missing,
+        ),
+        _ => Measured::missing(
+            bottom
+                .missing
+                .unwrap_or_else(|| format!("{} has no value", per.reading())),
+        ),
+    }
+}
+
+fn measure_one(run: &Run, item: &Item, dropped: &[Dropped]) -> Measured {
     if item.run.is_some() {
         let lifetime = run
             .output
@@ -999,6 +1066,41 @@ fn holds(
         }
         None => None,
     };
+    let holds_for = |reading: &&Reading| {
+        let number = reading.number();
+        let text = reading.effective();
+        item.above
+            .is_none_or(|above| number.is_some_and(|n| n > above))
+            && item
+                .below
+                .is_none_or(|below| number.is_some_and(|n| n < below))
+            && item.is.as_ref().is_none_or(|is| is.matches(number, text))
+            && item
+                .is_not
+                .as_ref()
+                .is_none_or(|is_not| !is_not.matches(number, text))
+            && other.is_none_or(|other| number.is_some_and(|n| n < other))
+    };
+    if item.every {
+        return Ok(match set.iter().find(|reading| !holds_for(reading)) {
+            Some(against) => (
+                false,
+                format!(
+                    "{id}{} = {}",
+                    against
+                        .instance
+                        .as_ref()
+                        .map(|instance| format!(" [{instance}]"))
+                        .unwrap_or_default(),
+                    against.effective().unwrap_or("")
+                ),
+            ),
+            None => (
+                true,
+                format!("{id}, every one of {}: {}", set.len(), item.comparison()),
+            ),
+        });
+    }
     // A setting with several instances holds where any instance does.
     for reading in &set {
         let number = reading.number();
@@ -1710,18 +1812,48 @@ mod tests {
 
     #[test]
     fn a_lower_bound_cannot_say_a_reading_is_below_anything() {
-        let rule = rule("io.readahead-refused");
+        let rules = load(
+            "- id: x\n  summary: s\n  objectives: [latency]\n  evidence:\n    - {source: mem.oom, \
+             mode: count, stat: total, below: 1}\n  setting: vm.swappiness\n  mechanism: m\n  \
+             docs: d\n  expect: {source: mem.oom, mode: count, stat: total, goes: down}\n  \
+             scope: machine\n  change: c\n  truth: t\n",
+        )
+        .unwrap();
         let mut measures = BTreeMap::new();
         let mut lost = number(0.0);
         lost.lower_bound = true;
-        measures.insert(rule.evidence[0].reading(), lost);
-        measures.insert(rule.evidence[1].reading(), number(5000.0));
-        let (advice, undecided, _) = evaluate(&[rule], &measures, &[], &[]);
+        measures.insert(rules[0].evidence[0].reading(), lost);
+        let (advice, undecided, _) = evaluate(&[&rules[0]], &measures, &[], &[]);
         assert!(advice.is_empty());
         assert!(
             undecided[0].lacking[0].contains("lower bound"),
             "{undecided:?}"
         );
+    }
+
+    #[test]
+    fn a_ratio_reads_requests_per_miss_and_a_rule_holds_on_it() {
+        let rule = rule("bdi.readahead-off");
+        let ratio = rule
+            .evidence
+            .iter()
+            .find(|item| item.per.is_some())
+            .expect("the rule reads a ratio");
+        assert!(
+            ratio.reading().contains(" per io.pagecache trace total"),
+            "{}",
+            ratio.reading()
+        );
+        let mut measures = BTreeMap::new();
+        measures.insert(rule.evidence[0].reading(), number(8192.0));
+        measures.insert(ratio.reading(), number(1.0));
+        let settings = vec![reading("bdi.read_ahead_kb", "0")];
+        let (advice, _, held) = evaluate(&[rule], &measures, &settings, &[]);
+        assert_eq!(advice.len(), 1, "{held:?}");
+        measures.insert(ratio.reading(), number(306.0 / 9728.0));
+        let (advice, _, held) = evaluate(&[rule], &measures, &settings, &[]);
+        assert!(advice.is_empty());
+        assert_eq!(held.len(), 1);
     }
 
     #[test]

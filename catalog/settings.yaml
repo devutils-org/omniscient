@@ -286,6 +286,13 @@
   docs: block/queue-sysfs.rst
   bears_on: [io.readahead, mem.faults]
 
+- id: bdi.read_ahead_kb
+  scope: machine
+  file: /sys/class/bdi/*/read_ahead_kb
+  mechanism: "The most readahead fetches for files on each backing device: what governs a file's readahead, which is its filesystem's bdi -- the block device's for ext4 or xfs, a bdi of its own for btrfs (btrfs-N), whatever the disk under it says."
+  docs: ABI/testing/sysfs-class-bdi
+  bears_on: [io.readahead, mem.faults]
+
 - id: block.nr_requests
   scope: machine
   file: /sys/block/*/queue/nr_requests
