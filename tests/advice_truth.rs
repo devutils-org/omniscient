@@ -388,3 +388,92 @@ fn readahead_refused_by_a_hint_returns_without_it() {
     );
     assert!(!fired(&after, "io.readahead-refused"), "{after:#}");
 }
+
+/// The victims `mem.oom` names for a launched program are its own tree's: a
+/// child the kernel kills is named, and a kill elsewhere on the machine in
+/// the same window is not.
+#[test]
+fn the_victims_are_the_launched_tree_s_and_no_one_else_s() {
+    let _alone = alone();
+    let fixture = match fixture() {
+        Ok(path) => path,
+        Err(reason) => return eprintln!("skipped: {reason}"),
+    };
+    let scope = ["OOMPolicy=continue", "MemoryMax=128M", "MemorySwapMax=0"];
+    skip_unless!(scope_works(&scope));
+    let victims =
+        |system: bool, program: &[&str], beside: Option<&[&str]>| -> Option<Vec<String>> {
+            let mut command = Command::new("systemd-run");
+            command.args(["--user", "--scope", "-q"]);
+            for property in scope {
+                command.args(["-p", property]);
+            }
+            command
+                .arg(BINARY)
+                .args(["mem.oom", "-m", "trace", "-e", "raw", "--format", "json"])
+                .args(if system { &["--system"][..] } else { &[][..] })
+                .args(["--program-stdout", "/dev/null", "--"])
+                .args(program);
+            // A kill in another scope while this one runs.
+            let elsewhere = beside.map(|other| {
+                let mut command = Command::new("systemd-run");
+                command.args(["--user", "--scope", "-q"]);
+                for property in scope {
+                    command.args(["-p", property]);
+                }
+                command
+                    .args(other)
+                    .spawn()
+                    .expect("the other workload starts")
+            });
+            let output = command.output().expect("omn runs");
+            if let Some(mut child) = elsewhere {
+                let _ = child.wait();
+            }
+            let text = String::from_utf8_lossy(&output.stdout).into_owned();
+            let said = text.clone() + &String::from_utf8_lossy(&output.stderr);
+            if said.contains("has no viable backend") || said.contains("CAP_BPF") {
+                eprintln!("skipped: the victims are not traced here: {said}");
+                return None;
+            }
+            assert!(output.status.success(), "{said}");
+            let document: Value = serde_json::from_str(&text).expect("json");
+            let mut comms = Vec::new();
+            for output in document["results"][0]["outputs"].as_array().unwrap() {
+                for event in output["events"].as_array().into_iter().flatten() {
+                    for attr in event["attrs"].as_array().unwrap() {
+                        if attr["name"] == "comm" {
+                            comms.push(attr["value"].as_str().unwrap().to_owned());
+                        }
+                    }
+                }
+            }
+            Some(comms)
+        };
+    let names = fixture.parent().unwrap().to_str().unwrap().to_owned();
+    let tree = [fixture.to_str().unwrap(), "oomtwo", names.as_str(), "0"];
+    let Some(own) = victims(false, &tree, None) else {
+        return;
+    };
+    assert_eq!(own.first().map(String::as_str), Some("keeper"), "{own:?}");
+
+    // Started late enough to be killed inside the window, not before it.
+    let late = format!("sleep 0.6; exec {} grow 300", fixture.display());
+    let grow = ["sh", "-c", late.as_str()];
+    let quiet = ["sleep", "1.5"];
+    let Some(machine) = victims(true, &quiet, Some(&grow)) else {
+        return;
+    };
+    assert!(
+        machine.iter().any(|comm| comm == "fixture"),
+        "the machine's trace did not see the kill beside it, so the next check would prove \
+         nothing: {machine:?}"
+    );
+    let Some(none) = victims(false, &quiet, Some(&grow)) else {
+        return;
+    };
+    assert!(
+        none.is_empty(),
+        "a kill outside the workload was named: {none:?}"
+    );
+}

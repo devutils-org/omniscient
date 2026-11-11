@@ -9,9 +9,8 @@ the fixture or in the systemd scope it runs in -- never on the machine -- and
 a second run `--against` the first. A rule is in the table only if its
 prediction moved that way.
 
-The tests run one at a time (`alone()`): the OOM victims are traced
-machine-wide, so a kill in a parallel test is in the window, and the
-cpu-bound runs are timed.
+The tests run one at a time (`alone()`): the cpu-bound runs are timed, and
+one test traces the machine's victims on purpose.
 
 ---
 
@@ -53,10 +52,14 @@ in `MemoryMax=256M`, swap denied.
 | 0 | `keeper`, the larger: the rule holds (`proc.exec` counts 3 programs) |
 | 1000 | `grower`: as predicted |
 
-The victims are read machine-wide (`mem.oom --system` in trace mode): on a
-launched program the tracepoint sees that process alone, and one run observes
-one workload, so the workload's cgroup cannot be asked beside it. The rule
-says so. The adjustment is set on the grower, not on the launched program, so
+The victims are the workload's own: `mem.oom`'s trace backend follows the
+processes a launched program starts, as the scheduler's sources do, so the
+keeper and the grower are both its. The first version read them machine-wide,
+because the tracepoint then compared the launched pid alone and a cgroup
+target beside a launch is refused; `the_victims_are_the_launched_tree_s_and_no_one_else_s`
+holds the fix both ways -- a child killed is named, and a kill in another
+scope 0.6 s into the window, which a `--system` trace of the same window sees,
+is not. The adjustment is set on the grower, not on the launched program, so
 `--against` reports the target's own `oom_score_adj` unchanged beside the
 verdict rather than crediting a change it did not see.
 

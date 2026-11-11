@@ -74,8 +74,9 @@ In short:
 - **"Not loaded without a passing test"** became: the table carries only rules
   whose test exists (held by a test) and passes in the suite; a binary cannot
   know whether a test passed.
-- **The OOM victims are the machine's** during the run: a run observes one
-  workload, and the tracepoint on a launched program sees that process alone.
+- **The OOM victims were the machine's** at first: the tracepoint on a
+  launched program compared its pid alone. After the wave, the victim program
+  follows the target's descendants, and the rule reads the workload's.
 
 ## What it leaves
 

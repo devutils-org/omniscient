@@ -339,10 +339,9 @@ What it leaves, in the order it is worth doing:
    test there.
 2. **THP compaction stalls** (`mm.thp.defrag`, `MADV_HUGEPAGE`), which need
    fragmented memory a user process here cannot make: a guest again.
-3. **The victims of one workload's cgroup**: a run observes one workload, so
-   `oom.victim-by-size` reads the machine's victims during the run. A filter
-   on the victim's cgroup in `mem.oom`'s trace backend would make it the
-   workload's.
+3. ~~The victims of one workload~~: done after the wave -- `mem.oom`'s trace
+   backend follows the target's descendants, and the rule reads the
+   workload's victims.
 4. **The kernel build configuration without `zcat`**: an inflater for
    `/proc/config.gz`, or leave it.
 5. **The portability matrix**: `conf.*` is `free` and needs only procfs, so

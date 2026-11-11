@@ -454,9 +454,10 @@
        line names). The sizes are the tracepoint's own, the shared part of each
        counter without the cpus' unflushed pages; a kernel whose kill line sums
        every cpu's part prints a few dozen pages more (7.2 on 24 cpus: 208 KiB
-       of anon_rss, 152 KiB of file_rss). A pid target names that
-       process alone, not the children it started: a launched build whose
-       compiler is killed is a --cgroup question."
+       of anon_rss, 152 KiB of file_rss). A pid or a launched program names
+       that process and the processes it starts from then on, followed as
+       the scheduler's sources follow them: a launched build whose compiler
+       is killed lost the compiler, and the victim is named."
     - "A pid names its cgroup: the kernel counts kills per cgroup, never per
        process, and memory.events includes every cgroup below the one named.
        Beside `kills` the cgroup backend carries `oom` (times it ran out,

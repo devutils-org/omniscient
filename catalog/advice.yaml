@@ -61,10 +61,10 @@
   summary: "The OOM killer chose among the workload's processes by size alone: none of its victims had an adjustment."
   objectives: [latency, tail, throughput, energy]
   evidence:
-    - {source: mem.oom, mode: trace, target: system, stat: count, above: 0}
+    - {source: mem.oom, mode: trace, stat: count, above: 0}
     - {source: proc.exec, mode: trace, stat: count, above: 1}
-    - {source: mem.oom, mode: trace, target: system, attr: oom_score_adj, stat: max, is: 0}
-    - {source: mem.oom, mode: trace, target: system, attr: oom_score_adj, stat: min, is: 0}
+    - {source: mem.oom, mode: trace, attr: oom_score_adj, stat: max, is: 0}
+    - {source: mem.oom, mode: trace, attr: oom_score_adj, stat: min, is: 0}
   setting: process.oom_score_adj
   mechanism: >-
     The OOM killer kills the task with the highest oom_score: the memory it holds,
@@ -73,7 +73,7 @@
     the most work. oom_score_adj from 1 to 1000 makes a process a likelier victim,
     and -1000 exempts it.
   docs: filesystems/proc.rst
-  expect: {source: mem.oom, mode: trace, target: system, attr: comm, stat: first, goes: changes}
+  expect: {source: mem.oom, mode: trace, attr: comm, stat: first, goes: changes}
   scope: process
   change: >-
     echo 1000 > /proc/<pid of the process to sacrifice>/oom_score_adj, or
@@ -81,7 +81,6 @@
   caveats:
     - "This chooses which process dies, not whether one does: the memory is short either way, and cgroup.memory.swap-denied is about the whether."
     - "Raising a process's own adjustment needs no privilege; lowering one below what it was needs CAP_SYS_RESOURCE."
-    - "The victims are the machine's, during the run: a run observes one workload, and the OOM tracepoint on a launched program sees that process alone, not the children it started. A kill elsewhere on the machine in the same window would count."
     - "Several processes is read from the workload's execs (proc.exec): a child that forks without exec is not counted, and a workload of one program has no choice to change."
   truth: advice_truth::an_adjustment_moves_the_oom_killer_to_the_other_process
 
