@@ -18,6 +18,7 @@
 //! gone. So a `Collection` always carries what was lost and why, and the count
 //! travels all the way to the user-visible output.
 
+pub mod conf;
 mod cpu;
 pub mod gpu;
 pub(crate) mod io;
@@ -458,6 +459,7 @@ pub fn weighs_its_samples(source_id: &str, backend: &str) -> bool {
 /// families are the vocabulary, not an extension point.
 fn registry() -> Vec<Factory> {
     let families = [
+        conf::factories,
         cpu::factories,
         gpu::factories,
         io::factories,

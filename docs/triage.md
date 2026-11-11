@@ -325,6 +325,38 @@ and the same program run twice unchanged: no function beyond the noise.
 
 ---
 
+## `omn advise` — the setting behind what was measured
+
+`omn advise --objective O -- PROGRAM` asks the rules of
+`catalog/advice.yaml` that serve `O`. It runs, once each, every measure
+those rules name, and beside them `conf.machine`, `conf.process` and
+`conf.changed`; then each rule is held, held back, or undecided:
+
+- **held**: every item of its evidence held on this run. The answer quotes
+  each reading, the mechanism, the setting as it reads now and where, the
+  reading changing it should move and which way, the command as text with
+  its scope, and the caveats.
+- **undecided**: an item could not be read (a source not available here, a
+  setting `unknown`, a lower bound asked to be `below` something), or a
+  setting it reads changed during the run. Each says what it lacked.
+- **held back**: an item was read and did not hold.
+
+Nothing is changed. The check is `--save before.json`, then, after the
+person's change, the same command with `--against before.json`: each rule
+that held before is checked on its prediction (`as_predicted`,
+`not_as_predicted`, `not_measured`, or `setting_unchanged` when a machine or
+cgroup setting did not move), and the settings that differ between the two
+runs are listed.
+
+`omn latency` and `omn saturate` carry the same rules on their own runs, as
+`settings that bear on this`: they ask for the two settings snapshots, free
+and optional, and evaluate the rules whose measured evidence their own
+session holds (`advise::bearing`). Their sessions in `examples/triage-*.yml`
+carry the two requests.
+
+Each rule's ground truth, and the rule the brief planned that the
+measurement refuted, are in `docs/scenarios/advice.md`.
+
 ## The escalation — pay for one layer at a time
 
 `omn latency` pays for every detailed layer for the whole run -- the on-cpu

@@ -34,11 +34,23 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("gpu.yaml", include_str!("../catalog/gpu.yaml")),
     ("proc.yaml", include_str!("../catalog/proc.yaml")),
     ("runtime.yaml", include_str!("../catalog/runtime.yaml")),
+    ("conf.yaml", include_str!("../catalog/conf.yaml")),
 ];
 
 /// The file of the catalog directory that holds the unwind modes rather than
 /// entries: `catalog/unwind.yaml`, read by [`crate::stack::unwind`].
 pub const UNWIND_TABLE: &str = "unwind.yaml";
+
+/// The file that holds the settings the `conf` family reads, one per row:
+/// `catalog/settings.yaml`, read by [`crate::collect::conf`].
+pub const SETTINGS_TABLE: &str = "settings.yaml";
+
+/// The file that holds the advice rules: `catalog/advice.yaml`, read by
+/// [`crate::triage::advise`].
+pub const ADVICE_TABLE: &str = "advice.yaml";
+
+/// The files of the catalog directory that are tables rather than entries.
+pub const TABLES: [&str; 3] = [UNWIND_TABLE, SETTINGS_TABLE, ADVICE_TABLE];
 
 /// One source: what it measures, and every way it might be measured.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -629,6 +641,9 @@ pub enum Unit {
     /// a level, like watts, that a sum over readings makes nothing of
     /// (`gpu.pcie`, whose cumulative counters wrap in a third of a second).
     BytesPerSecond,
+    /// A setting's value, as the kernel spells it: text, never summed or
+    /// averaged (`conf.*`).
+    Setting,
 }
 
 impl Unit {
@@ -644,6 +659,7 @@ impl Unit {
             Unit::Celsius => "celsius",
             Unit::Cycles => "cycles",
             Unit::BytesPerSecond => "bytes_per_second",
+            Unit::Setting => "setting",
         }
     }
 }
@@ -890,8 +906,13 @@ fn check_backend_units(entry: &Entry) -> Result<(), ParseError> {
     // tomorrow has to answer it.
     fn sums(unit: Unit) -> bool {
         match unit {
+            Unit::Ratio
+            | Unit::Hz
+            | Unit::Watts
+            | Unit::Celsius
+            | Unit::BytesPerSecond
+            | Unit::Setting => false,
             Unit::Ns | Unit::Bytes | Unit::Count | Unit::Joules | Unit::Cycles => true,
-            Unit::Ratio | Unit::Hz | Unit::Watts | Unit::Celsius | Unit::BytesPerSecond => false,
         }
     }
     for (rank, backend) in entry.backends.iter().enumerate() {
@@ -1090,9 +1111,12 @@ impl Catalog {
                 path.extension()
                     .is_some_and(|ext| ext == "yaml" || ext == "yml")
             })
-            // The unwind modes live beside the entries and are not entries:
-            // `crate::stack::unwind` reads that table (`UNWIND_TABLE`).
-            .filter(|path| path.file_name().is_none_or(|name| name != UNWIND_TABLE))
+            // The unwind modes, the settings and the advice rules live beside
+            // the entries and are not entries (`TABLES`).
+            .filter(|path| {
+                path.file_name()
+                    .is_none_or(|name| !TABLES.iter().any(|table| name == *table))
+            })
             .collect();
         files.sort();
         if files.is_empty() {
@@ -1693,7 +1717,7 @@ mod tests {
         );
         let families = catalog.families();
         for expected in [
-            "cpu", "mem", "io", "net", "sched", "power", "gpu", "proc", "runtime",
+            "cpu", "mem", "io", "net", "sched", "power", "gpu", "proc", "runtime", "conf",
         ] {
             assert!(families.contains(&expected), "missing family {expected}");
         }

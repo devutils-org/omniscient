@@ -14,8 +14,8 @@ pub(crate) use serde::Serialize;
 pub(crate) use crate::capabilities::Capabilities;
 pub(crate) use crate::catalog::Catalog;
 pub(crate) use crate::cli::{
-    self, Cli, Command, Defaulted, DiffArgs, FormatsArgs, LatencyArgs, ListArgs, SaturateArgs,
-    TopArgs, TraceArgs, ValidateArgs,
+    self, AdviseArgs, Cli, Command, Defaulted, DiffArgs, FormatsArgs, LatencyArgs, ListArgs,
+    SaturateArgs, TopArgs, TraceArgs, ValidateArgs,
 };
 pub(crate) use crate::format::{FormatStatus, OutputFormat};
 pub(crate) use crate::request::Session;
@@ -72,6 +72,7 @@ pub fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Latency(args) => latency(args),
         Command::Saturate(args) => saturate(args),
         Command::Diff(args) => diff(args),
+        Command::Advise(args) => advise(args),
         Command::Top(args) => top(*args),
         Command::Selftest(args) => selftest(args),
         Command::Import(args) => match crate::cli::import(&args) {

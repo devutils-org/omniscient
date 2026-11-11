@@ -111,3 +111,20 @@ requests:
   keys:
   - task
   label: memory-reclaim
+- source: conf.machine
+  target: system
+  mode: snapshot
+  emit:
+  - raw
+  label: settings of the machine
+- source: conf.process
+  target:
+    launch:
+    - target/omn-triage-fixture/workload
+    - queue
+    - '4'
+    - '250'
+  mode: snapshot
+  emit:
+  - raw
+  label: settings of the workload

@@ -241,6 +241,10 @@ impl Ask {
         // Only where the collector reads it: `sched.offcpu` would carry it
         // and never ask (`stack::reads_symbols`).
         super::diff::ask_symbols(&mut requests, self.symbols);
+        requests.extend(super::advise::settings_requests(
+            &self.target,
+            self.duration,
+        ));
         let whole = match self.target {
             Target::Launch(_) => Whole::Span(Span::Lifetime),
             _ => Whole::Span(Span::Window),
@@ -603,12 +607,23 @@ pub struct Answer {
     /// file itself holds the last launch's, as it would after one run.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub program_stderr: Vec<String>,
+    /// The advice rules the verdict's run holds, on its own measures and
+    /// settings ([`super::advise::bearing`]): advice, never a change.
+    #[serde(default, skip_serializing_if = "super::advise::Bearing::is_empty")]
+    pub bearing: super::advise::Bearing,
 }
 
 impl Answer {
     /// The report a person reads: the verdict first, then the table it was
-    /// read from, with every row's kind, evidence, resolution and shortfall.
+    /// read from, with every row's kind, evidence, resolution and shortfall,
+    /// then the settings that bear on it.
     pub fn text(&self) -> String {
+        let mut out = self.decomposition_text();
+        out.push_str(&self.bearing.text());
+        out
+    }
+
+    fn decomposition_text(&self) -> String {
         use std::fmt::Write as _;
         let mut out = String::new();
         let _ = writeln!(
@@ -822,7 +837,12 @@ pub fn answer(
 ) -> Result<Answer, TriageError> {
     ask.check()?;
     let mut full = ask.split_session();
-    let dropped = engine::prune(catalog, capabilities, &mut full, &OPTIONAL)?;
+    let optional: Vec<&str> = OPTIONAL
+        .iter()
+        .chain(&super::advise::SETTINGS_LABELS)
+        .copied()
+        .collect();
+    let dropped = engine::prune(catalog, capabilities, &mut full, &optional)?;
     let asked = |label: &str| {
         full.requests
             .iter()
@@ -834,8 +854,10 @@ pub fn answer(
         .requests
         .retain(|request| request.label.as_deref() != Some(MUTEX));
     let mut launches = Launches::from_environment(&ask.target);
-    let (runs, failures, failed) = run_all(catalog, capabilities, &first, ask, &mut launches)?;
+    let (runs, failures, failed, bearings) =
+        run_all(catalog, capabilities, &first, ask, &mut launches)?;
     let mut answer = conclude(ask, runs, dropped.clone());
+    answer.bearing = bearings.get(answer.median).cloned().unwrap_or_default();
     answer.failures = failures;
     answer.program_failed = failed;
     answer.program_stderr = launches.kept.clone();
@@ -851,8 +873,10 @@ pub fn answer(
     else {
         return Ok(answer);
     };
-    let (runs, failures, failed) = run_all(catalog, capabilities, &full, ask, &mut launches)?;
+    let (runs, failures, failed, bearings) =
+        run_all(catalog, capabilities, &full, ask, &mut launches)?;
     let mut second = conclude(ask, runs, dropped);
+    second.bearing = bearings.get(second.median).cloned().unwrap_or_default();
     second.failures = answer.failures.clone();
     second.program_failed = answer.program_failed.clone();
     second.program_failed.extend(failed);
@@ -878,7 +902,14 @@ pub fn answer(
 /// any of them, each sentence once.
 /// One pass's runs, what the collectors broke in them, and how each launched
 /// program that failed ended ([`engine::program_failure`]).
-type Pass = (Vec<Reading>, Vec<String>, Vec<String>);
+/// The fourth part is what the advice rules say of each run, in the same
+/// order ([`super::advise::bearing`]).
+type Pass = (
+    Vec<Reading>,
+    Vec<String>,
+    Vec<String>,
+    Vec<super::advise::Bearing>,
+);
 
 fn run_all(
     catalog: &Catalog,
@@ -890,6 +921,7 @@ fn run_all(
     let mut runs = Vec::new();
     let mut failures: Vec<String> = Vec::new();
     let mut failed: Vec<String> = Vec::new();
+    let mut bearings = Vec::new();
     for _ in 0..ask.runs {
         launches.before();
         let run = engine::run(catalog, capabilities, session);
@@ -906,8 +938,9 @@ fn run_all(
             failed.push(format!("run {}: the program {how}", runs.len() + 1));
         }
         runs.push(read(&ran.run, &ask.target)?);
+        bearings.push(super::advise::bearing(ask.objective, &ran.run));
     }
-    Ok((runs, failures, failed))
+    Ok((runs, failures, failed, bearings))
 }
 
 /// The launches of one answer, and where each one's standard error was
@@ -1034,6 +1067,7 @@ pub fn conclude(ask: &Ask, runs: Vec<Reading>, dropped: Vec<Dropped>) -> Answer 
         failures: Vec::new(),
         program_failed: Vec::new(),
         program_stderr: Vec::new(),
+        bearing: Default::default(),
     }
 }
 

@@ -1,0 +1,137 @@
+# The advice rules: from a reading of this run to the setting that governs
+# the mechanism behind it. A table, not catalog entries; read by
+# `src/triage/advise.rs`, held by its loader to the catalog and to
+# `settings.yaml`.
+#
+# A rule never changes anything (`docs/DECISIONS.md`, boundary 5). It says
+# what was measured, why it points at the setting, what the setting reads now,
+# what changing it is expected to do to which reading, the command a person
+# would type and at what scope, and how to check it: `omn advise --against`
+# on the run before the change.
+#
+# Fields:
+#   objectives  which of latency, tail, throughput, energy the advice serves.
+#   evidence    every item must hold, on this run: a measure compared with a
+#               constant (above, below, is), or a setting (is, is_not, above,
+#               below, below_setting: another setting's value).
+#   setting     the one setting the advice is about.
+#   expect      the reading changing the setting moves, and which way:
+#               down, up, or changes.
+#   also        side effects expected beside it, reported and not required.
+#   scope       process, cgroup or machine: who the change affects.
+#   change      the command, as text. It is printed, never run.
+#   truth       the test that changes the setting in a fixture and sees
+#               `expect` move. A rule without one does not load.
+#
+# A measure is {source, mode, stat} and optionally {attr, target}:
+#   stat   total, mean, max, min, count, first, last, over the summary of the
+#          source's value, or over the events' `attr` when one is named.
+#   target system to read the machine's rather than the workload's.
+# or {run: wall_ns}, the launched program's wall clock.
+
+- id: cgroup.memory.swap-denied
+  summary: "The cgroup's OOM killer ran while the machine had swap the cgroup was not allowed to use."
+  objectives: [latency, tail, throughput]
+  evidence:
+    - {source: mem.oom, mode: count, stat: total, above: 0}
+    - {setting: cgroup.memory.swap.max, is: 0}
+    - {setting: mm.swap_total, above: 0}
+  setting: cgroup.memory.swap.max
+  mechanism: >-
+    When a cgroup's charge reaches memory.max, the kernel reclaims from that cgroup
+    before it kills: page cache is dropped or written back, and anonymous memory
+    can only go to swap. With memory.swap.max at 0 the cgroup's anonymous memory
+    has nowhere to go, so a working set above the limit is killed at once, however
+    much swap the machine has free.
+  docs: admin-guide/cgroup-v2.rst
+  expect: {source: mem.oom, mode: count, stat: total, goes: down}
+  also:
+    - {source: mem.pressure, mode: "poll@100ms", stat: max, goes: up}
+  scope: cgroup
+  change: >-
+    echo max > <the cgroup>/memory.swap.max (or a size), or
+    systemd-run --scope -p MemorySwapMax=<size or infinity> ... -- PROGRAM
+  caveats:
+    - "Swapping trades the kill for time: the pages that went to swap are faulted back in when used, which mem.pressure counts. A working set far above the limit thrashes instead of dying."
+    - "memory.high is not the alternative here. On the development machine, with no swap allowed, MemoryHigh=100M under MemoryMax=128M did not stop the kill: it delayed it from 0.1 s to 260 s of throttling (docs/scenarios/advice.md)."
+    - "Swap denied on purpose is common for latency-critical services, where a kill and a restart is the cheaper failure."
+  truth: advice_truth::swap_allowed_to_the_cgroup_ends_the_kill
+
+- id: oom.victim-by-size
+  summary: "The OOM killer chose among the workload's processes by size alone: none of its victims had an adjustment."
+  objectives: [latency, tail, throughput, energy]
+  evidence:
+    - {source: mem.oom, mode: trace, target: system, stat: count, above: 0}
+    - {source: proc.exec, mode: trace, stat: count, above: 1}
+    - {source: mem.oom, mode: trace, target: system, attr: oom_score_adj, stat: max, is: 0}
+    - {source: mem.oom, mode: trace, target: system, attr: oom_score_adj, stat: min, is: 0}
+  setting: process.oom_score_adj
+  mechanism: >-
+    The OOM killer kills the task with the highest oom_score: the memory it holds,
+    as a share of what is available, scaled to 1000, plus its oom_score_adj. With
+    every adjustment at 0 the largest process dies, which is the one that holds
+    the most work. oom_score_adj from 1 to 1000 makes a process a likelier victim,
+    and -1000 exempts it.
+  docs: filesystems/proc.rst
+  expect: {source: mem.oom, mode: trace, target: system, attr: comm, stat: first, goes: changes}
+  scope: process
+  change: >-
+    echo 1000 > /proc/<pid of the process to sacrifice>/oom_score_adj, or
+    choom -n 1000 -p <pid>, or OOMScoreAdjust= in its systemd unit
+  caveats:
+    - "This chooses which process dies, not whether one does: the memory is short either way, and cgroup.memory.swap-denied is about the whether."
+    - "Raising a process's own adjustment needs no privilege; lowering one below what it was needs CAP_SYS_RESOURCE."
+    - "The victims are the machine's, during the run: a run observes one workload, and the OOM tracepoint on a launched program sees that process alone, not the children it started. A kill elsewhere on the machine in the same window would count."
+    - "Several processes is read from the workload's execs (proc.exec): a child that forks without exec is not counted, and a workload of one program has no choice to change."
+  truth: advice_truth::an_adjustment_moves_the_oom_killer_to_the_other_process
+
+- id: sched.shared-cpu
+  summary: "The workload's threads waited to run on the few cpus its affinity allows, while the machine has more."
+  objectives: [latency, throughput]
+  evidence:
+    - {source: sched.runqlat, mode: trace, stat: mean, above: 1000000}
+    - {setting: process.cpus_allowed_count, below_setting: cpu.online_count}
+  setting: process.cpus_allowed
+  mechanism: >-
+    A runnable thread waits in the run queue of a cpu its affinity allows. When a
+    process's threads outnumber the cpus it may use, they take turns on them, and
+    each turn is a wait the run-queue latency counts, however idle the other cpus
+    of the machine are: the scheduler does not move a thread outside its mask.
+  docs: scheduler/sched-design-CFS.rst
+  expect: {source: sched.runqlat, mode: trace, stat: mean, goes: down}
+  also:
+    - {run: wall_ns, goes: down}
+  scope: process
+  change: >-
+    taskset -pc <a wider cpu list> <pid> for a running process (each thread: -a),
+    or taskset -c <list> PROGRAM, or CPUAffinity= in its systemd unit
+  caveats:
+    - "Narrow affinity is sometimes the point: a latency-critical process pinned away from the rest, or a cache shared on purpose. Widen it only where nothing else asked for the mask."
+    - "The cpus the mask would add may be busy with other work: the run-queue latency of the machine's other tasks is the check."
+  truth: advice_truth::a_wider_affinity_ends_the_wait_for_one_cpu
+
+- id: io.readahead-refused
+  summary: "The workload missed the page cache a thousand times and more, and the kernel read nothing ahead of it."
+  objectives: [latency, throughput]
+  evidence:
+    - {source: io.readahead, mode: trace, stat: total, below: 1}
+    - {source: io.pagecache, mode: trace, stat: total, above: 1000}
+  setting: block.read_ahead_kb
+  mechanism: >-
+    Readahead fetches the pages after the ones a sequential reader asked for, so
+    the next read finds them cached. It is off for a file opened with
+    posix_fadvise(POSIX_FADV_RANDOM) or madvise(MADV_RANDOM), and for a device whose
+    read_ahead_kb is 0; then every read the cache misses waits for the device.
+  docs: block/queue-sysfs.rst
+  expect: {source: io.readahead, mode: trace, stat: total, goes: up}
+  also:
+    - {run: wall_ns, goes: down}
+  scope: process
+  change: >-
+    in the program, drop posix_fadvise(fd, 0, 0, POSIX_FADV_RANDOM) or use
+    POSIX_FADV_SEQUENTIAL for a file read in order; for the device,
+    echo <KiB> > /sys/block/<dev>/queue/read_ahead_kb (machine, until reboot)
+  caveats:
+    - "A reader that is random for real gains nothing from readahead and pays for pages it never reads: the hint may be right."
+    - "A file already in the page cache needs no readahead, and reads none: the evidence is only worth something on a cold cache."
+  truth: advice_truth::readahead_refused_by_a_hint_returns_without_it

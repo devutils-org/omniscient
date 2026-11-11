@@ -100,6 +100,7 @@ impl Cli {
             }
             Command::Latency(args) => !args.program.is_empty(),
             Command::Saturate(args) => !args.program.is_empty(),
+            Command::Advise(args) => !args.program.is_empty(),
             Command::List(_)
             | Command::Formats(_)
             | Command::Validate(_)
@@ -133,6 +134,9 @@ pub enum Command {
     Saturate(SaturateArgs),
     /// Two profiles and a subtraction: which function is the difference.
     Diff(DiffArgs),
+    /// Which setting is behind what was measured: advice, and how to check
+    /// it. Changes nothing.
+    Advise(AdviseArgs),
     /// An interactive view of everything omn measures, live or from a recording.
     Top(Box<TopArgs>),
     /// Apply join rules to a stored run: the query tier, after the run.
@@ -145,9 +149,9 @@ pub enum Command {
 }
 
 /// The subcommand names, used to tell `omn io.latency` from `omn list`.
-pub const SUBCOMMANDS: [&str; 12] = [
-    "trace", "list", "formats", "validate", "latency", "saturate", "diff", "top", "join", "import",
-    "selftest", "help",
+pub const SUBCOMMANDS: [&str; 13] = [
+    "trace", "list", "formats", "validate", "latency", "saturate", "diff", "advise", "top", "join",
+    "import", "selftest", "help",
 ];
 
 #[derive(Debug, Args)]
@@ -567,6 +571,48 @@ pub struct SaturateArgs {
     /// today names a stack, and the answer says so when this is given.
     #[arg(long, value_name = "SOURCE")]
     pub symbols: Option<crate::stack::unwind::SymbolSource>,
+
+    /// Output format: text, json or yaml.
+    #[arg(long, value_name = "FORMAT", default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
+
+    /// Print the session this question is asked through, then exit.
+    #[arg(long)]
+    pub dump_session: bool,
+
+    /// Load the catalog from this directory instead of the built-in one.
+    #[arg(long, value_name = "DIR")]
+    pub catalog: Option<PathBuf>,
+}
+
+/// `omn advise`: the settings behind what was measured.
+#[derive(Debug, Args)]
+pub struct AdviseArgs {
+    /// What the advice is for: latency, tail, throughput or energy. Required:
+    /// the same setting is right for one and wrong for another.
+    #[arg(long, value_name = "OBJECTIVE")]
+    pub objective: Option<crate::triage::Objective>,
+
+    /// A process already running. Needs --duration.
+    #[arg(long, value_name = "PID", group = "advise_target")]
+    pub pid: Option<i32>,
+
+    /// Program to launch and follow, after `--`.
+    #[arg(last = true, value_name = "PROGRAM", group = "advise_target")]
+    pub program: Vec<String>,
+
+    /// How long to observe: required with --pid, a ceiling on a launched program.
+    #[arg(short = 'd', long, value_name = "DURATION")]
+    pub duration: Option<Duration>,
+
+    /// Write the answer as JSON to this file as well, for a later --against.
+    #[arg(long, value_name = "FILE")]
+    pub save: Option<PathBuf>,
+
+    /// An answer saved before a change: say, rule by rule, whether the
+    /// reading each rule predicted moved the way it said.
+    #[arg(long, value_name = "FILE")]
+    pub against: Option<PathBuf>,
 
     /// Output format: text, json or yaml.
     #[arg(long, value_name = "FORMAT", default_value_t = OutputFormat::Text)]

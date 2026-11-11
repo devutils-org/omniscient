@@ -317,6 +317,37 @@ join what-released-the-block  sched.wakeup -> sched.offcpu  evidence WAKEUP
 `docs/dev/BRIEF.md` is the wave being run; there is no second brief for the one after it,
 because a plan kept in two documents drifted in both.
 
+### After the thirty-first wave
+
+The wave is `docs/dev/briefs/wave-31-advice.md`, its decisions
+`docs/DECISIONS.md`, "Settled in the thirty-first wave": the `conf` family
+reads what the machine and the target are set to (`conf.machine`,
+`conf.process`, `conf.changed`, from `catalog/settings.yaml`), and
+`omn advise` names the setting behind a measurement, with the command and the
+`--against` run that checks it, changing nothing. Four rules, each with a
+ground-truth test: `cgroup.memory.swap-denied`, `oom.victim-by-size`,
+`sched.shared-cpu`, `io.readahead-refused`. `omn latency` and `omn saturate`
+print the rules their own runs hold.
+
+What it leaves, in the order it is worth doing:
+
+1. **The rules that need a machine-wide write**, under `distroproof run` in a
+   guest: the governor and EPP for a latency objective, `vm.swappiness`
+   under a swap-heavy load, IRQ affinity against a network server's cpu,
+   `tcp_notsent_lowat` and the qdisc for a sender, `read_ahead_kb` per
+   device. The settings are read already; each needs its fixture and its
+   test there.
+2. **THP compaction stalls** (`mm.thp.defrag`, `MADV_HUGEPAGE`), which need
+   fragmented memory a user process here cannot make: a guest again.
+3. **The victims of one workload's cgroup**: a run observes one workload, so
+   `oom.victim-by-size` reads the machine's victims during the run. A filter
+   on the victim's cgroup in `mem.oom`'s trace backend would make it the
+   workload's.
+4. **The kernel build configuration without `zcat`**: an inflater for
+   `/proc/config.gz`, or leave it.
+5. **The portability matrix**: `conf.*` is `free` and needs only procfs, so
+   every cell's usable count should rise by three; not swept this wave.
+
 ### After the twenty-ninth wave
 
 The wave is `docs/dev/briefs/wave-29-func.md`, its decisions

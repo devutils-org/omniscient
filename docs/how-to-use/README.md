@@ -21,6 +21,7 @@ right and this page is stale. `docs/CATALOG.md` is the vocabulary in full,
 | `gpu` | device busy, clocks, VRAM, kernel time, host-side API cost | [gpu.md](gpu.md) |
 | `proc` | syscalls, process life, descriptors, threads, signals | [proc.md](proc.md) |
 | `runtime` | GC pauses, JIT, runtime allocations, your own probes | [runtime.md](runtime.md) |
+| `conf` | what the machine and the program are set to, and which setting is behind what was measured (`omn advise`) | [conf.md](conf.md) |
 
 To show `omn` to someone, follow [demo.md](demo.md): ten minutes, six acts.
 To check `omn` against programs of known shape -- before a demo, after a change, on a new

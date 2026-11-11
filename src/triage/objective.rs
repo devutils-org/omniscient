@@ -96,6 +96,8 @@ pub enum Method {
     Latency,
     /// `omn saturate`: utilization, saturation and errors per resource.
     Saturate,
+    /// `omn advise`: the settings behind what was measured.
+    Advise,
 }
 
 impl Method {
@@ -103,6 +105,7 @@ impl Method {
         match self {
             Method::Latency => "omn latency",
             Method::Saturate => "omn saturate",
+            Method::Advise => "omn advise",
         }
     }
 
@@ -111,6 +114,10 @@ impl Method {
         match self {
             Method::Latency => &[Objective::Latency, Objective::Tail],
             Method::Saturate => &[Objective::Throughput, Objective::Tail, Objective::Energy],
+            // A setting is right for one objective and wrong for another, which
+            // is why every rule names the ones it serves: the method answers
+            // for all four, and each rule for its own.
+            Method::Advise => &Objective::ALL,
         }
     }
 
