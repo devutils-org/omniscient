@@ -343,8 +343,9 @@ What it leaves, in the order it is worth doing:
    workload's victims.
 4. **The kernel build configuration without `zcat`**: an inflater for
    `/proc/config.gz`, or leave it.
-5. **The portability matrix**: `conf.*` is `free` and needs only procfs, so
-   every cell's usable count should rise by three; not swept this wave.
+5. ~~The portability matrix~~: swept after the wave (2026-11-11, `e1acbf4`):
+   28 of 28 targets, 8 containers, the judges green, and every cell three
+   sources up (`docs/distroproof.md`).
 
 ### After the twenty-ninth wave
 
