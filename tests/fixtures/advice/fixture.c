@@ -20,6 +20,13 @@
  *                        a time; HINT random or normal. Half, because over
  *                        a whole file pages filled and pages looked up
  *                        agree whatever readahead did (io.readahead).
+ *   swapcold MB FILE N   fill MB of anonymous memory, each page its own
+ *                        bytes, read FILE whole N times, then touch the
+ *                        memory again and print how long that took: a
+ *                        program's cold memory against a stream of page
+ *                        cache, which reclaim chooses between by
+ *                        vm.swappiness (a guest's; never the development
+ *                        machine's)
  *   backlog MB           write MB over a loopback TCP connection to a reader
  *                        that takes 64 KiB every 5 ms; every chunk carries
  *                        the time it was handed to write(), and the reader
@@ -173,6 +180,40 @@ static int backlog(long mb)
 	return 0;
 }
 
+static int swapcold(long mb, const char *path, int passes)
+{
+	size_t size = (size_t)mb << 20, page = 4096;
+	uint64_t *memory = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (memory == MAP_FAILED)
+		return 12;
+	uint64_t x = 0x9e3779b97f4a7c15ull;
+	for (size_t i = 0; i < size / 8; i++) {
+		x ^= x << 13;
+		x ^= x >> 7;
+		x ^= x << 17;
+		memory[i] = x;
+	}
+	static char block[1 << 20];
+	uint64_t started = now_ns();
+	for (int pass = 0; pass < passes; pass++) {
+		int fd = open(path, O_RDONLY);
+		if (fd < 0)
+			return 13;
+		while (read(fd, block, sizeof block) > 0)
+			;
+		close(fd);
+	}
+	uint64_t streamed = now_ns();
+	uint64_t sum = 0;
+	for (size_t i = 0; i < size / 8; i += page / 8)
+		sum += memory[i];
+	sink = sum;
+	uint64_t touched = now_ns();
+	printf("fixture: %d passes over the file in %.0f ms, %ld MiB touched again in %.1f ms\n", passes,
+	       (streamed - started) / 1e6, mb, (touched - streamed) / 1e6);
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc >= 4 && !strcmp(argv[1], "fragment")) {
@@ -275,6 +316,8 @@ int main(int argc, char **argv)
 		close(fd);
 		return 0;
 	}
+	if (argc >= 5 && !strcmp(argv[1], "swapcold"))
+		return swapcold(atol(argv[2]), argv[3], atoi(argv[4]));
 	if (argc >= 3 && !strcmp(argv[1], "backlog"))
 		return backlog(atol(argv[2]));
 	fprintf(stderr, "usage: see the comment at the top\n");

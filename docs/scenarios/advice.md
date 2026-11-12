@@ -180,3 +180,33 @@ reader's receive buffer, which no sender setting reaches.
 is a pid by the time the collector attaches, and the netlink backend already
 narrowed to a pid's descriptors.
 
+## `vm.swappiness`: no rule, and the measurement is why
+
+The plan after the thirty-first wave listed a swappiness rule: a program's
+cold memory swapped out to make room for page cache, lower swappiness to
+keep it. Its prediction has to be one-sided -- lower the setting, less of the
+program's memory goes to swap -- and in guests it was not
+(`distroproof run`, 1 GiB, 2 cpus, a 1 GiB swap file, 2026-11-12). The
+fixture is `swapcold MB FILE N` (`tests/fixtures/advice/fixture.c`): MB of
+anonymous memory filled once, a file read whole N times, then the memory
+touched again.
+
+With the multi-generational LRU on, which both kernels ship enabled
+(`lru_gen` 0x0007), a file read 3 or 8 times beside 35 to 55 % of the memory
+held swapped nothing on Arch 7.2 and 30 to 43 MiB on Debian 13's 6.12 at
+every value from 1 to 200, with no order among them: the generations put the
+file's pages first whatever the setting. With `lru_gen` off, 20 passes:
+
+| Kernel, held + file | 200 | 60 | 10 | 1 |
+|---|---|---|---|---|
+| Arch 7.2, 428 + 571 MiB: swapped in, touched again in | 456 MiB, 1776 ms | 342 MiB, 910 ms | 108 MiB, 355 ms | 0, 1.6 ms |
+| Arch 7.2, 523 + 476 MiB | 534 MiB, 1915 ms | 391 MiB, 848 ms | 109 MiB, 400 ms | 0, 3.4 ms |
+| Debian 13 6.12, 435 + 580 MiB | 377 MiB, 589 ms | 279 MiB, 470 ms | 384 MiB, 804 ms | 348 MiB, 619 ms |
+| Debian 13 6.12, 531 + 483 MiB | 372 MiB, 641 ms | 261 MiB, 531 ms | 213 MiB, 389 ms | 259 MiB, 534 ms |
+
+One kernel in two, with the default LRU turned off, moved the way the advice
+would say; the other did not move at all. A rule whose prediction holds on a
+configuration no distribution ships is advice that would be wrong where it
+is read, so there is none: `vm.swappiness` stays a setting `conf.machine`
+reads and `mem.swap` names beside its readings.
+
