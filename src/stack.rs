@@ -1579,6 +1579,62 @@ struct PerfMap {
     identity: Option<(u64, u64)>,
 }
 
+/// Whether `stack` has a user frame in anonymous executable memory that no
+/// name reached: one a perf map written later could still name.
+pub fn has_unnamed_anonymous(stack: &Stack) -> bool {
+    stack.frames.iter().any(|frame| {
+        frame.symbol.is_none()
+            && frame.context == Context::User
+            && frame
+                .module
+                .as_deref()
+                .is_some_and(|module| is_anonymous(module, None))
+    })
+}
+
+/// Names, from `pid`'s perf map as it stands now, the anonymous user frames
+/// of `stack` that were unnamed when it was symbolized, and says how many.
+///
+/// For a collector that symbolizes at each drain and keeps labels, not a
+/// [`StackTable`]: `sched.offcpu`. A runtime that writes its map lazily or
+/// buffered -- CPython's `-X perf` -- may write a function's line after the
+/// first stack through it was drained; read again at the stop, the map names
+/// it. [`Symbolizer::rename_from_perf_map`] is the same for a table.
+pub fn name_late_from_perf_map(pid: i32, stack: &mut Stack) -> u64 {
+    let mut map = PerfMap::of(pid);
+    map.update();
+    let mut named = 0;
+    for frame in &mut stack.frames {
+        if frame.symbol.is_some() || frame.context != Context::User {
+            continue;
+        }
+        if !frame
+            .module
+            .as_deref()
+            .is_some_and(|module| is_anonymous(module, None))
+        {
+            continue;
+        }
+        let Some(line) = map.lookup(frame.addr) else {
+            continue;
+        };
+        let renamed = Frame::named(
+            frame.addr,
+            Context::User,
+            frame.module.clone(),
+            line.symbol.clone(),
+            frame.addr - line.address,
+            NamedBy::PerfMap,
+        );
+        *frame = Frame {
+            recovered: frame.recovered,
+            ..renamed
+        };
+        named += 1;
+    }
+    named
+}
+
 impl PerfMap {
     /// The map pid `pid` writes; pid zero, as everywhere here, is this
     /// process.
@@ -4363,6 +4419,36 @@ mod tests {
             .starts_with("kernel.kptr_restrict blocks"));
         assert!(visibility_note(Some(0), Some(0), Some(false)).contains("do not fully explain"));
         assert!(visibility_note(None, None, None).contains("unknown"));
+    }
+
+    /// A frame in anonymous code drained before its perf map had its line
+    /// is named at the stop, from the map as it stands then: the line a
+    /// runtime wrote late. A frame the map does not cover stays unnamed.
+    #[test]
+    fn a_perf_map_line_written_after_the_drain_names_the_frame_late() {
+        // A pid no process has here, so the map is this test's alone.
+        let pid = 3_999_000 + (std::process::id() as i32 % 1000);
+        let path = PathBuf::from(format!("/tmp/perf-{pid}.map"));
+        let unnamed = |addr: u64| Frame {
+            module: Some("0x7f0000000000".to_owned()),
+            ..Frame::unresolved(addr, Context::User)
+        };
+        let mut stack = Stack {
+            frames: vec![unnamed(0x7f00_0000_1010), unnamed(0x7f00_0000_9000)],
+        };
+        assert!(has_unnamed_anonymous(&stack));
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(name_late_from_perf_map(pid, &mut stack), 0, "no map yet");
+        std::fs::write(&path, "7f0000001000 100 py::wait_for_input:/case.py\n").unwrap();
+        assert_eq!(name_late_from_perf_map(pid, &mut stack), 1);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            stack.frames[0].symbol.as_deref(),
+            Some("py::wait_for_input:/case.py")
+        );
+        assert_eq!(stack.frames[0].named_by, Some(NamedBy::PerfMap));
+        assert_eq!(stack.frames[1].symbol, None);
+        assert!(has_unnamed_anonymous(&stack));
     }
 
     #[test]

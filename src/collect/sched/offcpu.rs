@@ -38,7 +38,7 @@ use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
 use crate::request::{Mode, Target};
 use crate::stack::unwind::{Debuginfod, NameOrigin};
-use crate::stack::{Frame, NamedBy, PerfMapFile, RawStack, Symbolizer};
+use crate::stack::{Frame, NamedBy, PerfMapFile, RawStack, Stack, Symbolizer};
 
 /// How often the totals are drained.
 ///
@@ -128,6 +128,10 @@ pub struct OffCpuCollector {
     /// moment it exits -- and a program that blocks is often a program that
     /// then finishes.
     stacks: BTreeMap<u64, Vec<String>>,
+    /// The stacks with a frame in anonymous code nothing named yet, with the
+    /// process whose perf map could, and whether the stack was cut short:
+    /// named again at the stop, when a map written late has its line.
+    unnamed_anonymous: BTreeMap<u64, (i32, Stack, bool)>,
     /// Who named each frame of `stacks`, root first, under the same ids, so
     /// the flame and the triage charge off-cpu stacks as they charge
     /// `cpu.profile`'s.
@@ -187,6 +191,7 @@ impl OffCpuCollector {
             dropped_totals: 0,
             window_opened_ns: 0,
             stacks: BTreeMap::new(),
+            unnamed_anonymous: BTreeMap::new(),
             symbolizers: HashMap::new(),
             leaf: super::LeafCallers::default(),
             leaving: BTreeSet::new(),
@@ -444,6 +449,16 @@ impl OffCpuCollector {
         if recovered {
             stack.frames[1].recovered = true;
         }
+        if crate::stack::has_unnamed_anonymous(&stack) {
+            self.unnamed_anonymous
+                .insert(resolved, (entry.tgid as i32, stack.clone(), truncated));
+        }
+        self.keep_stack(resolved, &stack, truncated);
+        Some(resolved)
+    }
+
+    /// A symbolized stack's labels, names and objects, root first, under its id.
+    fn keep_stack(&mut self, resolved: u64, stack: &Stack, truncated: bool) {
         let mut frames: Vec<String> = stack.frames.iter().rev().map(Frame::label).collect();
         let mut named_by = stack.named_by_root_first();
         let mut objects = stack.objects_root_first();
@@ -458,7 +473,16 @@ impl OffCpuCollector {
         self.stacks.insert(resolved, frames);
         self.named_by.insert(resolved, named_by);
         self.objects.insert(resolved, objects);
-        Some(resolved)
+    }
+
+    /// Names, from each process's perf map as it stands at the stop, the
+    /// anonymous frames that were unnamed when their stack was drained.
+    fn name_late(&mut self) {
+        for (resolved, (pid, mut stack, truncated)) in std::mem::take(&mut self.unnamed_anonymous) {
+            if crate::stack::name_late_from_perf_map(pid, &mut stack) > 0 {
+                self.keep_stack(resolved, &stack, truncated);
+            }
+        }
     }
 
     /// Reads the program's own counters of what it could not record.
@@ -614,6 +638,7 @@ impl Collector for OffCpuCollector {
         let mut trailing = Vec::new();
         self.drain_into(&mut trailing, u64::MAX / 2);
         self.absorb_drops();
+        self.name_late();
         // A task that was still blocked when the run ended has real blocked
         // time that is in no total, because it has no end yet. That is a fact
         // about the window rather than something lost, and a run of a program
