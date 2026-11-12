@@ -317,6 +317,41 @@ join what-released-the-block  sched.wakeup -> sched.offcpu  evidence WAKEUP
 `docs/dev/BRIEF.md` is the wave being run; there is no second brief for the one after it,
 because a plan kept in two documents drifted in both.
 
+### After the thirty-second wave
+
+The wave is `docs/dev/briefs/wave-32-closing.md`, its decisions
+`docs/DECISIONS.md`, "Settled in the thirty-second wave": it took the lists
+below to their end where this machine and a guest can, and wrote down why
+where they cannot. Two rules more (`tcp.unsent-backlog`, in a network
+namespace of the test's own; `irq.on-the-workload-cpus`, in guests), and
+`vm.swappiness` measured and refused; `runtime.func`'s histogram counted in
+the kernel; `/proc/config.gz` read without `zcat`; phase 4's `dm-delay`
+criterion closed in guests; and five defects found on the way (the release
+not linking against glibc 2.17, a debuginfod miss reported as nothing, a
+short program with no process setting, a ratio with a lost numerator read as
+no bound, a timing bound in a test).
+
+What is left, by what it waits on:
+
+1. **Hardware**: the governor and EPP rule, `power.freq` through
+   `cpu_frequency`, `power.throttle`, aarch64 on metal. The hardware cells
+   are one command away (`docs/distroproof.md`, "The hardware cells"); the
+   machine and the decision to pay for it are the user's, deferred.
+2. **A program that ends before omn's first read has no process setting**
+   (`docs/open-findings.md`, 2026-11-12): a zombie's `/proc/<pid>` keeps
+   `status` but not `smaps`.
+3. **Limits, not work**: code no file holds (a JIT's) cannot take a uprobe,
+   and an inlined function has no return to time; `net.qdisc`,
+   `sched.lock`'s tracepoints, `io.pagecache` and `io.readahead` on kernels
+   older than their tracepoints; `sched.slices` without BTF, which would be
+   a different measurement and a stream of its own.
+4. **The roadmap's partial boxes**, each with its reason in
+   `docs/ROADMAP.md`: phase 1's five structs and phase 3's reorder test
+   (decisions recorded, no test can inject through a real collector), phase
+   5's kernel tier (no match kind has a program), phase 8's cost separated
+   from dilation (asserted only in the bench's ignored run), phase 12's
+   `make-sqlite` and the cited numbers of three cases.
+
 ### After the thirty-first wave
 
 The wave is `docs/dev/briefs/wave-31-advice.md`, its decisions
@@ -333,10 +368,10 @@ What it leaves, in the order it is worth doing:
 
 1. **The rules that need a machine-wide write**: done for two after the
    wave, in guests (`distroproof-advice.toml`): `bdi.readahead-off` and
-   `mm.thp-defrag-stall`, on Arch and Debian 13. Left: the governor and EPP
-   (a QEMU guest has no cpufreq: a hardware cell), `vm.swappiness`, IRQ
-   affinity, `tcp_notsent_lowat` -- each needs a fixture whose prediction is
-   one-sided.
+   `mm.thp-defrag-stall`, on Arch and Debian 13. Done in the thirty-second
+   wave: `tcp.unsent-backlog` and `irq.on-the-workload-cpus`; `vm.swappiness`
+   refused, its prediction measured not one-sided (`docs/scenarios/advice.md`).
+   Left: the governor and EPP (a QEMU guest has no cpufreq: a hardware cell).
 2. ~~THP compaction stalls~~: done, `mm.thp-defrag-stall` above.
 3. ~~The victims of one workload~~: done after the wave -- `mem.oom`'s trace
    backend follows the target's descendants, and the rule reads the
@@ -354,8 +389,9 @@ The wave is `docs/dev/briefs/wave-29-func.md`, its decisions
 each call of the functions a filter names, between an entry and a return
 uprobe, per thread and per depth. It closes the twenty-eighth wave's "a
 duration per call is another source". What it leaves: an in-kernel histogram
-for functions called millions of times a second, and the functions no file on
-the target's map list holds (inlined, `dlopen`ed later, JIT-compiled).
+for functions called millions of times a second (done in the thirty-second
+wave: `-e hist` alone), and the functions no file on the target's map list
+holds (`dlopen`ed later: done 2026-11-12; inlined and JIT-compiled: limits).
 
 ### After the twenty-eighth wave
 

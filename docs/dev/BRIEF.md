@@ -1,83 +1,41 @@
-# Brief — the settings beside the measurement, and advice that says how to check it
+# Brief — closing the lists
 
-The thirty-first wave. The user asked whether omniscient could also be a
-diagnostic tool: use what the kernel exposes (sysctl, sysfs, cgroups,
-`/proc/<pid>`, the command line, Kconfig) to advise how to configure a target
-process or the machine. The answer is yes, within the boundary the project
-already set -- *it observes; it does not tune* (`docs/DECISIONS.md`,
-boundary 5): **advice, never application**. A tool that measures and changes
-in one run produces a second reading of a machine the first one altered; so
-the person changes the setting, and a second run `--against` the first says
-whether the reading the advice named moved the way it said.
+The thirty-second wave. Run on 2026-11-12 after the user's *"go essayer de
+tous boucler"*: take every item `docs/dev/STATE.md`'s "What remains" listed
+after the twenty-ninth and thirty-first waves to its end where this machine
+or a distroproof guest can, and write down why where it cannot. One worktree
+(`omniscient-w32`, branch `claude/w32`), one item after another.
 
-Run on 2026-11-11, after the user's *"go implementer tout ça"*, in one
-worktree (`omniscient-w31`, branch `claude/w31`), the three planned streams
-one after another: each built on the previous one's first commit.
+## What it did
 
-## What it built
+1. **The view tests that went red with the TUI's `overview`**: a view that
+   asks no source has no workload to be held to (`tests/view_workloads.rs`).
+2. **`/proc/config.gz` without `zcat`**: the member's header by hand, the
+   stream through `miniz_oxide`, held to what `zcat` reads.
+3. **`tcp.unsent-backlog`**: a connection holding over 1 MiB unsent, no low
+   mark; proved under `unshare -rn` (2.49 MB -> 0.20 MB unsent, 225 -> 32 ms
+   from write to read). `net.tcp.rtt` takes a launched program.
+4. **`vm.swappiness`**: measured in guests, three fixtures, and refused --
+   its prediction is not one-sided.
+5. **`irq.on-the-workload-cpus`**: interrupts on a pinned workload's cpus,
+   proved in guests (0.42-0.47 of the run -> 0.0003; the spin 889 -> 386 ms).
+   The rules gained `on: target_cpus` and `per: {run: wall_ns}`.
+6. **`runtime.func`'s histogram in the kernel**: `-e hist` alone counts into
+   rows (`fentry::RowMaps`, `count_into_rows`, taken out of the
+   `io.syscall` histogram); on two million calls, none lost against 298 542.
+7. **Phase 4's `dm-delay`**: the vertical server's file on a delayed device,
+   in guests (`distroproof-vertical.toml`): 321.5 and 315.7 ms in
+   `block_io`, held in the block-io table's residue.
 
-1. **The `conf` family** (`catalog/conf.yaml`, `src/collect/conf/`):
-   `conf.machine`, `conf.process` and `conf.changed`, `fs:proc`, free, no
-   privilege. The settings are a table, `catalog/settings.yaml`: about
-   seventy rows, each with its reader (a file, with one `*` for instances; a
-   `/proc/<pid>` file, a `Name:` line or a `stat` field; a cgroup file read at
-   each level; a command-line parameter; a Kconfig option; `ioprio_get`), its
-   scope, the mechanism it governs, the kernel document, and the sources
-   whose readings it bears on. A setting is `set`, `unset`, `absent` or
-   `unknown` with a reason, never a default; a cgroup limit names the level
-   that binds; `oom_score` is `computed`. `conf.changed` reads them at every
-   poll and emits what differs between the first read and the last. A new
-   unit, `setting`.
-2. **The advice rules** (`catalog/advice.yaml`, `src/triage/advise.rs`): each
-   names its objectives, its evidence (measures compared with constants,
-   settings compared with values or with another setting), its setting, the
-   reading changing it should move, side effects, the command and its scope,
-   caveats, and the test that proves it. The loaders hold both tables to the
-   catalog.
-3. **`omn advise --objective O [--save F] [--against F] -- PROGRAM`**: one
-   session of every measure the objective's rules name plus the settings;
-   each rule held, held back or undecided with what it lacked; and, against
-   an earlier answer, each prediction checked and the settings that differ.
-   A move whose machine or cgroup setting did not change is
-   `setting_unchanged`, not the rule's.
-4. **`omn latency` and `omn saturate`** read the two settings snapshots too
-   and print `settings that bear on this`: the rules their own measures hold.
-5. **The ground truth** (`tests/advice_truth.rs`, `tests/fixtures/advice/`,
-   `tests/family_conf.rs`), and the boundary as a test:
-   `advice_changes_nothing` runs `omn advise` under `strace` and fails on any
-   write to a setting or any call that changes another process.
+## What it found
 
-## Measured
+- The release did not link: `stack::mapped_identity_of` called glibc's
+  `statx` (2.28) in an archive linked against 2.17.
+- A stripped file's origin dropped debuginfod's answer; the sqlite cases now
+  skip with the server's 404 instead of failing.
+- A launched program that ends before omn's first read has no process
+  setting (filed); the THP fixture waits before its faults.
+- A ratio with a lost numerator was read as no bound.
+- The `dlopen` scenario's bound was tighter than the rescan allows.
 
-`docs/scenarios/advice.md` and `docs/scenarios/conf.md` have every number.
-In short:
-
-- `cgroup.memory.swap-denied`: 300 MiB in `MemoryMax=128M` killed in 0.1 s
-  with swap denied, completed in 0.7 s with it allowed.
-- `oom.victim-by-size`: the first victim moved from the 120 MiB `keeper` to
-  the `grower` when the grower's `oom_score_adj` was 1000.
-- `sched.shared-cpu`: four threads on one cpu waited 6.8 ms on average in the
-  run queue; on four cpus, 5.6 us, and the work took 193 ms instead of 768.
-- `io.readahead-refused`: under `POSIX_FADV_RANDOM` nothing was read ahead
-  (-3 pages); without it, 1533.
-
-## What differed from the plan
-
-- **The first rule planned was refuted, and not shipped.** `memory.high`
-  before `memory.max`: on this machine, with zram, `memory.max` never killed;
-  with swap denied, `MemoryHigh=100M` delayed the kill from 0.1 s to 260 s.
-  The swap the cgroup was denied is what the measurement supports.
-- **THP compaction** was replaced by readahead: a user process here cannot
-  fragment memory reliably.
-- **The settings table is `catalog/settings.yaml`**, beside `conf.yaml`
-  rather than inside it: a table, like `unwind.yaml`, not entries.
-- **"Not loaded without a passing test"** became: the table carries only rules
-  whose test exists (held by a test) and passes in the suite; a binary cannot
-  know whether a test passed.
-- **The OOM victims were the machine's** at first: the tracepoint on a
-  launched program compared its pid alone. After the wave, the victim program
-  follows the target's descendants, and the rule reads the workload's.
-
-## What it leaves
-
-`docs/dev/STATE.md`, "After the thirty-first wave".
+What is left is `docs/dev/STATE.md`'s "After the thirty-second wave".

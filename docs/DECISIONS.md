@@ -1647,3 +1647,14 @@ application: boundary 5 stands.
 | Readahead's evidence | **Block requests per page-cache miss** (`per:`, a ratio of two measures), above 0.5; not pages read ahead. | `ahead` was 58 on ext4 at 128 KiB, 30 on btrfs at 128 KiB and 10 on btrfs at 0: no threshold separated them, and one made the hint rule fire on a guest with no hint. One request per missed page against one per many is 1.0 against 0.001 to 0.03. A ratio either side of which lost events decides nothing. |
 | Which readahead setting | **The backing device's (`/sys/class/bdi/*/read_ahead_kb`)**, every instance; the hint rule wants every one above 0 (`every: true`), the device rule one at 0. | btrfs has a bdi of its own: the disk's queue at 0 left it reading 1546 pages ahead. |
 
+## Settled in the thirty-second wave: closing the lists
+
+| Question | Decision | Why |
+|---|---|---|
+| A swappiness rule | **None.** `vm.swappiness` stays a setting `conf.machine` reads. | Its prediction -- lower the value, less of the program's memory swapped -- was not one-sided in guests: under the multi-generational LRU both kernels swapped next to nothing at any value, and with it off Arch 7.2 moved and Debian 13's 6.12 did not (`docs/scenarios/advice.md`). Advice that holds on a configuration no distribution ships would be wrong where it is read. |
+| A machine source read on the workload's cpus | **`on: target_cpus`** on a measure: the events whose `cpu` the target's `process.cpus_allowed` allows, of a `target: system` source with an `attr`; and `per:` takes `{run: wall_ns}`. | Interrupt time is the machine's and keyed by cpu; the share that bears on a pinned workload is the share on its cpus. Filtered when the rule is read, from the affinity the run read, so one request serves the rules that read it whole too. |
+| A ratio whose numerator lost events | **A lower bound**, over an exact divisor; no bound when the divisor lost them. | A single measure that lost events is already compared as the lower bound it is, and said "at least"; a ratio was thrown away instead, which left the readahead pair undecided on Debian twice in four runs and the IRQ pair once. |
+| `tcp_notsent_lowat`'s ground truth | **In a user and network namespace of the test's own** (`unshare -rn`), on the development machine. | The sysctl is the network namespace's, and its root may set it: the machine's is not touched, and no guest is needed. |
+| A file named by nothing | **Its origin says both halves**: no function symbols, and what debuginfod answered. | "It carries no function symbols" dropped the server's 404, so a person read that names could not be had without being told the server had none. |
+| `statx` | **The system call, at the uapi's offsets**, falling back on `stat` without it. | glibc's wrapper is 2.28's and the release links against 2.17; musl's `libc` crate has no `statx` type. |
+
