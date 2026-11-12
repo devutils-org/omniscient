@@ -440,14 +440,22 @@ fn samples_close(samples: f64, seconds: f64, band: f64) -> bool {
 
 // ----------------------------------------------------------- the inventory
 
+/// The views a workload can hold to a known load: those that ask a source.
+/// `overview` and the `family-*` pages ask none -- they lay out whatever the
+/// session collected -- so there is nothing of theirs a manifest could state.
+fn measured_views() -> Vec<String> {
+    omn_view::views::registry()
+        .iter()
+        .filter(|view| !view.needs().is_empty())
+        .map(|view| view.name().to_owned())
+        .collect()
+}
+
 /// Every view has a workload, and every workload a manifest that names its
 /// view, a session, and the program it runs.
 #[test]
 fn every_view_has_a_workload_with_a_manifest_and_a_session() {
-    let mut views: Vec<String> = omn_view::views::registry()
-        .iter()
-        .map(|view| view.name().to_owned())
-        .collect();
+    let mut views = measured_views();
     if !views.iter().any(|view| view == PROCESS) {
         views.push(PROCESS.to_owned());
     }
@@ -500,6 +508,9 @@ fn every_view_has_a_workload_with_a_manifest_and_a_session() {
 #[test]
 fn each_session_asks_its_views_sources_or_says_why_not() {
     for view in omn_view::views::registry() {
+        if view.needs().is_empty() {
+            continue;
+        }
         let name = view.name();
         let session = session_text(name);
         let truth = manifest(name);
@@ -523,10 +534,7 @@ fn each_session_asks_its_views_sources_or_says_why_not() {
 /// none, so that half skips, loudly, per session, when that is the reason.
 #[test]
 fn every_session_is_understood() {
-    let mut views: Vec<String> = omn_view::views::registry()
-        .iter()
-        .map(|view| view.name().to_owned())
-        .collect();
+    let mut views = measured_views();
     views.push(PROCESS.to_owned());
     views.dedup();
     for view in views {
