@@ -51,8 +51,9 @@ pub struct Lifetime {
     /// The program did not end by itself: the run's duration elapsed, or a
     /// collector failed, and this tool killed it. `exited_ns` is then the
     /// reap after the kill, which is the tool's deadline rather than anything
-    /// the program did.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    /// the program did. Always written, `false` included, so a results file
+    /// says the program ended by itself rather than leave it to be inferred.
+    #[serde(default)]
     pub terminated: bool,
     /// User plus system cpu the program spent, as the kernel handed it over at
     /// the reap: `wait4`'s `rusage`, exact to the microsecond.
@@ -1093,6 +1094,31 @@ mod tests {
         let life = child.lifetime().expect("a lifetime");
         assert_eq!((life.exit_code, life.signal), (None, Some(9)));
         assert!(life.terminated);
+    }
+
+    /// `terminated` is written either way, so a reader of the results tells
+    /// a program that ended by itself (`false`) from a results file that
+    /// predates the field; a file without it still reads as `false`.
+    #[test]
+    fn terminated_is_serialized_even_when_false() {
+        let life = Lifetime {
+            released_ns: 1,
+            exited_ns: 2,
+            exited_err_ns: 1,
+            terminated: false,
+            cpu_ns: None,
+            left_running: 0,
+            adopted_ended: 0,
+            exit_code: Some(0),
+            signal: None,
+        };
+        let json = serde_json::to_value(life).unwrap();
+        assert_eq!(json["terminated"], serde_json::Value::Bool(false), "{json}");
+        let old: Lifetime = serde_json::from_str(
+            r#"{"released_ns":1,"exited_ns":2,"exited_err_ns":1,"exit_code":0}"#,
+        )
+        .unwrap();
+        assert!(!old.terminated);
     }
 
     /// An exit seen is not an exit reaped: the zombie's `stat` is still

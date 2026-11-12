@@ -38,6 +38,14 @@ is refused before the run. `summary` carries a `total` where the source's
 values add up (its entry declares `rate`, `topk` or `stack`), and none over a
 level (`mem.rss`, a ratio, a temperature).
 
+An entry may declare `grouped_by: <attr>`, one of its `filter_fields`: then
+`summary`, `hist` and `topk` without `--keys` group by that attribute, as
+`summary@<attr>` would, rather than by the series. `runtime.func` declares
+`signature`, because its key is the thread and a row per thread added a
+function's calls to every other function the filter took (a 2.7 ms copy and a
+0.8 us destructor of its lambda, in one `mean`). `--keys` still regroups, and
+the emit keeps its name.
+
 Five keys came after the first ten. `dir` is a byte or request counter's
 direction, one series per direction: `io.latency`, `io.queue`, `io.size`,
 `io.bytes`, `io.iops`, `io.merges`, `net.bytes`, `net.packets`. `syscall` and

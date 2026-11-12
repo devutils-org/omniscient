@@ -736,6 +736,162 @@ fn ours(kernel_tgid: i32) -> i32 {
     crate::bpf::pidns::ours(kernel_tgid as u32).map_or(kernel_tgid, |id| id as i32)
 }
 
+/// One mapping of a file, as `/proc/<pid>/maps` identifies it: which inode it
+/// is, and where it sits, which names it under `/proc/<pid>/map_files`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MappedIdentity {
+    pub device: u64,
+    pub inode: u64,
+    pub start: u64,
+    pub end: u64,
+}
+
+/// How a path a target maps was opened from here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Reached {
+    /// Through `/proc/<pid>/root`, and it is the inode the target maps.
+    Root(PathBuf),
+    /// At the same path in this tool's own namespace, and it is the inode the
+    /// target maps: a target that shares the mount namespace, or one that has
+    /// exited and whose root is gone.
+    Host(PathBuf),
+    /// Neither path is that inode any longer -- the file was replaced since
+    /// it was mapped, or the namespace cannot be entered -- and only the
+    /// mapping itself still names it.
+    MapFiles(PathBuf),
+    /// No mapping of the path is known, so nothing can say which inode is
+    /// meant: the target's own namespace is read, never the host's.
+    Unverified(PathBuf),
+}
+
+impl Reached {
+    pub(crate) fn path(&self) -> &Path {
+        match self {
+            Self::Root(path) | Self::Host(path) | Self::MapFiles(path) | Self::Unverified(path) => {
+                path
+            }
+        }
+    }
+}
+
+/// Where this process can open the file a target maps at `path`, which is
+/// the target's own name for it.
+///
+/// A target in another mount namespace (a container) names files this tool
+/// may not see at that path, or sees as another file. `/proc/<pid>/root/<path>`
+/// is the target's view; the host path is this tool's. Each is taken only
+/// when its device and inode are the ones the mapping records, so a
+/// different file at the same name is never read in its place. When neither
+/// is, `/proc/<pid>/map_files/<start>-<end>` names the mapped inode itself,
+/// and is readable only with `CAP_SYS_ADMIN` (or `CAP_CHECKPOINT_RESTORE`):
+/// a file that cannot be read that way is reported unreadable, not guessed.
+///
+/// An overlay filesystem on a kernel before 6.8 records the underlying
+/// file's device in `maps` while `stat` through the overlay answers with its
+/// own, so the target's root is also taken on the inode alone: the same
+/// inode number at the same path in the target's own namespace.
+pub(crate) fn reach_mapped(pid: i32, path: &Path, mapped: &[MappedIdentity]) -> Reached {
+    let who = if pid <= 0 {
+        "self".to_owned()
+    } else {
+        pid.to_string()
+    };
+    let rooted =
+        PathBuf::from(format!("/proc/{who}/root")).join(path.strip_prefix("/").unwrap_or(path));
+    let Some(first) = mapped.first() else {
+        return Reached::Unverified(rooted);
+    };
+    let is = |found: Option<(u64, u64)>| {
+        found.is_some_and(|(device, inode)| {
+            mapped
+                .iter()
+                .any(|mapping| mapping.device == device && mapping.inode == inode)
+        })
+    };
+    let at_root = mapped_identity_of(&rooted, &format!("/proc/{who}/mountinfo"));
+    if is(at_root) {
+        return Reached::Root(rooted);
+    }
+    if is(mapped_identity_of(path, "/proc/self/mountinfo")) {
+        return Reached::Host(path.to_owned());
+    }
+    if at_root.is_some_and(|(_, inode)| mapped.iter().any(|mapping| mapping.inode == inode)) {
+        return Reached::Root(rooted);
+    }
+    Reached::MapFiles(PathBuf::from(format!(
+        "/proc/{who}/map_files/{:x}-{:x}",
+        first.start, first.end
+    )))
+}
+
+/// The device and inode `maps` would record for the file at `path`.
+///
+/// Not `stat`'s device: `maps` writes the superblock's, and on btrfs `stat`
+/// answers with the subvolume's own (`00:1c` in `maps`, `0x1e` from `stat`,
+/// for the same `/usr/bin/sleep`). The superblock's is the one `mountinfo`
+/// writes for the mount the file is on, which `statx` names by id. Mount ids
+/// are unique across namespaces, so `mountinfo` is the one of whichever
+/// process sees the path. A kernel without `STATX_MNT_ID` (before 5.8)
+/// falls back on `stat`'s device, which is right everywhere but btrfs.
+fn mapped_identity_of(path: &Path, mountinfo: &str) -> Option<(u64, u64)> {
+    use std::os::unix::ffi::OsStrExt;
+    let name = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: an all-zero `statx` is a valid value for the kernel to fill.
+    let mut out: libc::statx = unsafe { std::mem::zeroed() };
+    // SAFETY: a NUL-terminated path, and a struct the kernel writes into.
+    let status = unsafe {
+        libc::statx(
+            libc::AT_FDCWD,
+            name.as_ptr(),
+            0,
+            libc::STATX_INO | libc::STATX_MNT_ID,
+            &mut out,
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    let stat_device = libc::makedev(out.stx_dev_major, out.stx_dev_minor);
+    if out.stx_mask & libc::STATX_MNT_ID == 0 {
+        return Some((stat_device, out.stx_ino));
+    }
+    let mount = out.stx_mnt_id.to_string();
+    let device = std::fs::read_to_string(mountinfo)
+        .ok()
+        .and_then(|text| {
+            text.lines().find_map(|line| {
+                let mut fields = line.split(' ');
+                (fields.next()? == mount).then_some(())?;
+                let (major, minor) = fields.nth(1)?.split_once(':')?;
+                Some(libc::makedev(major.parse().ok()?, minor.parse().ok()?))
+            })
+        })
+        .unwrap_or(stat_device);
+    Some((device, out.stx_ino))
+}
+
+/// [`reach_mapped`] for a target whose maps are read now.
+#[cfg(test)]
+pub(crate) fn target_path(pid: i32, path: &Path) -> PathBuf {
+    let who = if pid <= 0 {
+        "self".to_owned()
+    } else {
+        pid.to_string()
+    };
+    let maps = std::fs::read_to_string(format!("/proc/{who}/maps")).unwrap_or_default();
+    let mapped: Vec<MappedIdentity> = crate::bpf::usdt::parse_maps(&maps)
+        .into_iter()
+        .filter(|mapping| mapping.path == path)
+        .map(|mapping| MappedIdentity {
+            device: mapping.device,
+            inode: mapping.inode,
+            start: mapping.start,
+            end: mapping.end,
+        })
+        .collect();
+    reach_mapped(pid, path, &mapped).path().to_owned()
+}
+
 impl Symbolizer {
     /// A symbolizer for one process: its mappings, and the kernel's.
     ///
@@ -833,6 +989,7 @@ impl Symbolizer {
     fn discover_jitdumps(&mut self) {
         // LLVM and perf runtimes mmap their dump as a marker. Its full path
         // discovers JITDUMPDIR as well as ~/.debug/jit without scanning old runs.
+        let mut found = Vec::new();
         for region in &self.regions {
             let Some(path) = &region.path else {
                 continue;
@@ -840,11 +997,17 @@ impl Symbolizer {
             let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
-            if name.starts_with("jit-") && name.ends_with(".dump") {
-                self.jitdumps
-                    .entry(path.clone())
-                    .or_insert_with(|| crate::jitdump::Dump::new(path.clone()));
+            if name.starts_with("jit-")
+                && name.ends_with(".dump")
+                && !self.jitdumps.contains_key(path)
+            {
+                found.push(path.clone());
             }
+        }
+        for path in found {
+            let reached = reach_mapped(self.pid, &path, &self.identities(&path));
+            self.jitdumps
+                .insert(path, crate::jitdump::Dump::new(reached.path().to_owned()));
         }
     }
 
@@ -1209,11 +1372,23 @@ impl Symbolizer {
 
     fn module(&mut self, path: &Path) -> Option<&Module> {
         if !self.modules.contains_key(path) {
-            let (module, origin) = once(|| Module::read(path, self.debuginfod.as_deref()));
+            let target = reach_mapped(self.pid, path, &self.identities(path));
+            let (module, origin) = once(|| Module::read(target.path(), self.debuginfod.as_deref()));
             self.origins.insert(path.to_path_buf(), origin);
             self.modules.insert(path.to_path_buf(), module);
         }
         self.modules.get(path).and_then(Option::as_ref)
+    }
+
+    /// Every mapping of `path` in the last snapshot of the maps: kept from
+    /// while the target was alive, so a file first needed after it exited is
+    /// still checked against the inode it ran.
+    fn identities(&self, path: &Path) -> Vec<MappedIdentity> {
+        self.regions
+            .iter()
+            .filter(|region| region.path.as_deref() == Some(path))
+            .map(Region::identity)
+            .collect()
     }
 }
 
@@ -1230,11 +1405,24 @@ struct Region {
     name: String,
     /// The file to read symbols from, when the name is one.
     path: Option<PathBuf>,
+    /// The mapped inode, as `maps` records it.
+    device: u64,
+    inode: u64,
 }
 
 impl Region {
     fn contains(&self, addr: u64) -> bool {
         (self.start..self.end).contains(&addr)
+    }
+
+    /// The inode it maps and where, for [`reach_mapped`].
+    fn identity(&self) -> MappedIdentity {
+        MappedIdentity {
+            device: self.device,
+            inode: self.inode,
+            start: self.start,
+            end: self.end,
+        }
     }
 }
 
@@ -1262,8 +1450,12 @@ fn parse_map_line(line: &str) -> Option<Region> {
         return None;
     }
     let offset = u64::from_str_radix(fields.next()?, 16).ok()?;
-    let _dev = fields.next()?;
-    let _inode = fields.next()?;
+    let (major, minor) = fields.next()?.split_once(':')?;
+    let device = libc::makedev(
+        u32::from_str_radix(major, 16).ok()?,
+        u32::from_str_radix(minor, 16).ok()?,
+    );
+    let inode = fields.next()?.parse().ok()?;
     let name = fields.collect::<Vec<&str>>().join(" ");
     let (start, end) = range.split_once('-')?;
     let start = u64::from_str_radix(start, 16).ok()?;
@@ -1286,6 +1478,8 @@ fn parse_map_line(line: &str) -> Option<Region> {
             name
         },
         path,
+        device,
+        inode,
     })
 }
 
@@ -2359,17 +2553,61 @@ pub struct FunctionSymbol {
 }
 
 impl FunctionSymbol {
+    /// The demangled name without its own parameter list: only the last one
+    /// goes, so a lambda keeps the function it is nested in
+    /// (`Execute(int)::$_6::operator()`), and the qualifiers that follow a
+    /// parameter list (`const`, `&`, `noexcept`, `[clone .cold]`) go with it.
+    /// A name with no parameter list is returned whole.
+    pub fn bare_name(&self) -> &str {
+        let name = self.name.trim_end();
+        let mut rest = name;
+        loop {
+            let trimmed = rest.trim_end();
+            let stripped = [" const", " volatile", " noexcept", "&&", "&"]
+                .iter()
+                .find_map(|suffix| trimmed.strip_suffix(suffix))
+                .or_else(|| {
+                    trimmed
+                        .ends_with(']')
+                        .then(|| trimmed.rfind(" [clone ").map(|at| &trimmed[..at]))
+                        .flatten()
+                });
+            match stripped {
+                Some(shorter) => rest = shorter,
+                None => {
+                    rest = trimmed;
+                    break;
+                }
+            }
+        }
+        if !rest.ends_with(')') {
+            return name;
+        }
+        let mut depth = 0usize;
+        for (index, ch) in rest.char_indices().rev() {
+            match ch {
+                ')' => depth += 1,
+                '(' => {
+                    let Some(outer) = depth.checked_sub(1) else {
+                        return name;
+                    };
+                    depth = outer;
+                    if depth == 0 {
+                        let bare = rest[..index].trim_end();
+                        return if bare.is_empty() { name } else { bare };
+                    }
+                }
+                _ => {}
+            }
+        }
+        name
+    }
     /// Whether `wanted` names this function: as the file spells it, as it
     /// demangles, or as it demangles without its parameter list -- the name a
     /// C++ reader writes (`xla::cpu::CopyThunk::Execute`), which names every
     /// overload of it.
     pub fn answers_to(&self, wanted: &str) -> bool {
-        self.symbol == wanted
-            || self.name == wanted
-            || self
-                .name
-                .split_once('(')
-                .is_some_and(|(bare, _)| bare.trim_end() == wanted)
+        self.symbol == wanted || self.name == wanted || self.bare_name() == wanted
     }
 }
 
@@ -2377,6 +2615,22 @@ impl FunctionSymbol {
 /// its `.symtab` and its `.dynsym`, each once by where it starts. Empty when
 /// the file cannot be read.
 pub fn functions_in(path: &Path, keep: &dyn Fn(&FunctionSymbol) -> bool) -> Vec<FunctionSymbol> {
+    functions_in_where(path, &|_| true, keep)
+}
+
+/// [`functions_in`], with `could` asked first of each symbol as the file
+/// spells it: one it refuses is never demangled.
+///
+/// Demangling is what a search costs. A function search in a library of a
+/// few hundred thousand C++ symbols spent most of its time in `cpp_demangle`
+/// (a `--pid` attach to the ZML plugin took 9.7 s before its first probe),
+/// and nearly every name it demangled was one no filter could want. `could`
+/// must answer true for every symbol `keep` might keep.
+pub fn functions_in_where(
+    path: &Path,
+    could: &dyn Fn(&str) -> bool,
+    keep: &dyn Fn(&FunctionSymbol) -> bool,
+) -> Vec<FunctionSymbol> {
     let Some(mapped) = Mapped::of(path) else {
         return Vec::new();
     };
@@ -2393,6 +2647,9 @@ pub fn functions_in(path: &Path, keep: &dyn Fn(&FunctionSymbol) -> bool) -> Vec<
             let Some(symbol) = read_str(mapped.bytes(), entry.name_at) else {
                 continue;
             };
+            if !could(&symbol) {
+                continue;
+            }
             let Some(offset) = elf.file_offset_of(entry.value) else {
                 continue;
             };
@@ -3876,6 +4133,8 @@ mod tests {
                 offset: 0,
                 name: "[anon:jit]".to_owned(),
                 path: None,
+                device: 0,
+                inode: 0,
             },
             Region {
                 start: 0x3000,
@@ -3883,6 +4142,9 @@ mod tests {
                 offset: 0,
                 name: path.display().to_string(),
                 path: Some(path.clone()),
+                // The marker's mapping names the dump's inode, as `maps` would.
+                device: std::os::unix::fs::MetadataExt::dev(&std::fs::metadata(&path).unwrap()),
+                inode: std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&path).unwrap()),
             },
         ];
         symbols.discover_jitdumps();
@@ -3904,6 +4166,161 @@ mod tests {
             "jitdump must not be attributed to a perf map"
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The bare name drops only the function's own parameter list and what
+    /// qualifies it, as `cpp_demangle` spells them, so a lambda keeps its
+    /// enclosing function and stays a different name from it.
+    #[test]
+    fn bare_names_keep_lambda_scopes_and_drop_trailing_qualifiers() {
+        let bare = |mangled: &str| {
+            let name = demangle(mangled).unwrap_or_else(|| panic!("{mangled}"));
+            FunctionSymbol {
+                symbol: mangled.to_owned(),
+                name,
+                offset: 0,
+                size: 0,
+            }
+            .bare_name()
+            .to_owned()
+        };
+        for (mangled, expected) in [
+            (
+                "_ZZN3xla3cpu9CopyThunk7ExecuteEiENK3$_6clEl",
+                "xla::cpu::CopyThunk::Execute(int)::$_6::operator()",
+            ),
+            (
+                "_ZN3xla3cpu9CopyThunk7ExecuteEi",
+                "xla::cpu::CopyThunk::Execute",
+            ),
+            ("_ZNK3Foo3barEi", "Foo::bar"),
+            ("_ZNR3Foo3bazEv", "Foo::baz"),
+            ("_ZNO3Foo3bazEv", "Foo::baz"),
+            ("_ZN3FooclEv", "Foo::operator()"),
+            ("_ZN3FooltERKS_", "Foo::operator<"),
+            ("_Z3fooi.cold", "foo"),
+            ("_ZN12_GLOBAL__N_13fooEi", "(anonymous namespace)::foo"),
+            // A template keeps the return type `cpp_demangle` writes before it.
+            ("_Z3maxIiET_S0_S0_", "int max<int>"),
+        ] {
+            assert_eq!(bare(mangled), expected, "{mangled}");
+        }
+        let plain = |name: &str| {
+            FunctionSymbol {
+                symbol: name.to_owned(),
+                name: name.to_owned(),
+                offset: 0,
+                size: 0,
+            }
+            .bare_name()
+            .to_owned()
+        };
+        assert_eq!(plain("main"), "main");
+        assert_eq!(plain("a)b)"), "a)b)", "unbalanced is returned whole");
+        assert_eq!(plain("()"), "()", "nothing before the list");
+        assert!(!FunctionSymbol {
+            symbol: "_ZZN3xla3cpu9CopyThunk7ExecuteEiENK3$_6clEl".into(),
+            name: demangle("_ZZN3xla3cpu9CopyThunk7ExecuteEiENK3$_6clEl").unwrap(),
+            offset: 0,
+            size: 0,
+        }
+        .answers_to("xla::cpu::CopyThunk::Execute"));
+    }
+
+    /// A path is opened only where it is the inode the mapping records: the
+    /// target's root first, then this namespace; a different inode at both is
+    /// left to `map_files`, never read in its place.
+    #[test]
+    fn a_mapped_path_is_reached_only_where_its_inode_is() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = std::env::temp_dir().join(format!("omn-reach-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("lib.so");
+        std::fs::write(&file, b"x").unwrap();
+        let meta = std::fs::metadata(&file).unwrap();
+        let pid = std::process::id() as i32;
+        let at = |device, inode| MappedIdentity {
+            device,
+            inode,
+            start: 0x1000,
+            end: 0x2000,
+        };
+        let rooted =
+            PathBuf::from(format!("/proc/{pid}/root")).join(file.strip_prefix("/").unwrap());
+        assert_eq!(
+            reach_mapped(pid, &file, &[at(meta.dev(), meta.ino())]),
+            Reached::Root(rooted.clone())
+        );
+        assert_eq!(
+            reach_mapped(pid, &file, &[at(meta.dev() + 1, meta.ino())]),
+            Reached::Root(rooted.clone()),
+            "an overlay's device differs from the one maps records, its inode does not"
+        );
+        assert_eq!(
+            reach_mapped(pid, &file, &[at(meta.dev(), meta.ino() + 1)]),
+            Reached::MapFiles(PathBuf::from(format!("/proc/{pid}/map_files/1000-2000"))),
+            "a file replaced since it was mapped is not the mapped one"
+        );
+        assert_eq!(reach_mapped(pid, &file, &[]), Reached::Unverified(rooted));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A program that has exited has no root to read through, and a file
+    /// its frames need is still named: the host path is checked against the
+    /// inode the snapshot of its maps recorded while it ran.
+    #[test]
+    fn an_exited_programs_files_are_read_at_the_host_path_when_the_inode_matches() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let mut symbols = Symbolizer::for_process(pid);
+        for _ in 0..200 {
+            if symbols.regions.iter().any(|region| {
+                region
+                    .path
+                    .as_ref()
+                    .is_some_and(|path| path.file_name().is_some_and(|name| name == "sleep"))
+            }) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            symbols.refresh();
+        }
+        let path = symbols
+            .regions
+            .iter()
+            .find_map(|region| {
+                region
+                    .path
+                    .clone()
+                    .filter(|path| path.file_name().is_some_and(|name| name == "sleep"))
+            })
+            .expect("sleep maps its executable");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!Path::new(&format!("/proc/{pid}/root")).exists());
+        assert!(
+            symbols.module(&path).is_some(),
+            "{:?}",
+            symbols.origins().get(&path)
+        );
+    }
+
+    #[test]
+    fn module_reads_use_the_targets_root_without_falling_back_to_the_host() {
+        let path = std::fs::read_link("/proc/self/exe").unwrap();
+        let mut current = Symbolizer::for_process(std::process::id() as i32);
+        assert!(current.module(&path).is_some());
+        assert!(current.origins().contains_key(&path));
+
+        let mut missing = Symbolizer::for_process(i32::MAX);
+        assert!(missing.module(&path).is_none());
+        assert!(matches!(
+            missing.origins().get(&path),
+            Some(unwind::NameOrigin::None(_))
+        ));
     }
 
     #[test]

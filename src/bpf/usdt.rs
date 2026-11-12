@@ -1400,6 +1400,8 @@ pub struct Mapping {
     pub start: u64,
     pub end: u64,
     pub offset: u64,
+    pub device: u64,
+    pub inode: u64,
     pub path: PathBuf,
 }
 
@@ -1411,8 +1413,11 @@ pub fn parse_maps(text: &str) -> Vec<Mapping> {
             let range = fields.next()?;
             let _perms = fields.next()?;
             let offset = u64::from_str_radix(fields.next()?, 16).ok()?;
-            let _dev = fields.next()?;
-            let _inode = fields.next()?;
+            let (major, minor) = fields.next()?.split_once(':')?;
+            let major = u32::from_str_radix(major, 16).ok()?;
+            let minor = u32::from_str_radix(minor, 16).ok()?;
+            let device = libc::makedev(major, minor);
+            let inode = fields.next()?.parse().ok()?;
             let path = fields.collect::<Vec<_>>().join(" ");
             if !path.starts_with('/') {
                 return None;
@@ -1422,6 +1427,8 @@ pub fn parse_maps(text: &str) -> Vec<Mapping> {
                 start: u64::from_str_radix(start, 16).ok()?,
                 end: u64::from_str_radix(end, 16).ok()?,
                 offset,
+                device,
+                inode,
                 path: PathBuf::from(path),
             })
         })

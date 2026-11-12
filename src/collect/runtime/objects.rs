@@ -28,7 +28,13 @@ use crate::bpf::usdt::{self, Object, Site};
 
 /// What one object contributed.
 pub struct Scanned {
+    /// Where this tool opened it: for a running process,
+    /// `/proc/<pid>/root/...` or another way to its mapped inode
+    /// ([`crate::stack::reach_mapped`]), which is also what a uprobe is
+    /// attached through.
     pub path: PathBuf,
+    /// The name the target knows it by, which is what is shown.
+    pub mapped: PathBuf,
     /// Its probe sites, or why it could not be read.
     pub sites: Result<Vec<Site>, String>,
     /// What the ELF actually contained, in words.
@@ -79,19 +85,48 @@ impl Objects {
 }
 
 fn scan(paths: Vec<PathBuf>, unresolved: Vec<String>) -> Objects {
+    scan_reached(
+        paths.into_iter().map(|path| (path.clone(), path, None)),
+        unresolved,
+    )
+}
+
+/// Each object read at its first path and shown by its second; the third
+/// says why a file outside this tool's reach could not be read.
+fn scan_reached(
+    paths: impl Iterator<Item = (PathBuf, PathBuf, Option<String>)>,
+    unresolved: Vec<String>,
+) -> Objects {
     let scanned = paths
-        .into_iter()
-        .map(|path| match Object::read(&path) {
-            Ok(object) => Scanned {
-                description: object.describe(),
-                sites: usdt::sites(&object),
-                path,
-            },
-            Err(error) => Scanned {
-                description: error.clone(),
-                sites: Err(error),
-                path,
-            },
+        .map(|(path, mapped, unreachable)| {
+            // Shown by the name the target maps, not the `/proc` path read.
+            let shown = |text: String| {
+                if path == mapped {
+                    text
+                } else {
+                    text.replace(&path.display().to_string(), &mapped.display().to_string())
+                }
+            };
+            match Object::read(&path) {
+                Ok(object) => Scanned {
+                    description: shown(object.describe()),
+                    sites: usdt::sites(&object),
+                    path,
+                    mapped,
+                },
+                Err(error) => {
+                    let error = match &unreachable {
+                        Some(why) => format!("{}; {why}", shown(error)),
+                        None => shown(error),
+                    };
+                    Scanned {
+                        description: error.clone(),
+                        sites: Err(error),
+                        path,
+                        mapped,
+                    }
+                }
+            }
         })
         .collect();
     Objects {
@@ -100,20 +135,48 @@ fn scan(paths: Vec<PathBuf>, unresolved: Vec<String>) -> Objects {
     }
 }
 
-/// The objects a running process has mapped.
+/// The objects a running process has mapped, each opened through the
+/// target's own mount namespace and checked to be the inode it maps
+/// ([`crate::stack::reach_mapped`]): a process in a container names files
+/// this tool's namespace does not have, or has as other files.
 pub fn of_process(pid: i32) -> Result<Objects, String> {
     let maps = fs::read_to_string(format!("/proc/{pid}/maps"))
         .map_err(|error| format!("cannot read the memory map of process {pid}: {error}"))?;
+    let mappings = usdt::parse_maps(&maps);
     let mut seen = BTreeSet::new();
-    let paths = usdt::parse_maps(&maps)
-        .into_iter()
-        .map(|mapping| mapping.path)
+    let paths: Vec<PathBuf> = mappings
+        .iter()
+        .map(|mapping| mapping.path.clone())
         // A file replaced on disk since it was mapped is shown with a suffix,
         // and the file at that path now is not the one in the process.
         .filter(|path| !path.to_string_lossy().ends_with(" (deleted)"))
         .filter(|path| seen.insert(path.clone()))
         .collect();
-    Ok(scan(paths, Vec::new()))
+    let reached = paths.into_iter().map(|path| {
+        let identities: Vec<crate::stack::MappedIdentity> = mappings
+            .iter()
+            .filter(|mapping| mapping.path == path)
+            .map(|mapping| crate::stack::MappedIdentity {
+                device: mapping.device,
+                inode: mapping.inode,
+                start: mapping.start,
+                end: mapping.end,
+            })
+            .collect();
+        match crate::stack::reach_mapped(pid, &path, &identities) {
+            crate::stack::Reached::MapFiles(through) => (
+                through,
+                path,
+                Some(format!(
+                    "neither /proc/{pid}/root nor this namespace has the inode process {pid} \
+                     maps at that path (replaced since, or out of reach), and its mapping \
+                     under /proc/{pid}/map_files is readable only with CAP_SYS_ADMIN"
+                )),
+            ),
+            other => (other.path().to_owned(), path, None),
+        }
+    });
+    Ok(scan_reached(reached, Vec::new()))
 }
 
 /// The objects a program about to be launched will map, as far as can be told
@@ -351,6 +414,124 @@ mod tests {
             fs::canonicalize(mapped).unwrap()
         );
         assert!(launched.unresolved.is_empty(), "{}", launched.inventory());
+    }
+
+    #[test]
+    fn running_process_objects_are_opened_through_its_root() {
+        let pid = std::process::id() as i32;
+        let objects = of_process(pid).unwrap();
+        let root = PathBuf::from(format!("/proc/{pid}/root"));
+        assert!(!objects.scanned.is_empty());
+        assert!(objects
+            .scanned
+            .iter()
+            .all(|object| object.path.starts_with(&root)));
+        let executable = fs::read_link("/proc/self/exe").unwrap();
+        let object = objects
+            .scanned
+            .iter()
+            .find(|object| object.path == crate::stack::target_path(pid, &executable))
+            .unwrap();
+        assert!(object.sites.is_ok(), "{}", object.description);
+        assert!(!crate::stack::functions_in(&object.path, &|_| true).is_empty());
+    }
+
+    #[test]
+    fn process_in_a_distinct_root_has_discoverable_and_symbolizable_functions() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::process::{Command, Stdio};
+
+        const MARKER: &str = "OMN_TEST_CHROOT_CHILD";
+        if std::env::var_os(MARKER).is_none() {
+            let output = Command::new("unshare")
+                .args(["--user", "--map-root-user", "--mount"])
+                .arg(std::env::current_exe().unwrap())
+                .args(["--exact", "collect::runtime::objects::tests::process_in_a_distinct_root_has_discoverable_and_symbolizable_functions", "--nocapture"])
+                .env(MARKER, "1")
+                .output();
+            match output {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    eprintln!("skipped: unshare unavailable");
+                    return;
+                }
+                Err(error) => panic!("unshare: {error}"),
+                Ok(output)
+                    if !output.status.success()
+                        && String::from_utf8_lossy(&output.stderr)
+                            .contains("Operation not permitted") =>
+                {
+                    eprintln!("skipped: user namespaces unavailable");
+                    return;
+                }
+                Ok(output) => assert!(
+                    output.status.success(),
+                    "{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+            }
+            return;
+        }
+        let dir = env::temp_dir().join(format!("omn-foreign-root-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("fixture.c");
+        fs::write(&source, "#include <stdio.h>\n__attribute__((noinline)) void omn_foreign_marker(void) {}\nint main(void) { printf(\"%p\\n\", (void*)omn_foreign_marker); fflush(stdout); getchar(); return 0; }\n").unwrap();
+        let compiled = Command::new("cc")
+            .args(["-static", "-g", "-O0", "-o"])
+            .arg(dir.join("fixture"))
+            .arg(&source)
+            .output()
+            .expect("C compiler");
+        if !compiled.status.success() {
+            eprintln!(
+                "skipped: static C fixture unavailable: {}",
+                String::from_utf8_lossy(&compiled.stderr)
+            );
+            return;
+        }
+        assert!(!Path::new("/fixture").exists());
+        let mut child = Command::new("chroot")
+            .arg(&dir)
+            .arg("/fixture")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("chroot fixture");
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let addr =
+            u64::from_str_radix(line.trim().trim_start_matches("0x"), 16).expect("fixture address");
+        let pid = child.id() as i32;
+        let objects = of_process(pid).unwrap();
+        let fixture = objects
+            .scanned
+            .iter()
+            .find(|item| item.path.file_name().is_some_and(|name| name == "fixture"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "fixture in target maps: {}",
+                    fs::read_to_string(format!("/proc/{pid}/maps")).unwrap_or_default()
+                )
+            });
+        assert!(
+            !crate::stack::functions_in(&fixture.path, &|symbol| symbol.symbol
+                == "omn_foreign_marker")
+            .is_empty()
+        );
+        let mut symbolizer = crate::stack::Symbolizer::for_process(pid);
+        let stack = symbolizer.symbolize(&crate::stack::RawStack {
+            user: vec![addr],
+            ..Default::default()
+        });
+        assert_eq!(
+            stack.frames[0].symbol.as_deref(),
+            Some("omn_foreign_marker")
+        );
+        child.stdin.take().unwrap().write_all(b"\n").unwrap();
+        assert!(child.wait().unwrap().success());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

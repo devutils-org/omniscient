@@ -83,6 +83,15 @@ pub struct Entry {
     pub refused: BTreeMap<TargetKind, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keys: Vec<KeyKind>,
+    /// The attribute `summary`, `hist` and `topk` group by when the request
+    /// gives no `--keys`, instead of the events' keys: what one row should
+    /// be for this source. `runtime.func` writes `signature`, because its key
+    /// is the thread and a row per thread adds a function's calls to its
+    /// neighbours' -- 2.7 ms copies with 0.8 us destructors. Absent, the
+    /// keys. `-e summary` then reads as `-e summary@<attr>`, and `--keys`
+    /// still regroups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grouped_by: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub filter_fields: Vec<String>,
     pub determinism: Determinism,
@@ -1214,6 +1223,19 @@ impl Catalog {
             }
             check_backend_targets(entry)?;
             check_backend_filter_fields(entry)?;
+            if let Some(by) = &entry.grouped_by {
+                crate::request::AttrName::new(by).map_err(|error| {
+                    ParseError::new(format!("{}: grouped_by: {error}", entry.id))
+                })?;
+                // What `summary@<attr>` may name, the default may too.
+                if !entry.filter_fields.contains(by) {
+                    return Err(ParseError::new(format!(
+                        "{}: grouped_by `{by}` is not one of its filter_fields, which is what a \
+                         row may be named by",
+                        entry.id
+                    )));
+                }
+            }
             check_backend_modes(entry)?;
             check_backend_emits(entry)?;
             check_backend_keys(entry)?;

@@ -99,13 +99,175 @@ fn collect(filter: &FilterExpr, name: &str, into: &mut Vec<Wanted>) {
 /// The name a function is filtered and reported by: its demangled name
 /// without its parameter list.
 fn bare(function: &FunctionSymbol) -> String {
-    match function.name.split_once('(') {
-        Some((bare, _)) if !bare.is_empty() => bare.trim_end().to_owned(),
-        _ => function.name.clone(),
+    function.bare_name().to_owned()
+}
+
+/// Words a demangler writes that the mangled name does not spell: the
+/// Itanium abbreviations (`St` is `std`, `Ss` a `basic_string`), builtin
+/// types written as one letter, operators, and what it says of lambdas,
+/// clones and anonymous namespaces; and Rust's equivalents. A term's word
+/// that is part of one of these is not looked for in the mangled name.
+const WRITTEN_BY_THE_DEMANGLER: &[&str] = &[
+    "std",
+    "allocator",
+    "basic_string",
+    "char_traits",
+    "basic_istream",
+    "basic_ostream",
+    "basic_iostream",
+    "string",
+    "istream",
+    "ostream",
+    "iostream",
+    "cxx11",
+    "operator",
+    "new",
+    "delete",
+    "sizeof",
+    "alignof",
+    "typeid",
+    "throw",
+    "noexcept",
+    "decltype",
+    "const",
+    "volatile",
+    "restrict",
+    "unsigned",
+    "signed",
+    "char",
+    "char8_t",
+    "char16_t",
+    "char32_t",
+    "wchar_t",
+    "short",
+    "int",
+    "long",
+    "__int128",
+    "float",
+    "double",
+    "__float128",
+    "_Float16",
+    "bool",
+    "void",
+    "auto",
+    "nullptr",
+    "true",
+    "false",
+    "anonymous",
+    "namespace",
+    "lambda",
+    "unnamed",
+    "clone",
+    "abi",
+    "vtable",
+    "for",
+    "VTT",
+    "typeinfo",
+    "name",
+    "construction",
+    "guard",
+    "variable",
+    "reference",
+    "temporary",
+    "non",
+    "virtual",
+    "thunk",
+    "covariant",
+    "return",
+    "to",
+    "transaction",
+    "safe",
+    "default",
+    "arg",
+    "string",
+    "literal",
+    "ellipsis",
+    "impl",
+    "dyn",
+    "as",
+    "mut",
+    "fn",
+    "unsafe",
+    "extern",
+    "closure",
+    "shim",
+    "str",
+    "u8",
+    "u16",
+    "u32",
+    "u64",
+    "u128",
+    "usize",
+    "i8",
+    "i16",
+    "i32",
+    "i64",
+    "i128",
+    "isize",
+    "f32",
+    "f64",
+];
+
+/// The words of a term a symbol must spell, as the file spells it, to be
+/// worth demangling: [`Wanted::spelled`].
+struct Spelled {
+    words: Vec<String>,
+    fold: bool,
+}
+
+impl Spelled {
+    fn could(&self, symbol: &str) -> bool {
+        if self.words.is_empty() {
+            return true;
+        }
+        if self.fold {
+            let symbol = symbol.to_lowercase();
+            self.words.iter().all(|word| symbol.contains(word.as_str()))
+        } else {
+            self.words.iter().all(|word| symbol.contains(word.as_str()))
+        }
     }
 }
 
 impl Wanted {
+    /// What a symbol as the file spells it must hold to answer to this term
+    /// once demangled, so that one which cannot is never demangled
+    /// ([`crate::stack::functions_in_where`]).
+    ///
+    /// A demangled name spells its identifiers as the mangled one does --
+    /// `_ZN3xla3cpu9CopyThunk7ExecuteEi` holds `CopyThunk` and `Execute`
+    /// verbatim -- so every word of the term must be in the symbol, except a
+    /// word the demangler may have written itself (part of one in
+    /// [`WRITTEN_BY_THE_DEMANGLER`], or a number). `fold` compares without
+    /// case, for the names offered when nothing matched.
+    fn spelled(&self, fold: bool) -> Spelled {
+        let words = self
+            .term
+            .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$'))
+            .filter(|word| !word.is_empty())
+            .filter(|word| !word.starts_with(|c: char| c.is_ascii_digit()))
+            .filter(|word| {
+                let lower = word.to_lowercase();
+                !WRITTEN_BY_THE_DEMANGLER
+                    .iter()
+                    .any(|written| written.to_lowercase().contains(&lower))
+            })
+            .map(|word| {
+                if fold {
+                    word.to_lowercase()
+                } else {
+                    word.to_owned()
+                }
+            })
+            .collect();
+        Spelled { words, fold }
+    }
+
+    #[cfg(test)]
+    fn could(&self, symbol: &str, fold: bool) -> bool {
+        self.spelled(fold).could(symbol)
+    }
+
     fn takes(&self, function: &FunctionSymbol) -> bool {
         if self.substring {
             function.name.contains(&self.term) || function.symbol.contains(&self.term)
@@ -113,6 +275,65 @@ impl Wanted {
             function.answers_to(&self.term)
         }
     }
+}
+
+/// Evaluate function predicates against the same names used during discovery.
+fn matches_call(filter: &FilterExpr, event: &Event, function: &FunctionSymbol) -> bool {
+    match filter {
+        FilterExpr::And(left, right) => {
+            matches_call(left, event, function) && matches_call(right, event, function)
+        }
+        FilterExpr::Or(left, right) => {
+            matches_call(left, event, function) || matches_call(right, event, function)
+        }
+        FilterExpr::Not(inner) => !matches_call(inner, event, function),
+        FilterExpr::Compare {
+            field,
+            operator,
+            value,
+        } if field == "function" => {
+            let matches = |term: &str, substring| {
+                Wanted {
+                    term: term.to_owned(),
+                    substring,
+                }
+                .takes(function)
+            };
+            match (operator, value) {
+                (CompareOp::Eq, Value::Str(term)) => matches(term, false),
+                (CompareOp::Ne, Value::Str(term)) => !matches(term, false),
+                (CompareOp::Matches, Value::Str(term)) => matches(term, true),
+                (CompareOp::In, Value::List(terms)) => terms
+                    .iter()
+                    .any(|term| matches!(term, Value::Str(term) if matches(term, false))),
+                _ => crate::filter::matches(filter, event),
+            }
+        }
+        _ => crate::filter::matches(filter, event),
+    }
+}
+
+/// What was searched for functions, one object a line: the name the target
+/// maps it by, and why it could not be read when it could not. About symbol
+/// tables, not probes -- a function is found in the first and has no use for
+/// the second.
+fn symbol_inventory(objects: &Objects) -> String {
+    let mut lines: Vec<String> = objects
+        .scanned
+        .iter()
+        .map(|scanned| match &scanned.sites {
+            // The reason names the file already.
+            Err(why) => format!("  {why}"),
+            Ok(_) => format!("  {}", scanned.mapped.display()),
+        })
+        .collect();
+    if !objects.unresolved.is_empty() {
+        lines.push(format!(
+            "  and needed libraries no search path resolved: {}",
+            objects.unresolved.join(", ")
+        ));
+    }
+    lines.join("\n")
 }
 
 /// One function the run times.
@@ -139,6 +360,7 @@ fn select(filter: Option<&FilterExpr>, objects: &Objects) -> Result<Vec<Timed>, 
         ));
     }
     let only: Vec<String> = filter.map(objects_wanted).unwrap_or_default();
+    let spelled: Vec<Spelled> = named.iter().map(|wanted| wanted.spelled(false)).collect();
     let mut chosen: Vec<Timed> = Vec::new();
     for path in &read {
         let object = path.file_name().map_or_else(
@@ -148,9 +370,11 @@ fn select(filter: Option<&FilterExpr>, objects: &Objects) -> Result<Vec<Timed>, 
         if !only.is_empty() && !only.contains(&object) {
             continue;
         }
-        for function in crate::stack::functions_in(path, &|function| {
-            named.iter().any(|wanted| wanted.takes(function))
-        }) {
+        for function in crate::stack::functions_in_where(
+            path,
+            &|symbol| spelled.iter().any(|spelled| spelled.could(symbol)),
+            &|function| named.iter().any(|wanted| wanted.takes(function)),
+        ) {
             chosen.push(Timed {
                 object: object.clone(),
                 placed: Placed {
@@ -169,13 +393,18 @@ fn select(filter: Option<&FilterExpr>, objects: &Objects) -> Result<Vec<Timed>, 
         // What the files do hold that resembles it, for a name misspelt or
         // half remembered.
         let mut near: BTreeSet<String> = BTreeSet::new();
+        let folded: Vec<Spelled> = named.iter().map(|wanted| wanted.spelled(true)).collect();
         for path in &read {
-            for function in crate::stack::functions_in(path, &|function| {
-                named.iter().any(|wanted| {
-                    let lower = wanted.term.to_lowercase();
-                    function.name.to_lowercase().contains(&lower)
-                })
-            }) {
+            for function in crate::stack::functions_in_where(
+                path,
+                &|symbol| folded.iter().any(|spelled| spelled.could(symbol)),
+                &|function| {
+                    named.iter().any(|wanted| {
+                        let lower = wanted.term.to_lowercase();
+                        function.name.to_lowercase().contains(&lower)
+                    })
+                },
+            ) {
                 near.insert(bare(&function));
                 if near.len() >= 10 {
                     break;
@@ -200,7 +429,7 @@ fn select(filter: Option<&FilterExpr>, objects: &Objects) -> Result<Vec<Timed>, 
                     near.into_iter().collect::<Vec<_>>().join(", ")
                 )
             },
-            objects.inventory()
+            symbol_inventory(objects)
         ));
     }
     if chosen.len() > MAX_FUNCTIONS {
@@ -258,11 +487,15 @@ impl Prepared for Prepare {
             _ => (pid, None),
         };
         let launched = matches!(self.target, Target::Launch(_));
+        // Timed from the maps to the last symbol table, because at `--pid`
+        // it is time the program runs before any probe is placed.
+        let searching = std::time::Instant::now();
         let objects = match &self.target {
             Target::Launch(argv) => objects::of_launch(argv)?,
             _ => objects::of_process(process)?,
         };
         let timed = select(self.filter.as_ref(), &objects)?;
+        let symbol_time = searching.elapsed();
         Ok(Box::new(FuncCollector {
             filter: self.filter,
             pid: process,
@@ -270,6 +503,7 @@ impl Prepared for Prepare {
             launched,
             timed,
             objects,
+            symbol_time,
             program: None,
             fallback: None,
             losses: Losses::default(),
@@ -292,6 +526,7 @@ pub struct FuncCollector {
     launched: bool,
     timed: Vec<Timed>,
     objects: Objects,
+    symbol_time: StdDuration,
     program: Option<FuncProgram>,
     fallback: Option<String>,
     losses: Losses,
@@ -360,7 +595,7 @@ impl FuncCollector {
             }
             let event = event(timed, &call, index);
             if let Some(filter) = &self.filter {
-                if !crate::filter::matches(filter, &event) {
+                if !matches_call(filter, &event, &timed.function) {
                     self.filtered_out += 1;
                     continue;
                 }
@@ -434,6 +669,23 @@ impl Collector for FuncCollector {
 
     fn notes(&self) -> Vec<String> {
         let mut notes = Vec::new();
+        notes.push(format!(
+            "finding the functions in the symbol tables of the {} object(s) searched took {}, \
+             before any probe was placed{}",
+            self.objects.scanned.len(),
+            crate::triage::span(self.symbol_time.as_nanos() as f64),
+            if self.launched {
+                ""
+            } else {
+                ": the process ran unmeasured for that long"
+            }
+        ));
+        notes.push(
+            "`depth` counts the calls of one function open at once on one thread, so two \
+             different functions both at depth 1 can still be one inside the other; it is not \
+             a depth in the call stack"
+                .to_owned(),
+        );
         let mut by_object: BTreeMap<&str, Vec<String>> = BTreeMap::new();
         for timed in &self.timed {
             by_object
@@ -463,7 +715,7 @@ impl Collector for FuncCollector {
             self.objects
                 .scanned
                 .iter()
-                .map(|scanned| scanned.path.display().to_string())
+                .map(|scanned| scanned.mapped.display().to_string())
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
@@ -594,6 +846,85 @@ mod tests {
         }
         .takes(&copy));
         assert_eq!(bare(&copy), "xla::cpu::CopyThunk::Execute");
+        let lambda = function(
+            "lambda",
+            "xla::cpu::CopyThunk::Execute(int)::$_6::operator()(long)",
+        );
+        assert!(!exact("xla::cpu::CopyThunk::Execute").takes(&lambda));
+        assert_eq!(
+            bare(&lambda),
+            "xla::cpu::CopyThunk::Execute(int)::$_6::operator()"
+        );
+        assert!(exact("xla::cpu::CopyThunk::Execute(int)::$_6::operator()").takes(&lambda));
+    }
+
+    /// The mangled-name prefilter refuses only symbols the filter would have
+    /// refused after demangling: over every symbol of the C++ libraries this
+    /// machine has, the search finds the same functions with it and without.
+    #[test]
+    fn the_prefilter_never_drops_a_symbol_the_filter_takes() {
+        let libraries: Vec<&Path> = [
+            "/usr/lib/libstdc++.so.6",
+            "/usr/lib/x86_64-linux-gnu/libstdc++.so.6",
+            "/usr/lib64/libstdc++.so.6",
+        ]
+        .iter()
+        .map(Path::new)
+        .filter(|path| path.exists())
+        .collect();
+        if libraries.is_empty() {
+            eprintln!("skipped: no libstdc++ to read");
+            return;
+        }
+        let terms = [
+            ("std::vector", true),
+            ("td::vec", true),
+            ("basic_string", true),
+            ("std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >::append", false),
+            ("operator()", true),
+            ("operator new", true),
+            ("(anonymous namespace)", true),
+            ("unsigned long", true),
+            ("~", true),
+            ("ios_base::Init", true),
+            ("std::locale::locale", false),
+            ("_ZNSt6locale5classicEv", false),
+            ("Locale", true),
+            ("[clone", true),
+            ("const&", true),
+            ("char_traits<wchar_t>", true),
+        ];
+        for path in libraries {
+            // Demangled once; each term is then asked both ways in memory.
+            let every = crate::stack::functions_in(path, &|_| true);
+            for (term, substring) in terms {
+                let wanted = Wanted {
+                    term: term.to_owned(),
+                    substring,
+                };
+                let lower = term.to_lowercase();
+                let near =
+                    |function: &FunctionSymbol| function.name.to_lowercase().contains(&lower);
+                for function in &every {
+                    if wanted.takes(function) {
+                        assert!(
+                            wanted.could(&function.symbol, false),
+                            "{term} in {}: the prefilter drops {}",
+                            path.display(),
+                            function.symbol
+                        );
+                    }
+                    if near(function) {
+                        assert!(
+                            wanted.could(&function.symbol, true),
+                            "{term} in {}, without case: the prefilter drops {}",
+                            path.display(),
+                            function.symbol
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// The event carries the name the filter matched, so the filter that
@@ -626,6 +957,27 @@ mod tests {
         assert!(crate::filter::matches(
             &filter("function =~ 'comp' && depth == 1"),
             &event
+        ));
+        for expression in [
+            "function == 'compute(int)' && depth == 1",
+            "function == '_Z7computei'",
+            "function in ('other', '_Z7computei')",
+            "function =~ '_Z7compute'",
+        ] {
+            assert!(
+                matches_call(&filter(expression), &event, &timed.function),
+                "{expression}"
+            );
+        }
+        assert!(!matches_call(
+            &filter("function == 'compute(int)' && depth == 2"),
+            &event,
+            &timed.function
+        ));
+        assert!(!matches_call(
+            &filter("function != '_Z7computei'"),
+            &event,
+            &timed.function
         ));
     }
 }

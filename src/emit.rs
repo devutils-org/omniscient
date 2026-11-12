@@ -1062,8 +1062,21 @@ pub fn aggregate(
     } else {
         None
     };
+    // A source whose rows are not its keys' (`grouped_by` in the catalog)
+    // reads `summary` as `summary@<attr>`, unless `--keys` regroups.
+    let grouped_by = if axes.is_empty() {
+        grouped_by(request.source.as_str())
+    } else {
+        None
+    };
     let mut outputs = Vec::new();
     for emit in &request.emit {
+        let emit = &match (*emit, grouped_by) {
+            (Emit::Summary, Some(by)) => Emit::SummaryBy(by),
+            (Emit::Hist(scale), Some(by)) => Emit::HistBy(scale, by),
+            (Emit::TopK { k, by: None }, Some(by)) => Emit::TopK { k, by: Some(by) },
+            (emit, _) => emit,
+        };
         outputs.push(match emit {
             Emit::Raw => Output::Raw {
                 events: original
@@ -1611,6 +1624,19 @@ fn borrowed(groups: &BTreeMap<SeriesKey, Vec<Event>>) -> BTreeMap<SeriesKey, Vec
 /// emit that sums them, `rate`, `topk` or `stack`. A source the embedded
 /// catalog does not carry (one from `--catalog <dir>`) is given the total; a
 /// sum the reader can ignore is better than a missing one.
+/// What a source's reducing emits group by when no `--keys` is given, when
+/// the catalog says it is not the events' keys (`Entry::grouped_by`).
+pub fn grouped_by(source: &str) -> Option<crate::request::AttrName> {
+    use std::sync::OnceLock;
+    static CATALOG: OnceLock<Option<crate::catalog::Catalog>> = OnceLock::new();
+    let catalog = CATALOG.get_or_init(|| crate::catalog::Catalog::embedded().ok());
+    let entry = catalog
+        .as_ref()
+        .zip(source.parse().ok())
+        .and_then(|(catalog, id)| catalog.get(&id))?;
+    crate::request::AttrName::new(entry.grouped_by.as_deref()?).ok()
+}
+
 pub fn values_add_up(source: &str) -> bool {
     use std::sync::OnceLock;
     static CATALOG: OnceLock<Option<crate::catalog::Catalog>> = OnceLock::new();
@@ -3430,6 +3456,98 @@ mod tests {
             "{:?}",
             results.degradations
         );
+    }
+
+    /// `runtime.func`'s rows are its functions as the file names them
+    /// (`grouped_by: signature`), not its threads: a function and its lambda
+    /// on one thread are two rows, and the summary does not add a 2.7 ms copy
+    /// to a 0.8 us destructor (ZML feedback 4). `--keys task` still gives the
+    /// row per thread, `--sum` adds rows up, and a loss reaches every row.
+    #[test]
+    fn function_calls_are_summarised_per_signature_unless_keys_regroup() {
+        assert_eq!(
+            grouped_by("runtime.func").map(|by| by.as_str()),
+            Some("signature")
+        );
+        assert_eq!(grouped_by("mem.rss"), None);
+        let call = |ts: u64, tid: i32, ns: u64, signature: &str| Event {
+            ts_ns: ts,
+            ts_err_ns: 0,
+            kind: "runtime.func".into(),
+            keys: vec![KeyValue::task(tid)],
+            attrs: vec![
+                Attr::uint("lat_ns", ns),
+                Attr::text("function", "Copy::Execute"),
+                Attr::text("signature", signature),
+            ],
+            collector_id: CollectorId::new("test"),
+            seq: 0,
+        };
+        let execute = "Copy::Execute(int)";
+        let lambda = "Copy::Execute(int)::$_6::~$_6()";
+        let events = vec![
+            call(0, 7, 2_700_000, execute),
+            call(1, 7, 800, lambda),
+            call(2, 8, 2_900_000, execute),
+            call(3, 8, 700, lambda),
+        ];
+        let as_func = |emit: Vec<Emit>, keys: Vec<KeyKind>, sum: Vec<String>| {
+            let mut resolved = rss_request(emit, keys);
+            resolved.request.source = "runtime.func".parse().unwrap();
+            resolved.request.mode = crate::request::Mode::Trace;
+            resolved.request.sum = sum;
+            resolved
+        };
+        let mut lossy = quiet(events.clone(), 1_000);
+        lossy.losses.dropped = 3;
+        let resolved = as_func(
+            vec![
+                Emit::Summary,
+                Emit::Hist(BucketLayout::Log2),
+                Emit::TopK { k: 5, by: None },
+            ],
+            Vec::new(),
+            Vec::new(),
+        );
+        let results = aggregate(&resolved, lossy, Unit::Ns, "lat_ns").unwrap();
+        let Output::Summary { series } = &results.outputs[0] else {
+            panic!("a summary");
+        };
+        let rows: Vec<(String, usize, f64)> = series
+            .iter()
+            .map(|one| (one.key.to_string(), one.count, one.max))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (format!("signature={execute}"), 2, 2_900_000.0),
+                (format!("signature={lambda}"), 2, 800.0),
+            ]
+        );
+        let json = serde_json::to_string(series).unwrap();
+        assert!(json.contains("dropped"), "the loss is on every row: {json}");
+        let Output::Hist { series, .. } = &results.outputs[1] else {
+            panic!("a histogram");
+        };
+        assert_eq!(series.len(), 2, "{series:?}");
+        let Output::TopK { series, .. } = &results.outputs[2] else {
+            panic!("a ranking");
+        };
+        assert_eq!(series[0].key.to_string(), format!("signature={execute}"));
+        assert_eq!(
+            serde_json::to_value(&results.outputs[0]).unwrap()["emit"],
+            "summary",
+            "the emit keeps its name"
+        );
+
+        let by_task = as_func(vec![Emit::Summary], vec![KeyKind::Task], Vec::new());
+        let results =
+            aggregate(&by_task, quiet(events.clone(), 1_000), Unit::Ns, "lat_ns").unwrap();
+        let Output::Summary { series } = &results.outputs[0] else {
+            panic!("a summary");
+        };
+        assert_eq!(series.len(), 2, "one row per thread: {series:?}");
+        assert!(series.iter().all(|one| one.count == 2), "{series:?}");
     }
 
     /// A ranking of a run that measured a window and counted nothing holds

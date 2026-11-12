@@ -35,8 +35,12 @@ probe's descriptor declares them.
 
 `runtime.func` needs no probe the program publishes: it places a uprobe on
 the function's entry and one on its return. A name answers as the file spells
-it, as it demangles, or as it demangles without its parameters (every
-overload); `=~` takes every function whose name contains it, up to 32. Each
+it, as it demangles, or as it demangles without its own parameters and
+qualifiers (every overload; a lambda inside the function keeps its enclosing
+scope, `Execute(int)::$_6::operator()`, and is not the function); `=~` takes
+every function whose name contains it, up to 32. `summary`, `hist` and `topk`
+give one row per `signature`, so two functions a `=~` took are never added
+together; `--keys task` gives a row per thread instead. Each
 call's `lat_ns` is wall clock, time blocked inside it included; a recursive
 call has `depth` above 1 and is also inside its caller's time, so sum
 `depth == 1` for a total. A request that names no function is refused, and a
@@ -47,7 +51,12 @@ name that matches nothing lists the functions whose names contain it.
 A launch or `--pid` (`runtime.custom` and `runtime.func` also `--tid`). For a
 launched program the probes are found before it execs, in the executable and the libraries its
 dynamic section names; a library loaded later with `dlopen` is not among
-them.
+them. A `--pid` in a container works as it does on the host: its files are
+read through `/proc/<pid>/root`, each one checked to be the inode the process
+maps, so `runtime.func`, `runtime.custom` and `cpu.profile`'s names and
+unwinding all see the container's files and never a namesake on the host.
+`runtime.func` says how long finding the functions took, which at `--pid` is
+time the program ran before any probe was placed.
 
 ## Cost
 

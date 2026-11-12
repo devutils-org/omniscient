@@ -444,3 +444,116 @@ fn a_function_that_is_not_named_or_not_there_is_refused_by_name() {
     assert!(text.contains("found no function named `recur`"), "{text}");
     assert!(text.contains("recurse"), "the near name is offered: {text}");
 }
+
+/// A process in another mount namespace -- a container -- maps an
+/// executable this tool's namespace does not have at that path. Its functions
+/// are found, timed and named through `/proc/<pid>/root`, the way the target
+/// sees its own files (the campaign's podman `kyavserver`, refused with
+/// "cannot read /k/bin/kyavserver").
+#[test]
+fn a_process_whose_executable_only_its_own_mount_namespace_has_is_timed_and_named() {
+    let Ok(fixture) = fixture() else { return };
+    let hidden = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "omn-func-ns-{}-{}",
+        std::process::id(),
+        rand_suffix()
+    ));
+    std::fs::create_dir_all(&hidden).unwrap();
+    let inside = hidden.join("fixture");
+    // A tmpfs over the directory, in a namespace of the child's own: the
+    // copy is there for it and nowhere for this tool.
+    let start = |program: &str| {
+        Command::new("unshare")
+            .args(["--user", "--map-root-user", "--mount", "sh", "-c"])
+            .arg(format!(
+                "mount -t tmpfs none {dir} && cp {fixture} {inside} && exec {inside} {program}",
+                dir = hidden.display(),
+                fixture = fixture.display(),
+                inside = inside.display()
+            ))
+            .stdout(std::process::Stdio::null())
+            .spawn()
+    };
+    let wait_mapped = |pid: u32| {
+        for _ in 0..400 {
+            let maps = std::fs::read_to_string(format!("/proc/{pid}/maps")).unwrap_or_default();
+            if maps.contains(inside.to_str().unwrap()) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        false
+    };
+    let Ok(mut holding) = start("hold 20 400") else {
+        eprintln!("skipped: no unshare");
+        return;
+    };
+    if !wait_mapped(holding.id()) {
+        let _ = holding.kill();
+        let status = holding.wait().unwrap();
+        eprintln!("skipped: no user and mount namespace here ({status})");
+        return;
+    }
+    assert!(
+        !inside.exists(),
+        "the executable is outside this tool's namespace"
+    );
+    let pid = holding.id().to_string();
+    let output = omn(&[
+        "runtime.func",
+        "-m",
+        "trace",
+        "-e",
+        "summary",
+        "--filter",
+        "function == 'hold'",
+        "--format",
+        "json",
+        "-d",
+        "1s",
+        "--pid",
+        &pid,
+    ]);
+    let _ = holding.kill();
+    let _ = holding.wait();
+    let text = spoken(&output);
+    if !output.status.success()
+        && (text.contains("CAP_BPF")
+            || text.contains("CAP_PERFMON")
+            || text.contains("has no viable backend on this machine"))
+    {
+        eprintln!("skipped: this machine places no uprobe here: {text}");
+        return;
+    }
+    assert!(output.status.success(), "{text}");
+    let document: Value = serde_json::from_slice(&output.stdout).expect("json");
+    let summary = document["results"][0]["outputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|output| output["emit"] == "summary")
+        .unwrap()
+        .to_string();
+    assert!(summary.contains("hold"), "{summary}");
+    assert!(!summary.contains("\"n\":0,"), "calls were timed: {summary}");
+
+    let Ok(mut spinning) = start("recurse 1 5000") else {
+        return;
+    };
+    assert!(wait_mapped(spinning.id()));
+    let pid = spinning.id().to_string();
+    let output = omn(&["cpu.profile", "-e", "stack", "-d", "1s", "--pid", &pid]);
+    let _ = spinning.kill();
+    let _ = spinning.wait();
+    std::fs::remove_dir_all(&hidden).ok();
+    let text = spoken(&output);
+    assert!(output.status.success(), "{text}");
+    assert!(
+        text.contains("recurse"),
+        "the hidden executable's frames are named, and unwound past the leaf: {text}"
+    );
+    assert!(
+        !text.contains("cannot read"),
+        "every file the target maps was read through its root: {text}"
+    );
+}

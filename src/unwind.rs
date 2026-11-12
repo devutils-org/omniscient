@@ -195,8 +195,15 @@ pub fn target_image(target: &Target) -> Result<TargetImage, String> {
             let pid = pids
                 .first()
                 .ok_or_else(|| "the target names no process".to_owned())?;
-            std::fs::read_link(format!("/proc/{pid}/exe"))
-                .map_err(|error| format!("cannot read which binary process {pid} runs: {error}"))?
+            let named = std::fs::read_link(format!("/proc/{pid}/exe"))
+                .map_err(|error| format!("cannot read which binary process {pid} runs: {error}"))?;
+            // Read through the link rather than at the path it names: the
+            // link opens the very inode the process runs, which a process in
+            // another mount namespace (a container) has at a path this one
+            // may not have, or has as another file.
+            let mut image = inspect_as(Path::new(&format!("/proc/{pid}/exe")), &named)?;
+            image.path = named;
+            return Ok(image);
         }
         other => {
             return Err(format!(
@@ -222,8 +229,14 @@ fn resolve_program(program: &str) -> Result<PathBuf, String> {
 
 /// Reads a binary for its unwind information and its frame pointers.
 pub fn inspect(path: &Path) -> Result<TargetImage, String> {
+    inspect_as(path, path)
+}
+
+/// [`inspect`] of the file at `path`, named `shown` in what it says.
+fn inspect_as(path: &Path, shown: &Path) -> Result<TargetImage, String> {
     let bytes =
-        std::fs::read(path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        std::fs::read(path).map_err(|error| format!("cannot read {}: {error}", shown.display()))?;
+    let path = shown;
     if bytes.starts_with(b"#!") {
         return Err(format!(
             "{} is a script: the program it runs is not known before it runs",
@@ -828,7 +841,10 @@ impl Cfi {
         if self.unreadable.contains(&path) {
             return;
         }
-        match module(region, &path) {
+        // Opened where it is the inode the target maps: through its root
+        // for a process in a container, never a namesake on this side.
+        let opened = super::reach_mapped(self.pid, &path, &[region.identity()]);
+        match module(region, opened.path()) {
             Some(module) => {
                 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
                 {
