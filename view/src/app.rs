@@ -1358,7 +1358,8 @@ mod tests {
                 "{}",
                 view.name()
             );
-            let paragraphs = crate::views::articles::view(view.name()).expect(view.name());
+            let paragraphs = crate::views::articles::view(view.name())
+                .unwrap_or_else(|| panic!("missing article for {}", view.name()));
             assert!(
                 paragraphs.iter().map(|p| p.len()).sum::<usize>() > 250,
                 "{}",
