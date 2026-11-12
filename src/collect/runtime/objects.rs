@@ -417,20 +417,21 @@ mod tests {
     }
 
     #[test]
-    fn running_process_objects_are_opened_through_its_root() {
+    fn running_process_objects_are_opened_at_their_own_paths_in_this_namespace() {
         let pid = std::process::id() as i32;
         let objects = of_process(pid).unwrap();
-        let root = PathBuf::from(format!("/proc/{pid}/root"));
         assert!(!objects.scanned.is_empty());
+        // The same mount namespace: the path the process maps is the file,
+        // and a USDT semaphore's uprobe is refused through /proc/<pid>/root.
         assert!(objects
             .scanned
             .iter()
-            .all(|object| object.path.starts_with(&root)));
+            .all(|object| object.path == object.mapped));
         let executable = fs::read_link("/proc/self/exe").unwrap();
         let object = objects
             .scanned
             .iter()
-            .find(|object| object.path == crate::stack::target_path(pid, &executable))
+            .find(|object| object.path == executable)
             .unwrap();
         assert!(object.sites.is_ok(), "{}", object.description);
         assert!(!crate::stack::functions_in(&object.path, &|_| true).is_empty());

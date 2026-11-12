@@ -2598,9 +2598,10 @@ fn no_attached_request_is_never_a_successful_empty_measurement() {
         };
         for run in runs {
             assert_eq!(run["results"][0]["lifetime"]["exit_code"], 0, "{run}");
+            // Written either way: the program ended by itself.
             assert_eq!(
                 run["results"][0]["lifetime"]["terminated"],
-                serde_json::Value::Null,
+                serde_json::Value::Bool(false),
                 "{run}"
             );
         }

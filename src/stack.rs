@@ -808,6 +808,23 @@ pub(crate) fn reach_mapped(pid: i32, path: &Path, mapped: &[MappedIdentity]) -> 
                 .any(|mapping| mapping.device == device && mapping.inode == inode)
         })
     };
+    // A target in this tool's own mount namespace names the same files at
+    // the same paths, and the path is given as it is: the kernel refuses a
+    // uprobe with a reference counter (a USDT semaphore) through the
+    // `/proc/<pid>/root` link, `ENOENT` at the link.
+    let shared = match (
+        std::fs::metadata(format!("/proc/{who}/ns/mnt")),
+        std::fs::metadata("/proc/self/ns/mnt"),
+    ) {
+        (Ok(theirs), Ok(ours)) => {
+            use std::os::unix::fs::MetadataExt;
+            (theirs.dev(), theirs.ino()) == (ours.dev(), ours.ino())
+        }
+        _ => false,
+    };
+    if shared && is(mapped_identity_of(path, "/proc/self/mountinfo")) {
+        return Reached::Host(path.to_owned());
+    }
     let at_root = mapped_identity_of(&rooted, &format!("/proc/{who}/mountinfo"));
     if is(at_root) {
         return Reached::Root(rooted);
@@ -4249,7 +4266,8 @@ mod tests {
             PathBuf::from(format!("/proc/{pid}/root")).join(file.strip_prefix("/").unwrap());
         assert_eq!(
             reach_mapped(pid, &file, &[at(meta.dev(), meta.ino())]),
-            Reached::Root(rooted.clone())
+            Reached::Host(file.clone()),
+            "a process of this mount namespace is read at the path it names"
         );
         assert_eq!(
             reach_mapped(pid, &file, &[at(meta.dev() + 1, meta.ino())]),
