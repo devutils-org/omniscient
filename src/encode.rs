@@ -2420,6 +2420,7 @@ fn pprof_unit(unit: Unit) -> (&'static str, bool) {
         Unit::Celsius => ("celsius", false),
         Unit::Cycles => ("cycles", false),
         Unit::BytesPerSecond => ("bytes_per_second", false),
+        Unit::Setting => ("setting", false),
     }
 }
 

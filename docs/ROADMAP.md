@@ -47,7 +47,9 @@ To be recalled at every phase — these are the project's natural drifts:
   discipline, no cgroup limit, and nothing that modifies the target in order to
   read it. A tool that measures and changes in the same run produces numbers
   nobody can interpret. An accepted boundary, and the one most likely to be
-  proposed as a feature.
+  proposed as a feature. *The thirty-first wave's `omn advise` names the
+  setting behind a measurement and how to check a change, and changes
+  nothing (`docs/DECISIONS.md`, boundary 5).*
 
 ---
 

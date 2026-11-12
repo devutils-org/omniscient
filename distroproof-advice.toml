@@ -1,0 +1,28 @@
+# The advice rules whose setting is the machine's (catalog/advice.yaml,
+# docs/scenarios/advice.md): each changed in a guest, as root, never on the
+# development machine. tests/advice_truth.rs judges what comes back.
+#
+#   scripts/release.sh && scripts/distroproof/advice-build.sh
+#   distroproof up -f distroproof-advice.toml --no-tui --jobs 2
+#   cargo test --test advice_truth
+
+[defaults]
+memory = "2G"
+cpus = 4
+timeout = "30m"
+
+[[target]]
+name = "advice-arch"
+image = "arch"
+
+[[target]]
+name = "advice-debian-13"
+image = "debian-13"
+
+[run]
+setup = "sh scripts/distroproof/setup.sh"
+command = "sh scripts/distroproof/advice.sh"
+as_user = "root"
+collect = ["advice-guest.json"]
+exclude = ["*"]
+include = ["target/dist", "target/dp-advice", "scripts/distroproof"]

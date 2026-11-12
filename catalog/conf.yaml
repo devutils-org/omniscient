@@ -1,0 +1,73 @@
+# The settings beside a measurement: what the kernel is configured to do, for
+# the machine and for the target, read and never written.
+#
+# The settings themselves are a table, `settings.yaml`: one row per setting,
+# with the file it is read from, its scope, the mechanism it governs and the
+# sources whose readings it bears on. These three entries are the ways of
+# asking for them. Nothing here changes a setting (`docs/DECISIONS.md`,
+# boundary 5); the advice rules that read them are `advice.yaml`.
+
+- id: conf.machine
+  family: conf
+  summary: "The machine's settings: sysctls, sysfs, the command line, the kernel's build"
+  unit: setting
+  backends:
+    - {id: "fs:proc", requires: ["/proc/sys"], cost: free}
+  modes: [snapshot]
+  emits: [raw]
+  targets: {system: native}
+  determinism: high
+  caveats:
+    - "A setting is read as the kernel spells it. One that could not be read
+       is `unknown`, with the reason (permission, a mount that is not there);
+       one this kernel does not have is `absent`, which is a fact about the
+       kernel and not an error. Neither is ever answered with a default."
+    - "Only the settings the table lists, chosen because a source of this
+       catalog can show their effect. `sysctl -a` has a thousand more."
+    - "A setting read once describes the run only if nothing changed it
+       during the run: `conf.changed` is the check."
+
+- id: conf.process
+  family: conf
+  summary: "The target's own settings: OOM score, scheduling, affinity, limits, its cgroup's limits"
+  unit: setting
+  backends:
+    - {id: "fs:proc", requires: ["/proc/self/stat"], cost: free}
+  modes: [snapshot]
+  emits: [raw]
+  targets: {pid: native, tid: native, launch: native}
+  determinism: high
+  caveats:
+    - "A launched program is read once it runs, as the program itself: the
+       children it starts later are other processes, with settings of their
+       own."
+    - "A cgroup limit is read at the target's cgroup and at each ancestor up
+       to the root; the reading names the level whose limit binds, because a
+       parent's `memory.max` binds a child whose own reads `max`."
+    - "The threads' scheduling and affinity are read per thread, up to 64
+       threads; beyond, the rest are counted and not read."
+
+- id: conf.changed
+  family: conf
+  summary: "The settings that changed while the run was going"
+  unit: setting
+  backends:
+    - {id: "fs:proc", requires: ["/proc/sys"], cost: free}
+  modes: [poll]
+  emits: [raw]
+  targets: {system: native, pid: native, launch: native}
+  determinism: high
+  caveats:
+    - "Read at every poll, and emits at the end of the run one event per
+       setting whose value differed between the first and the last reading,
+       plus one that says how many were watched. A change and its undoing
+       between two polls is not seen."
+    - "A system target watches the machine's settings; a process target
+       watches the machine's and the process's."
+
+- default:
+    family: conf
+    question: "What are the machine and the program set to?"
+    low:
+      - {source: conf.machine, mode: snapshot, emit: [raw], target: system, label: "machine settings"}
+      - {source: conf.process, mode: snapshot, emit: [raw], label: "program settings"}

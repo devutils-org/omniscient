@@ -14632,3 +14632,17 @@ passed, 3 failed.
 Earlier in the twenty-ninth wave's run, under load 11, `pairs_io`'s
 `vfsstat-reads` and `pairs_bpftrace`'s `biolatency` failed alone too: both
 count the whole machine, which other sessions were reading from and writing to.
+
+## For the flaky tally: the sqlite cases when debuginfod has no debug info (2026-11-11)
+
+`cases::every_case_names_its_known_cause_both_ways` failed in the full run
+after the thirty-first wave's follow-up (`e1acbf4`), and again alone: every
+failing check is a sqlite3 frame left unnamed (`sqlite3+0x1a49e9`), on the
+`sqlite3-durability` and `sqlite3-stripped` cases. The cause is outside the
+tree: `https://debuginfod.archlinux.org/buildid/de25d7724bab202258a6641cea97e540d32dbc06/debuginfo`
+(sqlite 3.54.0-1, the installed one) answers 404, so neither way can name
+the frames. The same test passed in the full run at `19488a3` the same day.
+The `gcc-shell` and `make-sqlite` checks that failed beside it in the full
+run passed when the test ran alone: load. A case that needs debuginfod should
+say "skipped: the server has no debug info for this build" rather than fail
+-- filed, not done.

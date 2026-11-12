@@ -45,6 +45,16 @@ omn \- one vocabulary for system observability
 .B omn diff
 .I before after
 .br
+.B omn advise
+.B \-\-objective
+.I objective
+.RB [ \-\-save
+.IR file ]
+.RB [ \-\-against
+.IR file ]
+.RB [ \-\-pid
+.IR pid " | " "\-\- program [args]" ]
+.br
 .B omn join
 .B \-f
 .I rules results
@@ -290,6 +300,31 @@ is required. See
 is accepted as \fBomn latency\fR's is, and set on every request whose
 collector reads it; the USE method names resources, not functions, so none of
 its requests reads it today, and the answer says so when it is given.
+.TP
+.B advise \-\-objective \fIobjective\fR [\fIoptions\fR] \fB\-\-\fR \fIprogram\fR
+Which setting is behind what was measured. Runs the measurements the rules of
+.I catalog/advice.yaml
+need for the objective, reads the machine's and the program's settings beside
+them
+.RB ( conf.machine ", " conf.process ", " conf.changed ),
+and prints each rule that held: what was measured, why it points at the
+setting, the setting's value and where it was read, what changing it is
+expected to do to which reading, the command a person would type and at which
+scope, and caveats.
+.B It changes nothing:
+no setting is written and no command is run. The objective is required.
+.B \-\-save
+.I file
+writes the answer as JSON;
+.B \-\-against
+.I file
+compares this run with that answer, rule by rule, on the reading each rule
+predicted would move, and lists the settings that differ between the two runs.
+A reading that moved while the rule's machine or cgroup setting did not is not
+credited to the rule. With
+.BR \-\-pid ,
+.B \-\-duration
+is required.
 .TP
 .B diff \fIbefore after\fR
 Two profiles and a subtraction. Each is a run's output directory (written with
@@ -1048,7 +1083,7 @@ They overlapped in time. A hypothesis, nothing more. What \fBbetween\fR
 produces, and what \fBwithin_key\fR says of an \fBeq\fR join's choice between
 states.
 .SH TRIAGE
-.BR "omn latency" ", " "omn saturate" " and " "omn diff"
+.BR "omn latency" ", " "omn saturate" ", " "omn diff" " and " "omn advise"
 sit above the engine and call it like any other user: each writes a session,
 runs it through the same calls
 .B omn \-f
@@ -1086,6 +1121,17 @@ the disk's and the network's energy are named as unmetered rather than free.
 Each method refuses what it cannot answer and names the one that can:
 \fBomn latency \-\-objective throughput\fR points at \fBomn saturate\fR, and
 \fBomn saturate \-\-objective latency\fR at \fBomn latency\fR.
+.SS Settings that bear on this
+.B omn latency
+and
+.B omn saturate
+read the machine's and the program's settings beside their own measurements,
+and print under
+.B settings that bear on this
+the advice rules those measurements hold. A rule whose evidence they did not
+measure is left out;
+.B omn advise
+asks every rule of an objective.
 .SS Verdicts
 \fBomn latency\fR names the largest state only when nothing unread could
 overtake it: not the next state, not a row the run did not supply, not the

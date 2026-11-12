@@ -317,6 +317,36 @@ join what-released-the-block  sched.wakeup -> sched.offcpu  evidence WAKEUP
 `docs/dev/BRIEF.md` is the wave being run; there is no second brief for the one after it,
 because a plan kept in two documents drifted in both.
 
+### After the thirty-first wave
+
+The wave is `docs/dev/briefs/wave-31-advice.md`, its decisions
+`docs/DECISIONS.md`, "Settled in the thirty-first wave": the `conf` family
+reads what the machine and the target are set to (`conf.machine`,
+`conf.process`, `conf.changed`, from `catalog/settings.yaml`), and
+`omn advise` names the setting behind a measurement, with the command and the
+`--against` run that checks it, changing nothing. Four rules, each with a
+ground-truth test: `cgroup.memory.swap-denied`, `oom.victim-by-size`,
+`sched.shared-cpu`, `io.readahead-refused`. `omn latency` and `omn saturate`
+print the rules their own runs hold.
+
+What it leaves, in the order it is worth doing:
+
+1. **The rules that need a machine-wide write**: done for two after the
+   wave, in guests (`distroproof-advice.toml`): `bdi.readahead-off` and
+   `mm.thp-defrag-stall`, on Arch and Debian 13. Left: the governor and EPP
+   (a QEMU guest has no cpufreq: a hardware cell), `vm.swappiness`, IRQ
+   affinity, `tcp_notsent_lowat` -- each needs a fixture whose prediction is
+   one-sided.
+2. ~~THP compaction stalls~~: done, `mm.thp-defrag-stall` above.
+3. ~~The victims of one workload~~: done after the wave -- `mem.oom`'s trace
+   backend follows the target's descendants, and the rule reads the
+   workload's victims.
+4. **The kernel build configuration without `zcat`**: an inflater for
+   `/proc/config.gz`, or leave it.
+5. ~~The portability matrix~~: swept after the wave (2026-11-11, `e1acbf4`):
+   28 of 28 targets, 8 containers, the judges green, and every cell three
+   sources up (`docs/distroproof.md`).
+
 ### After the twenty-ninth wave
 
 The wave is `docs/dev/briefs/wave-29-func.md`, its decisions

@@ -50,6 +50,7 @@ impl Prepared for Prepare {
             counts: KernelCounts::default(),
             removed: 0,
             kills: 0,
+            unfollowed_said: false,
         }))
     }
 }
@@ -64,6 +65,8 @@ pub struct Victims {
     /// Victims the predicate left out.
     removed: u64,
     kills: u64,
+    /// Whether the follower's full map was said.
+    unfollowed_said: bool,
 }
 
 fn page_size() -> u64 {
@@ -165,6 +168,17 @@ impl Victims {
             ),
         ];
         self.counts.absorb(&mut self.losses, lost);
+        let unfollowed = program.unfollowed();
+        if unfollowed > 0 && !self.unfollowed_said {
+            self.losses.note(format!(
+                "{unfollowed} process{} the target started {} not followed: the map of the \
+                 processes it started was full, so a kill of {} is in no event",
+                if unfollowed == 1 { "" } else { "es" },
+                if unfollowed == 1 { "was" } else { "were" },
+                if unfollowed == 1 { "it" } else { "them" },
+            ));
+            self.unfollowed_said = true;
+        }
     }
 }
 

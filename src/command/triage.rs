@@ -1,4 +1,5 @@
-//! `omn latency`, `omn saturate` and `omn diff`, wrapped for the command line.
+//! `omn latency`, `omn saturate`, `omn diff` and `omn advise`, wrapped for the
+//! command line.
 
 use super::*;
 
@@ -158,4 +159,85 @@ pub(crate) fn diff(args: DiffArgs) -> anyhow::Result<ExitCode> {
         format => print_answer(format, &result, || result.text(args.top))?,
     }
     Ok(ExitCode::SUCCESS)
+}
+
+pub(crate) fn advise(args: AdviseArgs) -> anyhow::Result<ExitCode> {
+    use crate::request::Target;
+    use crate::triage::{advise, Method, TriageError};
+
+    let objective = match Method::Advise.require(args.objective) {
+        Ok(objective) => objective,
+        Err(refusal) => return Ok(refuse_triage(&refusal)),
+    };
+    let target =
+        match (args.pid, args.program.is_empty()) {
+            (Some(pid), _) => Target::Pid(vec![pid]),
+            (None, false) => Target::Launch(args.program.clone()),
+            (None, true) => return Ok(refuse_triage(&crate::triage::Refusal(
+                "`omn advise` needs a workload: `-- PROGRAM [ARGS]` to launch one, or `--pid PID` \
+                 with --duration for one already running"
+                    .to_owned(),
+            ))),
+        };
+    let ask = advise::Ask {
+        objective,
+        target,
+        duration: args.duration,
+    };
+    if let Err(refusal) = ask.check() {
+        return Ok(refuse_triage(&refusal));
+    }
+    // Read before anything runs: a file that is not an answer is a refusal,
+    // not a run thrown away afterwards.
+    let before = match &args.against {
+        None => None,
+        Some(path) => {
+            let loaded = std::fs::read_to_string(path)
+                .map_err(|error| format!("{}: {error}", path.display()))
+                .and_then(|text| {
+                    serde_json::from_str::<advise::Answer>(&text).map_err(|error| {
+                        format!(
+                            "{} is not an answer `omn advise --save` wrote: {error}",
+                            path.display()
+                        )
+                    })
+                });
+            match loaded {
+                Ok(answer) if answer.objective != objective => {
+                    return Ok(refuse_triage(&crate::triage::Refusal(format!(
+                        "{} answered for `{}`, and this asks for `{objective}`: a rule's \
+                         prediction is checked against the same question",
+                        path.display(),
+                        answer.objective
+                    ))))
+                }
+                Ok(answer) => Some(answer),
+                Err(error) => return Ok(refuse_triage(&crate::triage::Refusal(error))),
+            }
+        }
+    };
+    if args.dump_session {
+        print_triage_session(args.format, &ask.session())?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    let catalog = catalog(args.catalog.as_deref())?;
+    let capabilities = Capabilities::detect();
+    match advise::answer(&catalog, &capabilities, &ask) {
+        Ok(mut answer) => {
+            if let Some(before) = &before {
+                answer.verification = Some(advise::verify(before, &answer));
+            }
+            if let Some(path) = &args.save {
+                std::fs::write(path, serde_json::to_string_pretty(&answer)?)
+                    .map_err(|error| anyhow::anyhow!("{}: {error}", path.display()))?;
+            }
+            print_answer(args.format, &answer, || answer.text())?;
+            Ok(outcome(&answer.failures))
+        }
+        Err(TriageError::Refused(refusal)) => Ok(refuse_triage(&refusal)),
+        Err(error) => {
+            eprintln!("error: {error}");
+            Ok(ExitCode::from(exit_for(error.whose())))
+        }
+    }
 }

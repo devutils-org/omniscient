@@ -1592,6 +1592,10 @@ Restated from `docs/ROADMAP.md` because they are decisions, not omissions.
    used; the person decides what to do about it. This is stated because "why
    does it not set X" is otherwise a perceived bug rather than a boundary, and
    because it is half of what "performance engineering" usually means.
+   *Amended in the thirty-first wave, without loosening it: omniscient now
+   **advises** -- `omn advise` names the setting behind a measurement, with
+   the command a person would type and the run that checks it -- and still
+   changes nothing. "Settled in the thirty-first wave" has the rules.*
 6. **LTTng, and tools like it, are peers rather than backends.** LTTng-kernel
    attaches the same kernel tracepoints through its own out-of-tree modules, its
    own ring buffers and CTF. Consuming it would mean shelling out, which
@@ -1616,3 +1620,30 @@ From the item the twenty-eighth wave left (`docs/dev/briefs/wave-29-func.md`).
 | What the time is | **Wall clock from entry to return**, said in every run, with the calls under 2 us said to be mostly the measurement. | A profile's share is cpu; a call that waited is the other half of what a campaign asks, and the traps are about 1 us of each timed call. |
 | How many functions | **At most 32**, refused above with the reason. | Every call of every selected function traps twice: a broad pattern is a breakpoint on most of a program. |
 | Which mode | **Trace only**, `-e hist` and `-e summary` summing it. | An in-kernel histogram is what a function called millions of times a second needs; nothing has asked for it yet. |
+
+## Settled in the thirty-first wave: the settings beside a measurement, and advice
+
+From the user's question, "could omniscient advise how to configure a target
+process or the machine" (`docs/dev/briefs/wave-31-advice.md`). Advice, never
+application: boundary 5 stands.
+
+| Question | Decision | Why, and where it stands |
+|---|---|---|
+| Does omniscient change a setting? | **Never**, on any path, in any mode. | `advice::advice_changes_nothing` runs a whole `omn advise` under `strace` and fails on any write open of `/proc/sys`, `/sys`, a cgroup file or `oom_score_adj`, and on any affinity, policy, priority, limit or memory-policy call aimed at another process. |
+| Does it print the command that would? | **Yes, as text**, with its scope (process, cgroup, machine). | The person needs to know what to type; `sysctl -w` on a shared machine is a decision about other people's processes, so the scope is said. |
+| Advice without a measurement? | **No.** A rule fires on a reading of this run and quotes it; a rule whose evidence is settings alone does not load. | What keeps it from becoming a list of "sysctls to speed up Linux". |
+| Advice without an objective? | **Refused with the list**, as every triage request. | The same setting is right for one objective and wrong for another; each rule names the objectives it serves. |
+| A setting that cannot be read | **`unknown` with the reason, `absent` for one this kernel lacks, `unset` for a command-line parameter nobody passed**; a rule that needs it cannot decide, and says so. | The first standing invariant. |
+| A setting that changed during the run | **`conf.changed` reads them at every poll; a rule reading a setting that changed does not fire** and says why. | The run straddles two configurations. `oom_score` is `computed` and never reported as a change. |
+| A lower bound | **Cannot say a reading is below anything**: a rule comparing one with `below` is undecided. | A source that lost events knows a total is at least its count. |
+| Where the settings and the rules live | **In the catalog directory, as tables**: `settings.yaml` (one row per setting, its reader, scope, mechanism and the sources it bears on) and `advice.yaml`, each held by its loader to the catalog. | Adding a setting or a rule is adding a row. The loaders refuse an unknown source, mode or setting, an item without its comparison or direction, a rule without `truth`; `advice::every_rule_names_a_ground_truth_test_that_exists` holds each `truth` to a test. *The brief said a rule without a passing test is not loaded in a release build; the binary cannot know whether a test passed, so the table carries only rules whose test exists and passes in the suite.* |
+| How a rule proves itself | **A fixture and a scope, never the machine**: the test changes the setting in the fixture or its `systemd-run --user --scope`, and checks the prediction with `--against`. | A suite that changes the developer's `vm.swappiness` is a defect; machine-wide rules wait for a distroproof guest. |
+| What the check credits | **A reading that moved while the rule's machine or cgroup setting did not is not the rule's** (`setting_unchanged`). A process setting is read on the target only, so a change made to another process of the workload is reported beside the verdict, not refused. | Two runs differ for many reasons; a rule claims only the move its own setting explains. |
+| The rule the brief planned first | **Not shipped**: `memory.high` before `memory.max` was refuted on this machine. With zram, `memory.max` never killed; with swap denied, `MemoryHigh=100M` under `MemoryMax=128M` delayed the kill from 0.1 s to 260 s. `cgroup.memory.swap-denied` replaced it. | Ground truth is the bar; the 260 s is that rule's caveat (`docs/scenarios/advice.md`). |
+| Whose victims | **The workload's tree**: `mem.oom`'s trace backend follows the processes a pid or a launched program starts (`sched_common::Descendants`), as the scheduler's programs do. | A launch means its process tree everywhere else; the victim program compared the root pid alone, so a killed child was in no event, and the rule first read the machine's victims instead. `advice_truth::the_victims_are_the_launched_tree_s_and_no_one_else_s` holds both halves. |
+| `omn latency` and `omn saturate` | **Read the settings too (`conf.machine`, `conf.process`, optional) and print the rules their own measures hold**, under `settings that bear on this`; a rule whose evidence they did not measure is left out, not undecided. | The settings are free; a verdict that names a cpu wait beside an affinity of one cpu should say so. Their sessions in `examples/triage-*.yml` gained the two requests. |
+| The kernel's build configuration | **`/boot/config-<release>` first, `zcat /proc/config.gz` otherwise**, once per process. | The binary carries no inflater; `zcat` is not a measurement tool, and boundary 4 is about those. |
+| A machine-wide rule's ground truth | **In a distroproof guest, as root** (`distroproof-advice.toml`, `scripts/distroproof/advice.sh`), every setting put back; the host judges what comes back (`advice_truth::a_device_s_readahead_set_again_reads_ahead`, `..::defrag_on_madvise_ends_the_compaction_stall`), and skips when nothing was brought back. | The development machine's settings are not the suite's to change. |
+| Readahead's evidence | **Block requests per page-cache miss** (`per:`, a ratio of two measures), above 0.5; not pages read ahead. | `ahead` was 58 on ext4 at 128 KiB, 30 on btrfs at 128 KiB and 10 on btrfs at 0: no threshold separated them, and one made the hint rule fire on a guest with no hint. One request per missed page against one per many is 1.0 against 0.001 to 0.03. A ratio either side of which lost events decides nothing. |
+| Which readahead setting | **The backing device's (`/sys/class/bdi/*/read_ahead_kb`)**, every instance; the hint rule wants every one above 0 (`every: true`), the device rule one at 0. | btrfs has a bdi of its own: the disk's queue at 0 left it reading 1546 pages ahead. |
+

@@ -811,6 +811,31 @@ all, of which about 1 us lands inside the time measured; the run counts the
 calls shorter than 2 us, the returns with no entry seen, the calls still open
 at the end and those nested deeper than 64.
 
+### `conf` (the settings beside a measurement)
+
+What the kernel is configured to do, for the machine and for the target:
+read, never written (`docs/DECISIONS.md`, boundary 5, and "Settled in the
+thirty-first wave"). The settings are a table, `catalog/settings.yaml`, one
+row per setting with the file it is read from, its scope (machine, process,
+thread, cgroup), the mechanism it governs and the sources whose readings it
+bears on; the three entries are the ways of asking for them.
+
+| Metric | Backends | What it reads |
+|---|---|---|
+| `conf.machine` | `fs:proc` | sysctls, sysfs (THP, cpufreq, block queues, IRQ affinity), `/proc/cmdline`, the kernel's build configuration |
+| `conf.process` | `fs:proc` | `oom_score_adj`, nice, policy and affinity per thread, I/O priority, rlimits, memory nodes, THP state, and the cgroup's limits at each level up to the root |
+| `conf.changed` | `fs:proc` | the settings whose value differed between the first and the last read of a run |
+
+A setting that cannot be read is `unknown` with the reason; one this kernel
+does not have is `absent`; a command-line parameter nobody passed is
+`unset`. None of them is ever answered with a default. A cgroup limit names
+the level whose value binds. `oom_score` is read beside the settings and
+marked `computed`: it moves with what the process holds and is never
+reported as a change.
+
+The advice rules (`catalog/advice.yaml`, `omn advise`) read these settings
+beside a measurement; `docs/triage.md` describes them.
+
 ---
 
 ## 11. Target matrix

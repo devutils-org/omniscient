@@ -20,10 +20,11 @@
 
 use super::btf::Btf;
 use super::insn::{
-    helper, push_task_filter, read_field, read_narrow, read_pointer, Insn, Program, Subject,
-    TaskFields, Whose, BPF_DW, BPF_W, R10,
+    helper, read_field, read_narrow, read_pointer, Insn, Program, Subject, TaskFields, Whose,
+    BPF_DW, BPF_W, R10,
 };
 use super::proc_events::{publish_to, EventStream};
+use super::sched_common::{push_followed_filter, Descendants, Followed};
 use super::transport::Output;
 
 /// `mark_victim(task_struct *, uid_t)` since 6.8; the uid was added then, and
@@ -139,7 +140,7 @@ fn rss_counters(btf: &Btf) -> Result<[i32; 4], String> {
 
 fn instructions(
     btf: &Btf,
-    whose: Whose,
+    followed: Followed,
     output: Output,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
@@ -158,7 +159,7 @@ fn instructions(
             SIGNATURE_WITHOUT_UID.join(", "),
         ));
     };
-    let fields = TaskFields::locate(btf, whose)?;
+    let fields = TaskFields::locate(btf, followed.whose)?;
     let pid_offset = btf.member_offset("task_struct", "pid")?;
     let tgid_offset = btf.member_offset("task_struct", "tgid")?;
     let comm_offset = btf.member_offset("task_struct", "comm")?;
@@ -180,13 +181,17 @@ fn instructions(
 
     read_field(&mut program, TID, 4, 7, pid_offset);
     read_field(&mut program, TGID, 4, 7, tgid_offset);
-    push_task_filter(
+    // A process target keeps the processes it started too: a launched
+    // build whose compiler is killed lost the compiler, not the shell.
+    push_followed_filter(
         &mut program,
         &fields,
-        whose,
+        &followed,
         Subject::with_ids(7, TID, TGID),
+        tgid_offset,
         FILTER,
         "done",
+        "followed",
     );
     if passes_uid {
         program.push(Insn::ldx(BPF_DW, 1, 6, 8));
@@ -237,23 +242,39 @@ fn instructions(
     Ok(instructions)
 }
 
-/// The `mark_victim` stream.
-pub struct VictimProgram(EventStream);
+/// The `mark_victim` stream, and for a process target the processes it
+/// started, followed as the scheduler's programs follow them.
+pub struct VictimProgram(EventStream, Option<Descendants>);
 
 impl VictimProgram {
-    /// See `EventStream::skipped`.
+    /// See `EventStream::skipped`, and the follower's own skipped runs.
     pub fn skipped(&self) -> u64 {
-        self.0.skipped()
+        self.0.skipped() + self.1.as_ref().map_or(0, Descendants::skipped)
+    }
+
+    /// Processes the target started that the follower had no room for: a
+    /// kill of one of them is in no event.
+    pub fn unfollowed(&self) -> u64 {
+        self.1.as_ref().map_or(0, Descendants::missed)
     }
 
     pub fn load(whose: Whose, requested_ring_bytes: usize) -> Result<Self, String> {
+        let descendants = match whose {
+            Whose::Process(root) => Some(Descendants::follow(root)?),
+            _ => None,
+        };
+        let followed = descendants
+            .as_ref()
+            .map_or(Followed::only(whose), |descendants| {
+                descendants.followed(whose)
+            });
         EventStream::load(
             "mark_victim",
             "omn_oom_victim",
             requested_ring_bytes,
-            move |btf, ring, drops| instructions(btf, whose, ring, drops),
+            move |btf, ring, drops| instructions(btf, followed, ring, drops),
         )
-        .map(Self)
+        .map(|stream| Self(stream, descendants))
     }
 
     /// Whether this kernel's tracepoint passes the victim's uid.
@@ -320,8 +341,13 @@ mod tests {
             counters.windows(2).all(|pair| pair[0] < pair[1]),
             "{counters:?}"
         );
-        let program =
-            instructions(&btf, Whose::Process(4242), Output::Ring(3), 4).expect("a program");
+        let program = instructions(
+            &btf,
+            Followed::only(Whose::Process(4242)),
+            Output::Ring(3),
+            4,
+        )
+        .expect("a program");
         let compared = program
             .iter()
             .position(|insn| insn.imm == 4242)
@@ -331,7 +357,8 @@ mod tests {
             .position(|insn| insn.code == 0x85 && insn.imm == helper::RINGBUF_OUTPUT)
             .expect("the publish");
         assert!(compared < published);
-        let machine = instructions(&btf, Whose::Any, Output::Ring(3), 4).expect("a program");
+        let machine =
+            instructions(&btf, Followed::only(Whose::Any), Output::Ring(3), 4).expect("a program");
         assert!(!machine.iter().any(|insn| insn.imm == 4242));
     }
 }

@@ -193,6 +193,7 @@ impl Ask {
             ));
         }
         super::diff::ask_symbols(&mut requests, self.symbols);
+        requests.extend(super::advise::settings_requests(workload, self.duration));
         Session {
             name: Some(format!("omn saturate --objective {}", self.objective)),
             duration: self.duration,
@@ -439,6 +440,10 @@ pub struct Answer {
     /// ([`engine::program_failure`]): the uses above are of a run that failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program_failed: Option<String>,
+    /// The advice rules this run's own measures and settings hold
+    /// ([`super::advise::bearing`]): advice, never a change.
+    #[serde(default, skip_serializing_if = "super::advise::Bearing::is_empty")]
+    pub bearing: super::advise::Bearing,
 }
 
 pub fn answer(
@@ -448,9 +453,15 @@ pub fn answer(
 ) -> Result<Answer, TriageError> {
     ask.check()?;
     let mut session = ask.session();
-    let dropped = engine::prune(catalog, capabilities, &mut session, &OPTIONAL)?;
+    let optional: Vec<&str> = OPTIONAL
+        .iter()
+        .chain(&super::advise::SETTINGS_LABELS)
+        .copied()
+        .collect();
+    let dropped = engine::prune(catalog, capabilities, &mut session, &optional)?;
     let ran = engine::run(catalog, capabilities, &session)?;
     let mut answer = read(ask, &ran.run, dropped);
+    answer.bearing = super::advise::bearing(ask.objective, &ran.run);
     answer.failures = ran.failures;
     answer.program_failed = engine::program_failure(&ran.run);
     Ok(answer)
@@ -911,6 +922,7 @@ pub fn read(ask: &Ask, run: &Run, dropped: Vec<Dropped>) -> Answer {
         notes,
         failures: Vec::new(),
         program_failed: None,
+        bearing: Default::default(),
     }
 }
 
@@ -1142,6 +1154,12 @@ fn verdict(objective: Objective, resources: &[Use], energy: Option<&Energy>) -> 
 
 impl Answer {
     pub fn text(&self) -> String {
+        let mut out = self.uses_text();
+        out.push_str(&self.bearing.text());
+        out
+    }
+
+    fn uses_text(&self) -> String {
         let mut out = String::new();
         let _ = writeln!(
             out,

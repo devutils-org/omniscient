@@ -1,0 +1,586 @@
+# The settings the `conf` family reads, one row each. A table, not catalog
+# entries: `conf.machine`, `conf.process` and `conf.changed` (conf.yaml) read
+# every row of their scope.
+#
+# A row names exactly one reader:
+#   file:     an absolute path; one `*` in one component reads every match,
+#             each an instance named by what the `*` stood for.
+#   proc:     a path under /proc/<pid>/; `per_thread: true` reads it under
+#             /proc/<pid>/task/<tid>/ for each thread instead.
+#   cgroup:   a file of the target's cgroup, read there and at each ancestor.
+#   cmdline:  a parameter of /proc/cmdline; one not given is `unset`, which
+#             means the kernel's built-in default applies.
+#   kconfig:  an option of /proc/config.gz, or /boot/config-<release>.
+#   syscall:  a value only a system call reads (`ioprio`).
+# and may say how the text is read:
+#   field:    the `Name:` line of a key-value file (status, meminfo), or the line a
+#             limits file names (`Max open files`), or the 1-based field of
+#             /proc/<pid>/stat.
+#   as:       kb (a `1234 kB` value, as KiB), bracket (the `[chosen]` word of `always [madvise] never`),
+#             cpu_count (a cpu list, counted), sched_policy (a policy
+#             number, named), vmflag:<flag> (the mappings of smaps whose
+#             VmFlags carry it, counted).
+#   computed: true for a value the kernel derives (oom_score), which is
+#             read but never reported as a change.
+#
+# `bears_on` names the sources whose readings the setting governs; the loader
+# refuses one the catalog does not have. `docs` is a path under the kernel's
+# Documentation/.
+
+# --- memory ---------------------------------------------------------------
+
+- id: vm.swappiness
+  scope: machine
+  file: /proc/sys/vm/swappiness
+  mechanism: "How readily reclaim swaps out anonymous memory rather than dropping page cache."
+  docs: admin-guide/sysctl/vm.rst
+  bears_on: [mem.swap, mem.reclaim, mem.pressure]
+
+- id: vm.overcommit_memory
+  scope: machine
+  file: /proc/sys/vm/overcommit_memory
+  mechanism: "Whether an allocation larger than what memory and swap can back is refused (2), checked heuristically (0) or always granted (1)."
+  docs: mm/overcommit-accounting.rst
+  bears_on: [mem.oom]
+
+- id: vm.overcommit_ratio
+  scope: machine
+  file: /proc/sys/vm/overcommit_ratio
+  mechanism: "The share of memory that counts toward the commit limit under strict overcommit."
+  docs: mm/overcommit-accounting.rst
+  bears_on: [mem.oom]
+
+- id: vm.dirty_ratio
+  scope: machine
+  file: /proc/sys/vm/dirty_ratio
+  mechanism: "The share of memory dirty pages may reach before a writer is made to write back itself."
+  docs: admin-guide/sysctl/vm.rst
+  bears_on: [io.writeback, sched.offcpu]
+
+- id: vm.dirty_background_ratio
+  scope: machine
+  file: /proc/sys/vm/dirty_background_ratio
+  mechanism: "The share of memory dirty pages may reach before the flusher threads start writing back."
+  docs: admin-guide/sysctl/vm.rst
+  bears_on: [io.writeback]
+
+- id: vm.dirty_expire_centisecs
+  scope: machine
+  file: /proc/sys/vm/dirty_expire_centisecs
+  mechanism: "How old a dirty page must be before writeback takes it."
+  docs: admin-guide/sysctl/vm.rst
+  bears_on: [io.writeback]
+
+- id: vm.min_free_kbytes
+  scope: machine
+  file: /proc/sys/vm/min_free_kbytes
+  mechanism: "The memory the kernel keeps free; the watermarks that wake kswapd and stall allocators derive from it."
+  docs: admin-guide/sysctl/vm.rst
+  bears_on: [mem.reclaim, mem.pressure]
+
+- id: vm.watermark_scale_factor
+  scope: machine
+  file: /proc/sys/vm/watermark_scale_factor
+  mechanism: "How far apart the watermarks are: how early kswapd starts reclaiming before an allocator would stall."
+  docs: admin-guide/sysctl/vm.rst
+  bears_on: [mem.reclaim, mem.pressure]
+
+- id: vm.vfs_cache_pressure
+  scope: machine
+  file: /proc/sys/vm/vfs_cache_pressure
+  mechanism: "How hard reclaim takes back the dentry and inode caches relative to page cache."
+  docs: admin-guide/sysctl/vm.rst
+  bears_on: [mem.slab, mem.reclaim]
+
+- id: vm.max_map_count
+  scope: machine
+  file: /proc/sys/vm/max_map_count
+  mechanism: "The most mappings one process may hold; past it mmap fails with ENOMEM."
+  docs: admin-guide/sysctl/vm.rst
+  bears_on: [mem.rss]
+
+- id: vm.panic_on_oom
+  scope: machine
+  file: /proc/sys/vm/panic_on_oom
+  mechanism: "Whether running out of memory panics the machine instead of killing a process."
+  docs: admin-guide/sysctl/vm.rst
+  bears_on: [mem.oom]
+
+- id: vm.oom_kill_allocating_task
+  scope: machine
+  file: /proc/sys/vm/oom_kill_allocating_task
+  mechanism: "Whether the OOM killer kills the task that asked for memory instead of choosing by score."
+  docs: admin-guide/sysctl/vm.rst
+  bears_on: [mem.oom]
+
+- id: vm.zone_reclaim_mode
+  scope: machine
+  file: /proc/sys/vm/zone_reclaim_mode
+  mechanism: "Whether a node reclaims its own memory before allocating from another node."
+  docs: admin-guide/sysctl/vm.rst
+  bears_on: [mem.numa, mem.reclaim]
+
+- id: kernel.numa_balancing
+  scope: machine
+  file: /proc/sys/kernel/numa_balancing
+  mechanism: "Whether the kernel samples a task's memory accesses and moves pages and tasks toward each other."
+  docs: admin-guide/sysctl/kernel.rst
+  bears_on: [sched.numa_balance, mem.numa]
+
+- id: mm.thp.enabled
+  scope: machine
+  file: /sys/kernel/mm/transparent_hugepage/enabled
+  as: bracket
+  mechanism: "Whether anonymous memory is backed by huge pages always, only where madvise asks, or never."
+  docs: admin-guide/mm/transhuge.rst
+  bears_on: [mem.thp, mem.faults, mem.compaction]
+
+- id: mm.thp.defrag
+  scope: machine
+  file: /sys/kernel/mm/transparent_hugepage/defrag
+  as: bracket
+  mechanism: "Whether a fault that wants a huge page stalls to compact memory for it, defers that to kcompactd, or takes a small page."
+  docs: admin-guide/mm/transhuge.rst
+  bears_on: [mem.thp, mem.compaction, mem.faults]
+
+- id: mm.thp.khugepaged_defrag
+  scope: machine
+  file: /sys/kernel/mm/transparent_hugepage/khugepaged/defrag
+  mechanism: "Whether khugepaged compacts memory to collapse small pages into huge ones."
+  docs: admin-guide/mm/transhuge.rst
+  bears_on: [mem.thp, mem.compaction]
+
+- id: mm.lru_gen.enabled
+  scope: machine
+  file: /sys/kernel/mm/lru_gen/enabled
+  mechanism: "Whether reclaim uses the multi-generational LRU, and which of its parts."
+  docs: admin-guide/mm/multigen_lru.rst
+  bears_on: [mem.reclaim]
+
+- id: mm.swap_total
+  scope: machine
+  file: /proc/meminfo
+  field: SwapTotal
+  as: kb
+  mechanism: "How much swap the machine has, in KiB: where reclaim can put anonymous memory."
+  docs: admin-guide/mm/concepts.rst
+  bears_on: [mem.swap, mem.oom]
+
+- id: mm.zswap.enabled
+  scope: machine
+  file: /sys/module/zswap/parameters/enabled
+  mechanism: "Whether pages bound for swap are compressed in memory first."
+  docs: admin-guide/mm/zswap.rst
+  bears_on: [mem.swap]
+
+- id: mm.ksm.run
+  scope: machine
+  file: /sys/kernel/mm/ksm/run
+  mechanism: "Whether ksmd merges identical anonymous pages that were madvised mergeable."
+  docs: admin-guide/mm/ksm.rst
+  bears_on: [mem.rss]
+
+# --- scheduler -------------------------------------------------------------
+
+- id: kernel.sched_autogroup_enabled
+  scope: machine
+  file: /proc/sys/kernel/sched_autogroup_enabled
+  mechanism: "Whether each session is a scheduling group of its own, so nice compares only within a session."
+  docs: admin-guide/sysctl/kernel.rst
+  bears_on: [sched.runqlat]
+
+- id: kernel.sched_rt_runtime_us
+  scope: machine
+  file: /proc/sys/kernel/sched_rt_runtime_us
+  mechanism: "How much of each period real-time tasks may run before they are throttled."
+  docs: scheduler/sched-rt-group.rst
+  bears_on: [sched.runqlat]
+
+- id: cmdline.preempt
+  scope: machine
+  cmdline: preempt
+  mechanism: "The preemption model chosen at boot, where the kernel allows a choice."
+  docs: admin-guide/kernel-parameters.txt
+  bears_on: [sched.runqlat, sched.wakeup]
+
+- id: cmdline.isolcpus
+  scope: machine
+  cmdline: isolcpus
+  mechanism: "The cpus the scheduler's load balancing leaves alone."
+  docs: admin-guide/kernel-parameters.txt
+  bears_on: [sched.runqlat, sched.migrations]
+
+- id: cmdline.nohz_full
+  scope: machine
+  cmdline: nohz_full
+  mechanism: "The cpus whose tick stops while one task runs on them."
+  docs: timers/no_hz.rst
+  bears_on: [sched.runqlat, sched.irq]
+
+- id: cmdline.mitigations
+  scope: machine
+  cmdline: mitigations
+  mechanism: "Whether the speculative-execution mitigations are on, which every system call and context switch pays for."
+  docs: admin-guide/kernel-parameters.txt
+  bears_on: [proc.syscall, sched.switches]
+
+- id: cpu.online_count
+  scope: machine
+  file: /sys/devices/system/cpu/online
+  as: cpu_count
+  mechanism: "How many cpus the scheduler can place a task on."
+  docs: core-api/cpu_hotplug.rst
+  bears_on: [sched.runqlat]
+
+- id: cpu.smt_control
+  scope: machine
+  file: /sys/devices/system/cpu/smt/control
+  mechanism: "Whether the cores' sibling threads are online."
+  docs: admin-guide/hw-vuln/core-scheduling.rst
+  bears_on: [cpu.ipc, sched.runqlat]
+
+# --- cpu frequency and idle -------------------------------------------------
+
+- id: cpufreq.governor
+  scope: machine
+  file: /sys/devices/system/cpu/cpufreq/*/scaling_governor
+  mechanism: "How each frequency policy picks a frequency from load."
+  docs: admin-guide/pm/cpufreq.rst
+  bears_on: [power.freq, cpu.oncpu_time]
+
+- id: cpufreq.energy_performance_preference
+  scope: machine
+  file: /sys/devices/system/cpu/cpufreq/*/energy_performance_preference
+  mechanism: "The hint a hardware-managed policy is given between speed and energy."
+  docs: admin-guide/pm/intel_pstate.rst
+  bears_on: [power.freq, power.energy]
+
+- id: cpufreq.scaling_max_freq
+  scope: machine
+  file: /sys/devices/system/cpu/cpufreq/*/scaling_max_freq
+  mechanism: "The highest frequency, in kHz, each policy may choose."
+  docs: admin-guide/pm/cpufreq.rst
+  bears_on: [power.freq]
+
+- id: cpufreq.boost
+  scope: machine
+  file: /sys/devices/system/cpu/cpufreq/boost
+  mechanism: "Whether frequencies above the base clock may be used."
+  docs: admin-guide/pm/cpufreq.rst
+  bears_on: [power.freq]
+
+# --- block devices ----------------------------------------------------------
+
+- id: block.scheduler
+  scope: machine
+  file: /sys/block/*/queue/scheduler
+  as: bracket
+  mechanism: "The I/O scheduler that orders each device's requests."
+  docs: block/switching-sched.rst
+  bears_on: [io.latency, io.queue]
+
+- id: block.read_ahead_kb
+  scope: machine
+  file: /sys/block/*/queue/read_ahead_kb
+  mechanism: "The most each device's readahead fetches ahead of a sequential reader."
+  docs: block/queue-sysfs.rst
+  bears_on: [io.readahead, mem.faults]
+
+- id: bdi.read_ahead_kb
+  scope: machine
+  file: /sys/class/bdi/*/read_ahead_kb
+  mechanism: "The most readahead fetches for files on each backing device: what governs a file's readahead, which is its filesystem's bdi -- the block device's for ext4 or xfs, a bdi of its own for btrfs (btrfs-N), whatever the disk under it says."
+  docs: ABI/testing/sysfs-class-bdi
+  bears_on: [io.readahead, mem.faults]
+
+- id: block.nr_requests
+  scope: machine
+  file: /sys/block/*/queue/nr_requests
+  mechanism: "How many requests each device's queue holds before a submitter waits."
+  docs: block/queue-sysfs.rst
+  bears_on: [io.queue, io.inflight]
+
+- id: block.rotational
+  scope: machine
+  file: /sys/block/*/queue/rotational
+  mechanism: "Whether the kernel treats each device as a spinning disk."
+  docs: block/queue-sysfs.rst
+  bears_on: [io.latency]
+
+- id: block.wbt_lat_usec
+  scope: machine
+  file: /sys/block/*/queue/wbt_lat_usec
+  mechanism: "The read latency target writeback throttling holds each device's writes back for."
+  docs: block/queue-sysfs.rst
+  bears_on: [io.latency, io.writeback]
+
+# --- network ----------------------------------------------------------------
+
+- id: net.core.somaxconn
+  scope: machine
+  file: /proc/sys/net/core/somaxconn
+  mechanism: "The longest accept queue a listening socket may ask for."
+  docs: networking/ip-sysctl.rst
+  bears_on: [net.drops]
+
+- id: net.core.netdev_max_backlog
+  scope: machine
+  file: /proc/sys/net/core/netdev_max_backlog
+  mechanism: "How many received packets each cpu queues before the stack drops them."
+  docs: admin-guide/sysctl/net.rst
+  bears_on: [net.drops, net.softirq]
+
+- id: net.ipv4.tcp_congestion_control
+  scope: machine
+  file: /proc/sys/net/ipv4/tcp_congestion_control
+  mechanism: "The congestion control new TCP sockets use."
+  docs: networking/ip-sysctl.rst
+  bears_on: [net.tcp.retransmit]
+
+- id: net.ipv4.tcp_rmem
+  scope: machine
+  file: /proc/sys/net/ipv4/tcp_rmem
+  mechanism: "The smallest, default and largest receive buffer of a TCP socket."
+  docs: networking/ip-sysctl.rst
+  bears_on: [net.socket]
+
+- id: net.ipv4.tcp_wmem
+  scope: machine
+  file: /proc/sys/net/ipv4/tcp_wmem
+  mechanism: "The smallest, default and largest send buffer of a TCP socket."
+  docs: networking/ip-sysctl.rst
+  bears_on: [net.socket]
+
+- id: net.ipv4.tcp_notsent_lowat
+  scope: machine
+  file: /proc/sys/net/ipv4/tcp_notsent_lowat
+  mechanism: "How much unsent data a socket holds before poll stops calling it writable."
+  docs: networking/ip-sysctl.rst
+  bears_on: [net.socket]
+
+- id: net.ipv4.tcp_slow_start_after_idle
+  scope: machine
+  file: /proc/sys/net/ipv4/tcp_slow_start_after_idle
+  mechanism: "Whether a connection idle for a retransmission timeout starts again from a small window."
+  docs: networking/ip-sysctl.rst
+  bears_on: [net.socket]
+
+# --- interrupts ---------------------------------------------------------------
+
+- id: irq.smp_affinity_list
+  scope: machine
+  file: /proc/irq/*/smp_affinity_list
+  mechanism: "The cpus each interrupt may be delivered to."
+  docs: core-api/irq/irq-affinity.rst
+  bears_on: [sched.irq, net.softirq]
+
+# --- the kernel's build -------------------------------------------------------
+
+- id: kconfig.psi
+  scope: machine
+  kconfig: CONFIG_PSI
+  mechanism: "Whether the kernel measures pressure stalls at all."
+  docs: accounting/psi.rst
+  bears_on: [mem.pressure, cpu.pressure, io.pressure]
+
+- id: kconfig.preempt_dynamic
+  scope: machine
+  kconfig: CONFIG_PREEMPT_DYNAMIC
+  mechanism: "Whether the preemption model can be chosen at boot."
+  docs: admin-guide/kernel-parameters.txt
+  bears_on: [sched.runqlat]
+
+- id: kconfig.transparent_hugepage
+  scope: machine
+  kconfig: CONFIG_TRANSPARENT_HUGEPAGE
+  mechanism: "Whether transparent huge pages are built in."
+  docs: admin-guide/mm/transhuge.rst
+  bears_on: [mem.thp]
+
+# --- the process --------------------------------------------------------------
+
+- id: process.oom_score_adj
+  scope: process
+  proc: oom_score_adj
+  mechanism: "What is added to the process's OOM score: -1000 exempts it, 1000 makes it the first chosen."
+  docs: filesystems/proc.rst
+  bears_on: [mem.oom]
+
+- id: process.oom_score
+  scope: process
+  proc: oom_score
+  computed: true
+  mechanism: "The score the OOM killer would choose by now: memory held, scaled to 1000, plus the adjustment."
+  docs: filesystems/proc.rst
+  bears_on: [mem.oom]
+
+- id: process.nice
+  scope: process
+  proc: stat
+  field: "19"
+  mechanism: "The process's nice value: its weight against other normal tasks."
+  docs: scheduler/sched-design-CFS.rst
+  bears_on: [sched.runqlat, cpu.oncpu_time]
+
+- id: process.cpus_allowed
+  scope: process
+  proc: status
+  field: Cpus_allowed_list
+  mechanism: "The cpus the process's main thread may run on."
+  docs: admin-guide/cgroup-v2.rst
+  bears_on: [sched.runqlat, sched.migrations]
+
+- id: process.cpus_allowed_count
+  scope: process
+  proc: status
+  field: Cpus_allowed_list
+  as: cpu_count
+  mechanism: "How many cpus the process's main thread may run on."
+  docs: admin-guide/cgroup-v2.rst
+  bears_on: [sched.runqlat]
+
+- id: process.mems_allowed
+  scope: process
+  proc: status
+  field: Mems_allowed_list
+  mechanism: "The memory nodes the process may allocate from."
+  docs: admin-guide/mm/numa_memory_policy.rst
+  bears_on: [mem.numa]
+
+- id: process.thp_enabled
+  scope: process
+  proc: status
+  field: THP_enabled
+  mechanism: "Whether the process may have transparent huge pages at all (prctl PR_SET_THP_DISABLE clears it)."
+  docs: admin-guide/mm/transhuge.rst
+  bears_on: [mem.thp, mem.compaction]
+
+- id: process.madv_hugepage_mappings
+  scope: process
+  proc: smaps
+  as: vmflag:hg
+  mechanism: "How many of the process's mappings were madvised MADV_HUGEPAGE."
+  docs: admin-guide/mm/transhuge.rst
+  bears_on: [mem.thp, mem.compaction]
+
+- id: process.ioprio
+  scope: process
+  syscall: ioprio
+  mechanism: "The I/O priority class and level the process's requests carry to a scheduler that reads them."
+  docs: block/ioprio.rst
+  bears_on: [io.latency]
+
+- id: process.limit.nofile
+  scope: process
+  proc: limits
+  field: Max open files
+  mechanism: "How many descriptors the process may hold open."
+  docs: filesystems/proc.rst
+  bears_on: [net.socket]
+
+- id: process.limit.memlock
+  scope: process
+  proc: limits
+  field: Max locked memory
+  mechanism: "How much memory the process may lock."
+  docs: filesystems/proc.rst
+  bears_on: [mem.rss]
+
+- id: process.limit.as
+  scope: process
+  proc: limits
+  field: Max address space
+  mechanism: "How large the process's address space may grow."
+  docs: filesystems/proc.rst
+  bears_on: [mem.rss]
+
+- id: thread.sched_policy
+  scope: thread
+  proc: stat
+  field: "41"
+  as: sched_policy
+  per_thread: true
+  mechanism: "The scheduling class each thread runs in."
+  docs: scheduler/sched-design-CFS.rst
+  bears_on: [sched.runqlat]
+
+- id: thread.cpus_allowed
+  scope: thread
+  proc: status
+  field: Cpus_allowed_list
+  per_thread: true
+  mechanism: "The cpus each thread may run on."
+  docs: admin-guide/cgroup-v2.rst
+  bears_on: [sched.runqlat, sched.migrations]
+
+# --- the process's cgroup -------------------------------------------------------
+
+- id: cgroup.memory.max
+  scope: cgroup
+  cgroup: memory.max
+  mechanism: "The cgroup's hard memory limit: past it, its own OOM killer runs."
+  docs: admin-guide/cgroup-v2.rst
+  bears_on: [mem.oom, mem.cgroup]
+
+- id: cgroup.memory.high
+  scope: cgroup
+  cgroup: memory.high
+  mechanism: "The cgroup's throttling limit: past it, its tasks are made to reclaim and slowed, and nothing is killed."
+  docs: admin-guide/cgroup-v2.rst
+  bears_on: [mem.oom, mem.pressure, mem.cgroup]
+
+- id: cgroup.memory.low
+  scope: cgroup
+  cgroup: memory.low
+  mechanism: "The memory reclaim leaves the cgroup unless nothing else can be taken."
+  docs: admin-guide/cgroup-v2.rst
+  bears_on: [mem.reclaim, mem.pressure]
+
+- id: cgroup.memory.swap.max
+  scope: cgroup
+  cgroup: memory.swap.max
+  mechanism: "How much swap the cgroup may use."
+  docs: admin-guide/cgroup-v2.rst
+  bears_on: [mem.swap, mem.oom]
+
+- id: cgroup.memory.oom.group
+  scope: cgroup
+  cgroup: memory.oom.group
+  mechanism: "Whether an OOM kill in the cgroup kills every task in it rather than one."
+  docs: admin-guide/cgroup-v2.rst
+  bears_on: [mem.oom]
+
+- id: cgroup.cpu.max
+  scope: cgroup
+  cgroup: cpu.max
+  mechanism: "The cgroup's cpu quota and period: past the quota, its tasks wait for the next period."
+  docs: admin-guide/cgroup-v2.rst
+  bears_on: [cpu.throttle, sched.runqlat]
+
+- id: cgroup.cpu.weight
+  scope: cgroup
+  cgroup: cpu.weight
+  mechanism: "The cgroup's share of cpu against its siblings when they compete."
+  docs: admin-guide/cgroup-v2.rst
+  bears_on: [sched.runqlat]
+
+- id: cgroup.cpuset.cpus.effective
+  scope: cgroup
+  cgroup: cpuset.cpus.effective
+  mechanism: "The cpus the cgroup's tasks may run on, after every ancestor's restriction."
+  docs: admin-guide/cgroup-v2.rst
+  bears_on: [sched.runqlat]
+
+- id: cgroup.io.max
+  scope: cgroup
+  cgroup: io.max
+  mechanism: "The cgroup's I/O limits, per device."
+  docs: admin-guide/cgroup-v2.rst
+  bears_on: [io.latency]
+
+- id: cgroup.pids.max
+  scope: cgroup
+  cgroup: pids.max
+  mechanism: "How many tasks the cgroup may hold: past it fork fails."
+  docs: admin-guide/cgroup-v2.rst
+  bears_on: [proc.exec]

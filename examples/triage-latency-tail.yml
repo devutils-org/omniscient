@@ -91,6 +91,25 @@ requests:
   keys:
   - task
   label: wakeup
+- source: conf.machine
+  target: system
+  mode: snapshot
+  emit:
+  - raw
+  label: settings of the machine
+- source: conf.process
+  target:
+    launch:
+    - target/omn-triage-fixture/workload
+    - tail
+    - target/omn-triage-fixture/counter
+    - '5'
+    - '100'
+    - '200'
+  mode: snapshot
+  emit:
+  - raw
+  label: settings of the workload
 decompose:
 - id: where-the-time-went
   whole: lifetime
