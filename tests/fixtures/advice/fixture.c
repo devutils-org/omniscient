@@ -20,9 +20,21 @@
  *                        a time; HINT random or normal. Half, because over
  *                        a whole file pages filled and pages looked up
  *                        agree whatever readahead did (io.readahead).
+ *   backlog MB           write MB over a loopback TCP connection to a reader
+ *                        that takes 64 KiB every 5 ms; every chunk carries
+ *                        the time it was handed to write(), and the reader
+ *                        prints the longest it waited to arrive. Run in a
+ *                        network namespace of its own: tcp_notsent_lowat is
+ *                        the namespace's.
  */
 #define _GNU_SOURCE
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <net/if.h>
+#include <netinet/tcp.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <time.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
@@ -78,6 +90,87 @@ static pid_t run(const char *path, char *const argv[], int adj)
 		_exit(5);
 	}
 	return pid;
+}
+
+static uint64_t now_ns(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+#define CHUNK (64 << 10)
+
+static long backlog_chunks;
+static int backlog_fd;
+
+/* The slow reader: 64 KiB every 5 ms, each chunk's stamp compared with now. */
+static void *backlog_read(void *arg)
+{
+	(void)arg;
+	static char chunk[CHUNK];
+	uint64_t worst = 0;
+	for (long i = 0; i < backlog_chunks; i++) {
+		size_t got = 0;
+		while (got < CHUNK) {
+			ssize_t n = read(backlog_fd, chunk + got, CHUNK - got);
+			if (n <= 0)
+				return NULL;
+			got += (size_t)n;
+		}
+		uint64_t sent;
+		memcpy(&sent, chunk, sizeof sent);
+		uint64_t waited = now_ns() - sent;
+		if (waited > worst)
+			worst = waited;
+		usleep(5000);
+	}
+	printf("fixture: %ld chunks, the longest from write() to read() %.1f ms\n", backlog_chunks,
+	       worst / 1e6);
+	return NULL;
+}
+
+static int backlog(long mb)
+{
+	/* A new network namespace's loopback is down; its root may bring it up. */
+	int control = socket(AF_INET, SOCK_DGRAM, 0);
+	struct ifreq lo = {.ifr_name = "lo"};
+	if (control >= 0 && !ioctl(control, SIOCGIFFLAGS, &lo) && !(lo.ifr_flags & IFF_UP)) {
+		lo.ifr_flags |= IFF_UP;
+		ioctl(control, SIOCSIFFLAGS, &lo);
+	}
+	if (control >= 0)
+		close(control);
+	int listener = socket(AF_INET, SOCK_STREAM, 0);
+	struct sockaddr_in addr = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+	socklen_t len = sizeof addr;
+	if (listener < 0 || bind(listener, (struct sockaddr *)&addr, len) || listen(listener, 1) ||
+	    getsockname(listener, (struct sockaddr *)&addr, &len))
+		return 8;
+	int writer = socket(AF_INET, SOCK_STREAM, 0);
+	if (writer < 0 || connect(writer, (struct sockaddr *)&addr, len))
+		return 9;
+	backlog_fd = accept(listener, NULL, NULL);
+	if (backlog_fd < 0)
+		return 10;
+	backlog_chunks = (mb << 20) / CHUNK;
+	pthread_t reader;
+	pthread_create(&reader, NULL, backlog_read, NULL);
+	static char chunk[CHUNK];
+	for (long i = 0; i < backlog_chunks; i++) {
+		uint64_t stamp = now_ns();
+		memcpy(chunk, &stamp, sizeof stamp);
+		size_t put = 0;
+		while (put < CHUNK) {
+			ssize_t n = write(writer, chunk + put, CHUNK - put);
+			if (n <= 0)
+				return 11;
+			put += (size_t)n;
+		}
+	}
+	pthread_join(reader, NULL);
+	close(writer);
+	return 0;
 }
 
 int main(int argc, char **argv)
@@ -182,6 +275,8 @@ int main(int argc, char **argv)
 		close(fd);
 		return 0;
 	}
+	if (argc >= 3 && !strcmp(argv[1], "backlog"))
+		return backlog(atol(argv[2]));
 	fprintf(stderr, "usage: see the comment at the top\n");
 	return 2;
 }

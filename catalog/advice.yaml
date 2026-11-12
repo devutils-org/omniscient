@@ -195,3 +195,33 @@
     - "The program's madvised mappings are read when it starts; memory it madvises later is not in the evidence."
   truth: advice_truth::defrag_on_madvise_ends_the_compaction_stall
 
+
+- id: tcp.unsent-backlog
+  summary: "A connection held megabytes the program had written and the kernel had not sent: whatever it writes next waits behind all of them."
+  objectives: [latency, tail]
+  evidence:
+    - {source: net.tcp.rtt, mode: "poll@100ms", attr: notsent_bytes, stat: max, above: 1048576}
+    - {setting: net.ipv4.tcp_notsent_lowat, above: 1048576}
+  setting: net.ipv4.tcp_notsent_lowat
+  mechanism: >-
+    A TCP socket is writable while its send buffer has room, and the buffer
+    grows to tcp_wmem's maximum (4 MiB by default) whether the peer reads or
+    not. When the peer is slower than the writer, the room fills with bytes
+    that are not yet sent: a message written now is queued behind all of
+    them, and the writer has no say in their order once they are in. With
+    tcp_notsent_lowat set, write() and poll() wait while the unsent bytes are
+    above it, so the queue the next message joins stays that short and the
+    writer keeps the rest -- to drop, merge or reorder.
+  docs: networking/ip-sysctl.rst
+  expect: {source: net.tcp.rtt, mode: "poll@100ms", attr: notsent_bytes, stat: max, goes: down}
+  scope: machine
+  change: >-
+    sysctl -w net.ipv4.tcp_notsent_lowat=131072 (until reboot; the network
+    namespace's, so a container's own), or for the program's sockets alone,
+    setsockopt(fd, IPPROTO_TCP, TCP_NOTSENT_LOWAT, ...) after it connects
+  caveats:
+    - "The bytes are not lost and the throughput is the peer's either way: the unsent bytes wait in the program instead of in the kernel. What gets shorter is the wait of what the program writes next, which only helps a program that has something more urgent to write, or that can drop what is stale."
+    - "A socket that sets TCP_NOTSENT_LOWAT itself is governed by its own value, not the sysctl's: a backlog on such a socket is one the sysctl does not move."
+    - "The sysctl belongs to the network namespace: a container reads and sets its own, and the host's says nothing of it."
+    - "Polled every 100 ms: a backlog that built and drained between two polls is not seen."
+  truth: advice_truth::a_low_unsent_mark_shortens_the_backlog

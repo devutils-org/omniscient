@@ -155,3 +155,28 @@ contiguous, every fault compacts.
 - **`vm.swappiness`, IRQ affinity, `tcp_notsent_lowat`**: each needs a
   machine-wide write and a workload whose prediction is one-sided, which no
   fixture here has yet.
+
+## `tcp.unsent-backlog` (in a network namespace)
+
+`backlog 48`: 48 MiB written in 64 KiB chunks over loopback to a reader that
+takes one chunk every 5 ms, each chunk stamped when it is handed to
+`write()`. `tcp_notsent_lowat` belongs to the network namespace, and the root
+of a user namespace may set its own, so the test runs both answers under
+`unshare -rn` on the development machine, changing nothing of the host's
+(`advice_truth::a_low_unsent_mark_shortens_the_backlog`):
+
+| `tcp_notsent_lowat` | Unsent bytes, most seen | Longest from `write()` to `read()` | Wall clock |
+|---|---|---|---|
+| 4294967295 (the default) | 2 490 880: the rule holds | 215 to 225 ms | 4.0 s |
+| 131072 | 196 502: as predicted | 30 to 32 ms | 4.0 s |
+
+The wall clock is the reader's either way: the bytes wait in the program
+instead of in the kernel, and the rule says so. What the mark bounds is the
+queue the next write joins: 128 KiB, and a chunk past it, which is why the
+most seen is 192 KiB and not 128. The chunk still waits about 30 ms, in the
+reader's receive buffer, which no sender setting reaches.
+
+`net.tcp.rtt` gained `launch` among its targets for this: a launched program
+is a pid by the time the collector attaches, and the netlink backend already
+narrowed to a pid's descriptors.
+

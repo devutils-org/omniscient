@@ -394,6 +394,65 @@ fn readahead_refused_by_a_hint_returns_without_it() {
     assert!(!fired(&after, "io.readahead-refused"), "{after:#}");
 }
 
+/// `tcp.unsent-backlog`: a writer ahead of a slow reader on loopback piles
+/// megabytes of unsent bytes in its socket; with `tcp_notsent_lowat` at
+/// 128 KiB it cannot. Both runs in one user and network namespace of the
+/// test's own, whose sysctl its root may set: the machine's is not touched.
+#[test]
+fn a_low_unsent_mark_shortens_the_backlog() {
+    let _alone = alone();
+    let fixture = match fixture() {
+        Ok(path) => path,
+        Err(reason) => return eprintln!("skipped: {reason}"),
+    };
+    let probe = Command::new("unshare").args(["-rn", "true"]).output();
+    if !probe.as_ref().is_ok_and(|output| output.status.success()) {
+        return eprintln!(
+            "skipped: no user and network namespace can be made here (unshare -rn): {:?}",
+            probe.map(|output| String::from_utf8_lossy(&output.stderr).into_owned())
+        );
+    }
+    let dir = scratch("unsent");
+    let (before, after) = (dir.join("before.json"), dir.join("after.json"));
+    // $0 is omn, $1 the fixture, $2 and $3 the answers.
+    let script = r#"set -e
+"$0" advise --objective latency --save "$2" -- "$1" backlog 48 >/dev/null
+echo 131072 > /proc/sys/net/ipv4/tcp_notsent_lowat
+"$0" advise --objective latency --against "$2" --save "$3" -- "$1" backlog 48"#;
+    let output = Command::new("unshare")
+        .args(["-rn", "sh", "-c", script, BINARY])
+        .arg(&fixture)
+        .arg(&before)
+        .arg(&after)
+        .output()
+        .expect("unshare runs");
+    let text = String::from_utf8_lossy(&output.stdout).into_owned()
+        + &String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "omn advise failed:\n{text}");
+    let read = |path: &Path| -> Value {
+        serde_json::from_str(&std::fs::read_to_string(path).expect("an answer saved"))
+            .expect("the saved answer is JSON")
+    };
+    let (before, after) = (read(&before), read(&after));
+    assert!(
+        fired(&before, "tcp.unsent-backlog"),
+        "the rule did not hold on a writer ahead of its reader: {before:#}"
+    );
+    assert_eq!(
+        changed(&after, "net.ipv4.tcp_notsent_lowat"),
+        Some(("4294967295".to_owned(), "131072".to_owned())),
+        "{after:#}"
+    );
+    let check = prediction(&after, "tcp.unsent-backlog");
+    assert_eq!(check["verdict"], "as_predicted", "{check:#}");
+    let (was, now) = (
+        check["before"]["number"].as_f64().unwrap(),
+        check["after"]["number"].as_f64().unwrap(),
+    );
+    assert!(now * 4.0 < was, "unsent bytes at most {was} -> {now}");
+    assert!(!fired(&after, "tcp.unsent-backlog"), "{after:#}");
+}
+
 /// The victims `mem.oom` names for a launched program are its own tree's: a
 /// child the kernel kills is named, and a kill elsewhere on the machine in
 /// the same window is not.

@@ -526,7 +526,7 @@ never unless asked. Each frame says which of them named it (`elf`,
 | `net.tcp.connect` | connection setup latency | `bpf:fentry` tcp_v4/v6_connect · `bpf:raw_tp` sock:inet_sock_set_state (no trampolines, no `failed`) · `bpf:tp` the same, classic (no cookie, no errno) | trace | pid, cgroup, system | low | low |
 | `net.tcp.lifetime` | duration + volume per connection, by its owner | `bpf:raw_tp` · `bpf:tp` sock:inet_sock_set_state | trace | pid, tid, launch, system | low | low |
 | `net.tcp.accept` | connections a server accepted, with the listener's queue | `bpf:fentry` inet_csk_accept | trace, count | pid, launch, system | low | low |
-| `net.tcp.rtt` | RTT, cwnd, congestion state | `netlink` sock_diag · `bpf:fentry` on tcp_sock | poll, trace | pid, system | med | low |
+| `net.tcp.rtt` | RTT, cwnd, congestion state | `netlink` sock_diag · `bpf:fentry` on tcp_sock | poll, trace | pid, launch, system | med | low |
 | `net.tcp.retransmit` | retransmissions | `bpf:tp` tcp:tcp_retransmit_skb · `fs:proc` snmp | trace, count | system, pid | low / free | low |
 | `net.drops` | dropped packets (+ reason) | `bpf:tp` skb:kfree_skb (reason on recent kernels) | trace, count | system | low | medium |
 | `net.bytes` / `.packets` | volume | `fs:proc` /proc/net/dev · `netlink` · `bpf:fentry` sock_sendmsg | poll, count | system, iface, pid, cgroup | free / low | low |

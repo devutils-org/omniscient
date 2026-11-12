@@ -138,7 +138,7 @@
     - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:tcp_rcv_established"], cost: med, equivalent: true}
   modes: [poll, trace]
   emits: [timeline, hist, raw, summary]
-  targets: {pid: native, system: native, cgroup: bpf_only}
+  targets: {pid: native, launch: native, system: native, cgroup: bpf_only}
   keys: [sock, task]
   filter_fields: [daddr, dport, saddr, sport]
   determinism: low
