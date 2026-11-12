@@ -887,28 +887,6 @@ fn mapped_identity_of(path: &Path, mountinfo: &str) -> Option<(u64, u64)> {
     Some((device, out.stx_ino))
 }
 
-/// [`reach_mapped`] for a target whose maps are read now.
-#[cfg(test)]
-pub(crate) fn target_path(pid: i32, path: &Path) -> PathBuf {
-    let who = if pid <= 0 {
-        "self".to_owned()
-    } else {
-        pid.to_string()
-    };
-    let maps = std::fs::read_to_string(format!("/proc/{who}/maps")).unwrap_or_default();
-    let mapped: Vec<MappedIdentity> = crate::bpf::usdt::parse_maps(&maps)
-        .into_iter()
-        .filter(|mapping| mapping.path == path)
-        .map(|mapping| MappedIdentity {
-            device: mapping.device,
-            inode: mapping.inode,
-            start: mapping.start,
-            end: mapping.end,
-        })
-        .collect();
-    reach_mapped(pid, path, &mapped).path().to_owned()
-}
-
 impl Symbolizer {
     /// A symbolizer for one process: its mappings, and the kernel's.
     ///
