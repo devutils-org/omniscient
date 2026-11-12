@@ -112,7 +112,9 @@ fn a_headless_live_run_writes_what_replay_draws() {
     assert!(replay.status.success(), "{}", text(&replay.stderr));
     let screen = text(&replay.stdout);
     assert!(screen.contains("omn top"), "{screen}");
-    assert!(screen.contains(" 1 system "), "{screen}");
+    // A replay opens on the resource families, whose tab line names them.
+    assert!(screen.contains("Resource families"), "{screen}");
+    assert!(screen.contains(" Target resources"), "{screen}");
     std::fs::remove_dir_all(&out).ok();
 }
 
@@ -134,9 +136,13 @@ fn a_gallery_prints_every_view() {
         // (`process`, a header line then one line per resource) is known by
         // its page, since the tab line at 100 columns is cut before it.
         let page = format!("gallery {}/{} ", index + 1, views.len());
+        // The overview's page is headed by whose resources they are, the
+        // target's or the machine's, rather than by its title.
         let named = screen.contains(&format!("┌ {} -- ", view.name()))
             || screen.contains(&format!(" {} -- ", view.name()))
-            || screen.contains(view.title());
+            || screen.contains(view.title())
+            || (view.name() == "overview"
+                && (screen.contains(" Target resources") || screen.contains(" Machine resources")));
         assert!(
             screen.contains(&page),
             "the gallery has no page for `{}`:\n{screen}",

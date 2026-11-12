@@ -623,10 +623,12 @@ fn process_draws_each_line_as_its_workload_loaded_it() {
     app.open("process")
         .unwrap_or_else(|error| panic!("{error}"));
     let drawn = text(&draw_app(&mut app, 160, 40));
+    // The view is framed since the resource families: a line starts at the
+    // frame's `│`.
     let line = |name: &str| -> Vec<&str> {
         drawn
             .lines()
-            .map(str::trim_start)
+            .map(|line| line.trim_start().trim_start_matches('│').trim_start())
             .find(|line| line.starts_with(&format!("{name} ")))
             .map(words)
             .unwrap_or_else(|| panic!("no {name} line:\n{drawn}"))
