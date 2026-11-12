@@ -582,8 +582,11 @@ mod tests {
     }
 
     fn read(metric: Metric, source: Source) -> Option<f64> {
-        let mut collector =
-            FootprintCollector::new(std::process::id() as i32, metric, source, Duration::ZERO);
+        read_of(std::process::id() as i32, metric, source)
+    }
+
+    fn read_of(pid: i32, metric: Metric, source: Source) -> Option<f64> {
+        let mut collector = FootprintCollector::new(pid, metric, source, Duration::ZERO);
         let events = collector.sample(0).ok()?;
         events[0].attr("bytes").unwrap().as_f64()
     }
@@ -684,24 +687,22 @@ mod tests {
     /// kilobytes. Ordering, not arithmetic.
     #[test]
     fn the_rollup_agrees_with_the_per_mapping_walk() {
-        // Reading each file once first, so that the pages the reads themselves
-        // need are already resident when the comparison starts.
-        for metric in [Metric::Rss, Metric::Pss, Metric::Uss] {
-            for source in [Source::SmapsRollup, Source::Smaps] {
-                let _ = read(metric, source);
-            }
-        }
+        // A process that does nothing, rather than this test binary, whose
+        // other threads allocate and free megabytes around the reads (it
+        // failed in full runs, in the flaky tally since the seventeenth
+        // wave). Reading another process's files faults none of its pages.
+        let mut quiet = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep");
+        let pid = quiet.id() as i32;
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let read = |metric, source| read_of(pid, metric, source);
 
-        // Other threads of this test binary keep allocating while this runs,
-        // and shared pages come and go in other processes, which moves PSS.
+        // Shared pages come and go in other processes, which moves PSS.
         const SLACK: f64 = 512.0 * 1024.0;
 
         for metric in [Metric::Rss, Metric::Pss, Metric::Uss] {
-            // The other threads of this test binary allocate and free while
-            // this runs, and a process that moves by megabytes between two
-            // reads cannot have its two readings compared at all. So the
-            // comparison is attempted until it lands in a quiet moment, and
-            // gives up rather than pretending a busy one proved something.
             const ATTEMPTS: usize = 10;
             let mut last = None;
             let agreed = (0..ATTEMPTS).any(|_| {
@@ -723,7 +724,10 @@ mod tests {
             });
 
             let Some((before, walked, after)) = last else {
-                return; // `smaps_rollup` is restricted here; nothing to check.
+                // `smaps_rollup` is restricted here; nothing to check.
+                let _ = quiet.kill();
+                let _ = quiet.wait();
+                return;
             };
             // One disagreement proves nothing while the other threads of this
             // binary allocate and free megabytes around the reads. Ten in a row
@@ -734,6 +738,8 @@ mod tests {
                  around it; last was {walked} against {before}..{after}"
             );
         }
+        let _ = quiet.kill();
+        let _ = quiet.wait();
     }
 
     /// Private memory is a subset of proportional memory, which is a subset of
