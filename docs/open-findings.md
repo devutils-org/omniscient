@@ -14671,3 +14671,22 @@ kcompactd's background compaction, and the pair failed on Arch). What did not: a
 still has no process settings. Reading them at its exit would need the
 zombie's `/proc/<pid>`, which keeps `status` but not `smaps` -- filed, not
 done.
+
+## For the flaky tally, after the thirty-second wave (2026-11-12)
+
+`cargo test --workspace --no-fail-fast` at `192bee0`: 3402 passed, 7 failed.
+Three passed alone, once each, on a quiet machine (the run's load average
+reached 153): `footprint::the_rollup_agrees_with_the_per_mapping_walk`
+(already in the tally), `family_conf::the_process_settings_are_what_the_process_was_given`,
+and `reference::pairs_perfsched` (`perf trace`'s clock_nanosleep mean, a
+whole-machine pair). Four fail the same way on `main` at `eef03ba`, before
+the wave, and are not its:
+
+- `view_live::a_gallery_prints_every_view`, `view_live::a_headless_live_run_writes_what_replay_draws`,
+  `view_truth::process_draws_each_line_as_its_workload_loaded_it`: the TUI's
+  `overview` and family pages (`4e6ac0b`) changed what the views draw, and
+  these tests still expect the screens before it -- the TUI stream's.
+- `scenario_sched::an_interrupts_wakeup_names_an_interrupt_the_kernel_numbers`:
+  the direct reader completed 933 281 reads in a second, which no disk
+  interrupt served, and the one `hardirq` wakeup seen carried no `irq=`.
+  Not investigated; filed.
