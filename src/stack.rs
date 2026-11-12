@@ -849,30 +849,48 @@ pub(crate) fn reach_mapped(pid: i32, path: &Path, mapped: &[MappedIdentity]) -> 
 /// writes for the mount the file is on, which `statx` names by id. Mount ids
 /// are unique across namespaces, so `mountinfo` is the one of whichever
 /// process sees the path. A kernel without `STATX_MNT_ID` (before 5.8)
-/// falls back on `stat`'s device, which is right everywhere but btrfs.
+/// falls back on `stat`'s device, which is right everywhere but btrfs, and
+/// so does one without `statx` at all (before 4.11).
+///
+/// The system call, not glibc's `statx`: the release links against glibc
+/// 2.17, and the wrapper is 2.28's.
 fn mapped_identity_of(path: &Path, mountinfo: &str) -> Option<(u64, u64)> {
     use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
     let name = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
-    // SAFETY: an all-zero `statx` is a valid value for the kernel to fill.
-    let mut out: libc::statx = unsafe { std::mem::zeroed() };
-    // SAFETY: a NUL-terminated path, and a struct the kernel writes into.
+    // `struct statx` as the kernel's uapi lays it out (256 bytes): the
+    // `libc` crate has no such type for musl.
+    const STATX_INO: u32 = 0x100;
+    const STATX_MNT_ID: u32 = 0x1000;
+    let mut out = [0u64; 32];
+    // SAFETY: a NUL-terminated path, and 256 bytes the kernel writes into.
     let status = unsafe {
-        libc::statx(
+        libc::syscall(
+            libc::SYS_statx,
             libc::AT_FDCWD,
             name.as_ptr(),
             0,
-            libc::STATX_INO | libc::STATX_MNT_ID,
-            &mut out,
+            STATX_INO | STATX_MNT_ID,
+            out.as_mut_ptr(),
         )
     };
     if status != 0 {
+        if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOSYS) {
+            let metadata = std::fs::metadata(path).ok()?;
+            return Some((metadata.dev(), metadata.ino()));
+        }
         return None;
     }
-    let stat_device = libc::makedev(out.stx_dev_major, out.stx_dev_minor);
-    if out.stx_mask & libc::STATX_MNT_ID == 0 {
-        return Some((stat_device, out.stx_ino));
+    let word = |at: usize| -> u32 {
+        let bytes = out[at / 8].to_ne_bytes();
+        u32::from_ne_bytes(bytes[at % 8..at % 8 + 4].try_into().expect("4 bytes"))
+    };
+    let (mask, ino, mnt_id) = (word(0), out[32 / 8], out[144 / 8]);
+    let stat_device = libc::makedev(word(136), word(140));
+    if mask & STATX_MNT_ID == 0 {
+        return Some((stat_device, ino));
     }
-    let mount = out.stx_mnt_id.to_string();
+    let mount = mnt_id.to_string();
     let device = std::fs::read_to_string(mountinfo)
         .ok()
         .and_then(|text| {
@@ -884,7 +902,7 @@ fn mapped_identity_of(path: &Path, mountinfo: &str) -> Option<(u64, u64)> {
             })
         })
         .unwrap_or(stat_device);
-    Some((device, out.stx_ino))
+    Some((device, ino))
 }
 
 impl Symbolizer {
