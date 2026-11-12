@@ -14698,3 +14698,27 @@ opening on it, the framed `process` view), and
 `family_conf::the_process_settings_are_what_the_process_was_given` was not
 load: it read a launched program in the middle of its chain of wrappers, a
 defect of `conf.process`'s, fixed (`docs/scenarios/conf.md`).
+
+## The thirty-third wave's last full run (2026-11-12)
+
+`cargo test --workspace --no-fail-fast` at `a751e6b`, a quiet machine: 3407
+passed, 2 failed, both passing alone:
+
+- `scenario_io::a_kprobe_pair_counts_the_calls_the_trampoline_pair_counts`:
+  284 runs the kernel skipped (a program already running on that cpu);
+  three runs of three alone.
+- `cases::every_case_names_its_known_cause_both_ways`: `cpython-perf-map`'s
+  dominant blocked stack was a `__read` in `libpython` (1 of 4, then 7 of 21
+  frames named) rather than the case's `wait_for_input`, in two full runs;
+  four runs of four alone, and not under 24 spinning cpus. Another wait won
+  under the suite's I/O, most likely the interpreter's own reads; and
+  `make-sqlite`'s cited cpu, 119 ms off where 108 are allowed, its
+  registered finding. Reading it showed `sched.offcpu` had no late pass over
+  a perf map, which `cpu.profile` has: added, not the cause.
+
+The run before it (`bc4729b`) had `advice_truth::swap_allowed_to_the_cgroup_ends_the_kill`
+SIGKILLed with no output in two full runs of four: `omn` shares that test's
+128 MB scope and weighs about 60 MB against the program's 67, and a 2 ms
+stall of the rounds -- `conf.process` then slept while a launched program
+settled -- tipped the OOM killer onto it. Fixed in `a751e6b` (the wait no
+longer sleeps); eight runs of eight.
