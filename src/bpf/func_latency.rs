@@ -321,8 +321,15 @@ pub struct FuncProgram {
     ring: Transport,
     drops: Counters,
     stamps: Hash,
-    _depths: Hash,
-    _attachments: Vec<Attachment>,
+    depths: Hash,
+    attachments: Vec<Attachment>,
+    /// The process the probes are kept to, in this namespace's numbering
+    /// and the kernel's.
+    pid: i32,
+    tgid: u32,
+    ret_at: i16,
+    /// How many functions have probes: the next one added is this index.
+    functions: u32,
     /// Why the probes went through the `uprobe` PMU, when they did.
     pub fallback: Option<String>,
 }
@@ -369,7 +376,8 @@ fn link_multi(
 impl FuncProgram {
     /// Places an entry and a return probe on each of `targets`, kept to the
     /// process `pid`; the returns first, so no entry is stamped that nothing
-    /// will close.
+    /// will close. `targets` may be empty, for a run that waits for the
+    /// library its functions are in ([`FuncProgram::add`]).
     pub fn load(targets: &[Target], pid: i32, requested_ring_bytes: usize) -> Result<Self, String> {
         let btf: &Btf = super::kernel_btf()?;
         let ret_at = btf.return_register()? as i16;
@@ -381,30 +389,50 @@ impl FuncProgram {
             .map_err(|error| map_failure("function depth map", error))?;
         let stamps = Hash::create(STAMP_KEY_BYTES, 8, MAX_OPEN, "omn_func_open")
             .map_err(|error| map_failure("function open-call map", error))?;
+        let mut program = Self {
+            ring,
+            drops,
+            stamps,
+            depths,
+            attachments: Vec::with_capacity(targets.len() * 2),
+            pid,
+            tgid,
+            ret_at,
+            functions: 0,
+            fallback: None,
+        };
+        program.add(targets)?;
+        Ok(program)
+    }
 
-        let mut attachments = Vec::with_capacity(targets.len() * 2);
-        let mut fallback: Option<String> = None;
+    /// Places probes on more functions, numbered after the ones already
+    /// probed, into the same ring and maps: a library the process mapped
+    /// after the first ones were placed. Either every one of `targets` is
+    /// probed or, on an error, none of them is.
+    pub fn add(&mut self, targets: &[Target]) -> Result<(), String> {
+        let first = self.functions;
+        let mut added = Vec::with_capacity(targets.len() * 2);
         for returning in [true, false] {
             for (index, target) in targets.iter().enumerate() {
                 let placed = Placed {
-                    tgid,
-                    function: index as u32,
+                    tgid: self.tgid,
+                    function: first + index as u32,
                 };
                 let instructions = if returning {
                     return_instructions(
                         placed,
-                        ret_at,
-                        depths.as_raw_fd(),
-                        stamps.as_raw_fd(),
-                        ring.output(),
-                        drops.as_raw_fd(),
+                        self.ret_at,
+                        self.depths.as_raw_fd(),
+                        self.stamps.as_raw_fd(),
+                        self.ring.output(),
+                        self.drops.as_raw_fd(),
                     )?
                 } else {
                     entry_instructions(
                         placed,
-                        depths.as_raw_fd(),
-                        stamps.as_raw_fd(),
-                        drops.as_raw_fd(),
+                        self.depths.as_raw_fd(),
+                        self.stamps.as_raw_fd(),
+                        self.drops.as_raw_fd(),
                     )?
                 };
                 let name = if returning {
@@ -413,12 +441,12 @@ impl FuncProgram {
                     "omn_func_entry"
                 };
                 let where_ = || format!("{}+{:#x}", target.object.display(), target.offset);
-                if fallback.is_none() {
+                if self.fallback.is_none() {
                     let program = load_for_multi(&instructions, name)
                         .map_err(|error| format!("{}: {error}", where_()))?;
-                    match link_multi(&program, target, returning, pid) {
+                    match link_multi(&program, target, returning, self.pid) {
                         Ok(link) => {
-                            attachments.push(Attachment::Link {
+                            added.push(Attachment::Link {
                                 _link: link,
                                 _program: program,
                             });
@@ -427,10 +455,11 @@ impl FuncProgram {
                         // Before 6.6 the kernel does not know the link, and
                         // says so on the first one.
                         Err(error)
-                            if attachments.is_empty()
+                            if self.attachments.is_empty()
+                                && added.is_empty()
                                 && error.raw_os_error() == Some(libc::EINVAL) =>
                         {
-                            fallback = Some(format!(
+                            self.fallback = Some(format!(
                                 "this kernel refused a uprobe-multi link ({error}), which Linux \
                                  6.6 introduced; the probes went through the `uprobe` PMU instead"
                             ));
@@ -456,20 +485,15 @@ impl FuncProgram {
                     returning,
                     &instructions,
                     name,
-                    Scope::Task(pid),
+                    Scope::Task(self.pid),
                 )
                 .map_err(|error| format!("{}: {error}", where_()))?;
-                attachments.push(Attachment::Perf(attachment));
+                added.push(Attachment::Perf(attachment));
             }
         }
-        Ok(Self {
-            ring,
-            drops,
-            stamps,
-            _depths: depths,
-            _attachments: attachments,
-            fallback,
-        })
+        self.attachments.extend(added);
+        self.functions += targets.len() as u32;
+        Ok(())
     }
 
     /// Hands every timed call to `handle`, counting records this reader does

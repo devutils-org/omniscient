@@ -28,7 +28,9 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration as StdDuration;
 
-use super::counters::{measured, measured_tick, multiplexing_notes, wall_window, Spec, Ticks};
+use super::counters::{
+    beyond_the_cpus, measured, measured_tick, multiplexing_notes, wall_window, Spec, Ticks,
+};
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Losses, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
@@ -138,6 +140,12 @@ impl CgroupCounters {
         } else {
             let whose = format!("the cgroup {}", self.cgroup.directory.display());
             self.notes.extend(multiplexing_notes(&readings, &whose));
+            self.notes.extend(beyond_the_cpus(
+                &readings,
+                ts_ns.saturating_sub(self.opened_ns),
+                self.cpus.len(),
+                &whose,
+            ));
             measured(self.spec, &readings, &mut self.losses)?
         };
         wall_window(self.spec, &mut attrs);

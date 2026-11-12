@@ -536,7 +536,28 @@ pub struct ProfileCollector {
     /// samples it dropped and the periods the kernel throttled it. Read from
     /// the sampler at each drain, because `stop` closes it.
     ring_losses: Vec<(KeyValue, RingLost)>,
+    /// A process's profile sampled by an event per cpu, filtered in the
+    /// kernel to its tasks, because a ring per thread did not fit the
+    /// locked-memory budget (`bpf::task_filter`): the filter, why, and when
+    /// its tasks were last read.
+    filtered: Option<Filtered>,
 }
+
+/// The per-cpu fallback's state: [`ProfileCollector::filtered`].
+struct Filtered {
+    filter: crate::bpf::task_filter::TaskFilter,
+    /// The processes (or the one thread) let through, by this namespace's
+    /// numbering.
+    allowed: BTreeSet<i32>,
+    /// Why the task-per-ring shape was given up.
+    why: String,
+    refreshed: Option<std::time::Instant>,
+}
+
+/// How often the fallback reads which processes the target has started, to
+/// let their samples through: a process started between two reads is
+/// sampled from the second, and the cpu it used before is said.
+const FILTER_REFRESH: StdDuration = StdDuration::from_millis(100);
 
 impl ProfileCollector {
     pub fn new(pid: i32, mode: Mode, callchain: Callchain, whole_process: bool) -> Self {
@@ -577,6 +598,7 @@ impl ProfileCollector {
             choice: None,
             debuginfod: None,
             ring_losses: Vec::new(),
+            filtered: None,
         }
     }
 
@@ -678,6 +700,7 @@ impl ProfileCollector {
         let idle = &mut self.idle;
         let mut index = seq;
         let cgroup_key = self.cgroup.as_ref().map(|cgroup| cgroup.key());
+        let per_task = self.filtered.is_some();
         let callchain = self.callchain;
         let debuginfod = &self.debuginfod;
         let comms = &mut self.comms;
@@ -766,7 +789,11 @@ impl ProfileCollector {
                     }
                     let mut keys = vec![KeyValue::task(sample.tid as i32)];
                     if let Some(cpu) = sample.cpu {
-                        keys.push(KeyValue::cpu(cpu));
+                        // A process sampled per cpu (`filtered`) is still a
+                        // process's profile: its series are its tasks.
+                        if !per_task {
+                            keys.push(KeyValue::cpu(cpu));
+                        }
                         attrs.push(Attr::uint("cpu", u64::from(cpu)));
                     }
                     keys.extend(cgroup_key.clone());
@@ -826,6 +853,112 @@ impl ProfileCollector {
             );
         }
         self.losses.undecoded += undecoded;
+    }
+}
+
+impl ProfileCollector {
+    /// Samples the target by an event per cpu, each filtered in the kernel
+    /// to the target's tasks: the shape a process whose threads do not each
+    /// fit a ring is profiled in. Needs what a machine-wide profile needs
+    /// (`perf_event_paranoid` 0 or `CAP_PERFMON`) and a BPF program.
+    fn start_filtered(
+        &mut self,
+        spec: &crate::perf::SampleSpec,
+        refusal: &str,
+    ) -> Result<(), String> {
+        use crate::bpf::task_filter::{By, TaskFilter};
+        let by = if self.whole_process {
+            By::Process
+        } else {
+            By::Thread
+        };
+        let filter = TaskFilter::load(by)?;
+        let cpus = crate::capabilities::online_cpus()
+            .map_err(|error| format!("cannot list the online cpus: {error}"))?;
+        let event = ThreadSampler::open_cpus(spec, &cpus, ROOT_RING_PAGES)?;
+        for fd in event.ring_fds() {
+            filter.attach(fd)?;
+        }
+        let mut filtered = Filtered {
+            filter,
+            allowed: BTreeSet::new(),
+            why: refusal.to_owned(),
+            refreshed: None,
+        };
+        let first = if self.whole_process {
+            crate::perf::tasks_under(self.pid)
+                .into_iter()
+                .map(|task| task.tgid)
+                .collect::<BTreeSet<_>>()
+        } else {
+            BTreeSet::from([self.pid])
+        };
+        for id in first {
+            let kernel = match by {
+                By::Process => crate::bpf::pidns::kernel_tgid(id as u32)?,
+                By::Thread => crate::bpf::pidns::kernel_tid(id as u32)?,
+            };
+            filtered
+                .filter
+                .allow(kernel)
+                .map_err(|error| format!("cannot fill the profile's task filter: {error}"))?;
+            filtered.allowed.insert(id);
+        }
+        event.enable().map_err(|error| error.to_string())?;
+        self.at_open = crate::perf::tasks_under(self.pid).len();
+        self.unwinding = event.callchain() != Callchain::Off;
+        self.event = Some(Sampler::Cpus(event));
+        self.filtered = Some(filtered);
+        Ok(())
+    }
+
+    /// Lets through the processes the target started since the last read,
+    /// and accounts for the cpu each had used before: in no sample.
+    fn refresh_filter(&mut self) {
+        let Some(filtered) = self.filtered.as_mut() else {
+            return;
+        };
+        if filtered.filter.by() != crate::bpf::task_filter::By::Process {
+            return;
+        }
+        let now = std::time::Instant::now();
+        if filtered
+            .refreshed
+            .is_some_and(|last| now.duration_since(last) < FILTER_REFRESH)
+        {
+            return;
+        }
+        filtered.refreshed = Some(now);
+        let tasks = crate::perf::tasks_under(self.pid);
+        let fresh: BTreeSet<i32> = tasks
+            .iter()
+            .map(|task| task.tgid)
+            .filter(|tgid| !filtered.allowed.contains(tgid))
+            .collect();
+        for tgid in fresh {
+            let Ok(kernel) = crate::bpf::pidns::kernel_tgid(tgid as u32) else {
+                continue;
+            };
+            if filtered.filter.allow(kernel).is_err() {
+                continue;
+            }
+            filtered.allowed.insert(tgid);
+            for task in tasks.iter().filter(|task| task.tgid == tgid) {
+                let found = crate::perf::Discovered::now(*task);
+                if let Some(comm) = &found.comm {
+                    self.comms.prime(found.task.tid, comm);
+                }
+                if let Some(ppid) = found.ppid {
+                    self.parents.insert(found.task.tgid as u32, Some(ppid));
+                }
+                self.found_late += 1;
+                self.unsampled_ns += found.cpu_before_ns;
+                if found.cpu_before_ns > 0 {
+                    *self.unsampled_by_task.entry(found.task.tid).or_default() +=
+                        found.cpu_before_ns;
+                }
+            }
+        }
     }
 }
 
@@ -896,27 +1029,39 @@ impl Collector for ProfileCollector {
             self.event = Some(Sampler::Cpus(event));
             return Ok(());
         }
-        let mut event = TaskSampler::open(
+        let opened = TaskSampler::open(
             &spec,
             self.pid,
             self.whole_process,
             ROOT_RING_PAGES,
             RING_PAGES,
-        )
-        .map_err(|error| {
-            if crate::perf::is_ring_too_large(&error) {
-                return crate::perf::task_ring_budget_refusal(
+        );
+        let mut event = match opened {
+            Ok(event) => event,
+            Err(error) if crate::perf::is_ring_too_large(&error) => {
+                let refusal = crate::perf::task_ring_budget_refusal(
                     &format!("a {} profile", self.sampled.name),
                     self.pid,
                     &error,
                 );
+                // A ring per cpu, whatever the thread count, filtered in the
+                // kernel to the target's tasks.
+                return match self.start_filtered(&spec, &refusal) {
+                    Ok(()) => Ok(()),
+                    Err(why) => Err(format!(
+                        "{refusal}. Sampling it by an event per cpu filtered to its tasks, \
+                         which needs one ring per cpu, was not possible either: {why}"
+                    )),
+                };
             }
-            format!(
-                "perf_event_open for a {} profile of pid {} was refused ({error}); \
-                 check /proc/sys/kernel/perf_event_paranoid",
-                self.sampled.name, self.pid
-            )
-        })?;
+            Err(error) => {
+                return Err(format!(
+                    "perf_event_open for a {} profile of pid {} was refused ({error}); \
+                     check /proc/sys/kernel/perf_event_paranoid",
+                    self.sampled.name, self.pid
+                ))
+            }
+        };
         event.enable().map_err(|error| error.to_string())?;
         // The tasks the target starts are found on a thread of their own from
         // here, not on the drain's ticks, which a large program's symbols
@@ -931,6 +1076,7 @@ impl Collector for ProfileCollector {
     }
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
+        self.refresh_filter();
         // The mappings are re-read inside the drain, for the processes this
         // tick's samples came from (`drain_into`).
         if let Some(Sampler::Tasks(event)) = self.event.as_mut() {
@@ -1172,7 +1318,30 @@ impl Collector for ProfileCollector {
                 self.idle,
             ));
         }
-        if self.at_open > 1 {
+        if let Some(filtered) = &self.filtered {
+            notes.push(format!(
+                "process {} was running {} task(s) when the profile began, and a ring each did \
+                 not fit: {}. It was sampled instead by an event per cpu, one ring per cpu \
+                 whatever its thread count, each filtered in the kernel to {}; a sample is a \
+                 period of that cpu's clock the target held when it was taken, the same \
+                 estimate of its time from one clock per cpu rather than one per thread. \
+                 Samples came from {} task{}",
+                self.pid,
+                self.at_open,
+                filtered.why,
+                if filtered.filter.by() == crate::bpf::task_filter::By::Process {
+                    "its processes (the ones it starts are let through within 100 ms)"
+                } else {
+                    "this one thread"
+                },
+                self.sampled_tasks.len(),
+                if self.sampled_tasks.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            ));
+        } else if self.at_open > 1 {
             notes.push(format!(
                 "process {} was already running {} threads when the profile began, and each has \
                  an event of its own; samples came from {} task{}",

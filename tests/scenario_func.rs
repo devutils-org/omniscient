@@ -557,3 +557,148 @@ fn a_process_whose_executable_only_its_own_mount_namespace_has_is_timed_and_name
         "every file the target maps was read through its root: {text}"
     );
 }
+
+const PLUGIN: &str = r#"
+#include <time.h>
+__attribute__((noinline)) int omn_plugin_step(int ms)
+{
+	struct timespec pause = { .tv_sec = 0, .tv_nsec = ms * 1000000L };
+	nanosleep(&pause, NULL);
+	return ms;
+}
+"#;
+
+const LOADER: &str = r#"
+#include <dlfcn.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+int main(int argc, char **argv)
+{
+	/* Long enough that the run is past its start before the plugin exists. */
+	struct timespec pause = { .tv_sec = 0, .tv_nsec = 300 * 1000000L };
+	nanosleep(&pause, NULL);
+	void *plugin = dlopen(argv[1], RTLD_NOW);
+	if (!plugin) {
+		fprintf(stderr, "dlopen: %s\n", dlerror());
+		return 2;
+	}
+	int (*step)(int) = (int (*)(int))dlsym(plugin, "omn_plugin_step");
+	int n = atoi(argv[2]);
+	for (int i = 0; i < n; i++)
+		step(10);
+	return 0;
+}
+"#;
+
+/// The plugin and the program that opens it, built once.
+fn loader() -> Result<(PathBuf, PathBuf), String> {
+    static BUILT: OnceLock<Result<(PathBuf, PathBuf), String>> = OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("omn-func-dlopen");
+            std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+            let build = |source: &str, name: &str, flags: &[&str]| -> Result<PathBuf, String> {
+                let file = dir.join(format!("{name}.c"));
+                std::fs::write(&file, source).map_err(|error| error.to_string())?;
+                let out = dir.join(name);
+                let partial = dir.join(format!("{name}.{}", std::process::id()));
+                let built = Command::new("cc")
+                    .args(["-O1", "-g"])
+                    .args(flags)
+                    .arg("-o")
+                    .arg(&partial)
+                    .arg(&file)
+                    .output()
+                    .map_err(|error| format!("no C compiler: {error}"))?;
+                if !built.status.success() {
+                    return Err(String::from_utf8_lossy(&built.stderr).into_owned());
+                }
+                std::fs::rename(&partial, &out).map_err(|error| error.to_string())?;
+                Ok(out)
+            };
+            Ok((
+                build(PLUGIN, "libomnplugin.so", &["-shared", "-fPIC"])?,
+                build(LOADER, "loader", &["-ldl"])?,
+            ))
+        })
+        .clone()
+}
+
+/// A launched program that opens the library its function is in only once
+/// it runs -- the ZML plugin, `dlopen`ed by the runtime -- has that function
+/// timed from the read of its maps that finds the library, and the run says
+/// how late that was; a name nothing it ever maps has fails the run, saying
+/// so, rather than timing nothing in silence.
+#[test]
+fn a_function_in_a_library_opened_later_is_timed_from_when_it_is_mapped() {
+    let (plugin, program) = match loader() {
+        Ok(built) => built,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    let run = |function: &str| {
+        omn(&[
+            "runtime.func",
+            "-m",
+            "trace",
+            "-e",
+            "summary",
+            "--filter",
+            &format!("function == '{function}'"),
+            "--format",
+            "json",
+            "--",
+            program.to_str().unwrap(),
+            plugin.to_str().unwrap(),
+            "40",
+        ])
+    };
+    let output = run("omn_plugin_step");
+    let text = spoken(&output);
+    if !output.status.success()
+        && (text.contains("CAP_BPF")
+            || text.contains("CAP_PERFMON")
+            || text.contains("has no viable backend on this machine"))
+    {
+        eprintln!("skipped: this machine places no uprobe here: {text}");
+        return;
+    }
+    assert!(output.status.success(), "{text}");
+    let document: Value = serde_json::from_slice(&output.stdout).expect("json");
+    let said = notes(&document);
+    assert!(
+        said.contains("libomnplugin.so was mapped after the probes were first placed"),
+        "{said}"
+    );
+    let summary = document["results"][0]["outputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|output| output["emit"] == "summary")
+        .unwrap()["series"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let count: u64 = summary
+        .iter()
+        .map(|row| row["count"].as_u64().unwrap_or(0))
+        .sum();
+    // Forty calls of 10 ms; the read that finds the library is at most
+    // 100 ms after it is mapped, so at least thirty are timed.
+    assert!(
+        (30..=40).contains(&count),
+        "{count} calls timed: {summary:?}\n{said}"
+    );
+
+    let missing = run("omn_plugin_absent");
+    let text = spoken(&missing);
+    assert!(!missing.status.success(), "{text}");
+    assert!(
+        text.contains("found no function named `omn_plugin_absent`")
+            && text.contains("while it ran"),
+        "{text}"
+    );
+}

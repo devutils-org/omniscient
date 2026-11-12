@@ -51,7 +51,13 @@ name that matches nothing lists the functions whose names contain it.
 A launch or `--pid` (`runtime.custom` and `runtime.func` also `--tid`). For a
 launched program the probes are found before it execs, in the executable and the libraries its
 dynamic section names; a library loaded later with `dlopen` is not among
-them. A `--pid` in a container works as it does on the host: its files are
+them, except for `runtime.func`, which reads the program's maps again every
+100 ms and probes the functions it names in a library mapped since: no need
+for `--pid` to time a plugin's functions, and the run says how late the
+probes were (at most about 100 ms after the `dlopen`, calls in between not
+timed). A launched program none of whose libraries has the function at the
+start runs anyway; the run fails, naming what was read, only if nothing it
+loads has it either. A `--pid` in a container works as it does on the host: its files are
 read through `/proc/<pid>/root`, each one checked to be the inode the process
 maps, so `runtime.func`, `runtime.custom` and `cpu.profile`'s names and
 unwinding all see the container's files and never a namesake on the host.

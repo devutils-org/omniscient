@@ -1978,6 +1978,12 @@ pub struct ThreadSampler {
 }
 
 impl ThreadSampler {
+    /// The descriptor of each ring's event, for a program to hang off
+    /// (`bpf::task_filter`) before the events are enabled.
+    pub fn ring_fds(&self) -> Vec<RawFd> {
+        self.rings.iter().map(|ring| ring.fd).collect()
+    }
+
     /// Opens `spec`, inherited, on every thread `pid` has now, on every online
     /// cpu, with a ring of `ring_pages` per cpu.
     pub fn open_process(spec: &SampleSpec, pid: i32, ring_pages: usize) -> io::Result<Self> {
@@ -2233,7 +2239,7 @@ pub struct Discovered {
 }
 
 impl Discovered {
-    fn now(task: Found) -> Self {
+    pub fn now(task: Found) -> Self {
         Self {
             task,
             cpu_before_ns: cpu_before(task),
@@ -2312,7 +2318,7 @@ impl Drop for Discovery {
 /// Read from `/proc/<pid>/task/<tid>/children`, which lists the children each
 /// thread forked. A kernel built without it answers with the root's threads
 /// alone, which is what the caller then follows.
-fn tasks_under(root: i32) -> Vec<Found> {
+pub fn tasks_under(root: i32) -> Vec<Found> {
     let mut found = Vec::new();
     let mut processes = vec![root];
     let mut seen = std::collections::BTreeSet::new();

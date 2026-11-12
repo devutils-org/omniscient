@@ -84,6 +84,7 @@ mod sched_numa;
 mod sched_runqlen;
 mod switch_count;
 mod syscall;
+pub mod task_filter;
 mod transport;
 // Stream U's: reading `.note.stapsdt` and putting a uprobe on what it names.
 pub mod usdt;

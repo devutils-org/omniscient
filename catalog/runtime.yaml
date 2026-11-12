@@ -190,8 +190,12 @@
        nested deeper than 64 are counted and said, not timed."
     - "The objects searched are the target's: the libraries it maps, or for a
        launched program the ones the dynamic linker will map. A library it
-       loads later with dlopen is not searched, and code no file holds (a
-       JIT's) has no function to name. A process in another mount namespace
+       loads later with dlopen is found by reading its maps again every 100 ms
+       and probed then: calls before that are not timed, and the run says how
+       long they could have been. A launched program none of whose libraries
+       has the function yet runs anyway, and the run fails if nothing it loads
+       has it either. Code no file holds (a JIT's) has no function to name. A
+       process in another mount namespace
        (a container, at `--pid`) has its files read through
        `/proc/<pid>/root`, and a file is read only where it is the inode the
        process maps."

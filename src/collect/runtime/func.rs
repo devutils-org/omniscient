@@ -8,7 +8,13 @@
 //! name a C++ reader writes, which names every overload. `object == 'libfoo.so'`
 //! keeps the search to one file. The objects searched are the target's: the
 //! executable and the libraries it maps, or, for a launched program, the ones
-//! the dynamic linker will map.
+//! the dynamic linker will map. A library the target maps later -- a plugin
+//! opened with `dlopen` -- is found by reading its maps again every
+//! [`RESCAN_INTERVAL`], and its functions are probed then: the calls between
+//! its mapping and its probes are not timed, and the run says how long that
+//! was at most. A launched program none of whose objects has the functions
+//! at the start runs anyway, and fails the run if nothing it maps later has
+//! them either.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -344,62 +350,82 @@ struct Timed {
     placed: Placed,
 }
 
-/// The functions the filter names, in the objects it keeps.
-fn select(filter: Option<&FilterExpr>, objects: &Objects) -> Result<Vec<Timed>, String> {
-    let read: Vec<&Path> = objects
-        .scanned
-        .iter()
-        .map(|scanned| scanned.path.as_path())
-        .collect();
-    let named = filter.map(wanted).unwrap_or_default();
-    if named.is_empty() {
-        return Err(cannot_mean_anything(
-            "`runtime.func` times the functions you name, and this request names none. Name them \
-             through the filter, by `function` -- --filter \"function == 'compute'\", or \
-             \"function =~ 'CopyThunk'\" for every function whose name contains it",
-        ));
+/// What a filter asks the symbol tables for, read once and asked of every
+/// object: at the start, and of each library the target maps later.
+struct Search {
+    named: Vec<Wanted>,
+    /// The object names the search is kept to; empty is every object.
+    only: Vec<String>,
+    spelled: Vec<Spelled>,
+}
+
+impl Search {
+    fn of(filter: Option<&FilterExpr>) -> Result<Self, String> {
+        let named = filter.map(wanted).unwrap_or_default();
+        if named.is_empty() {
+            return Err(cannot_mean_anything(
+                "`runtime.func` times the functions you name, and this request names none. Name \
+                 them through the filter, by `function` -- --filter \"function == 'compute'\", or \
+                 \"function =~ 'CopyThunk'\" for every function whose name contains it",
+            ));
+        }
+        Ok(Self {
+            only: filter.map(objects_wanted).unwrap_or_default(),
+            spelled: named.iter().map(|wanted| wanted.spelled(false)).collect(),
+            named,
+        })
     }
-    let only: Vec<String> = filter.map(objects_wanted).unwrap_or_default();
-    let spelled: Vec<Spelled> = named.iter().map(|wanted| wanted.spelled(false)).collect();
-    let mut chosen: Vec<Timed> = Vec::new();
-    for path in &read {
-        let object = path.file_name().map_or_else(
-            || path.display().to_string(),
+
+    /// The functions it names in the file opened at `path`, which the target
+    /// maps as `mapped`: the name an `object ==` compares, and every event
+    /// carries.
+    fn in_object(&self, path: &Path, mapped: &Path) -> Vec<Timed> {
+        let object = mapped.file_name().map_or_else(
+            || mapped.display().to_string(),
             |name| name.to_string_lossy().into_owned(),
         );
-        if !only.is_empty() && !only.contains(&object) {
-            continue;
+        if !self.only.is_empty() && !self.only.contains(&object) {
+            return Vec::new();
         }
-        for function in crate::stack::functions_in_where(
+        crate::stack::functions_in_where(
             path,
-            &|symbol| spelled.iter().any(|spelled| spelled.could(symbol)),
-            &|function| named.iter().any(|wanted| wanted.takes(function)),
-        ) {
-            chosen.push(Timed {
-                object: object.clone(),
-                placed: Placed {
-                    object: path.to_path_buf(),
-                    offset: function.offset,
-                },
-                function,
-            });
-        }
+            &|symbol| self.spelled.iter().any(|spelled| spelled.could(symbol)),
+            &|function| self.named.iter().any(|wanted| wanted.takes(function)),
+        )
+        .into_iter()
+        .map(|function| Timed {
+            object: object.clone(),
+            placed: Placed {
+                object: path.to_path_buf(),
+                offset: function.offset,
+            },
+            function,
+        })
+        .collect()
     }
-    if chosen.is_empty() {
-        let terms: Vec<String> = named
+
+    /// Why nothing was found in `objects`: the terms, what the files hold
+    /// that resembles them, and what was read.
+    fn not_found(&self, objects: &Objects) -> String {
+        let terms: Vec<String> = self
+            .named
             .iter()
             .map(|wanted| format!("`{}`", wanted.term))
             .collect();
         // What the files do hold that resembles it, for a name misspelt or
         // half remembered.
         let mut near: BTreeSet<String> = BTreeSet::new();
-        let folded: Vec<Spelled> = named.iter().map(|wanted| wanted.spelled(true)).collect();
-        for path in &read {
+        let folded: Vec<Spelled> = self
+            .named
+            .iter()
+            .map(|wanted| wanted.spelled(true))
+            .collect();
+        for scanned in &objects.scanned {
             for function in crate::stack::functions_in_where(
-                path,
+                &scanned.path,
                 &|symbol| folded.iter().any(|spelled| spelled.could(symbol)),
                 &|function| {
-                    named.iter().any(|wanted| {
+                    self.named.iter().any(|wanted| {
                         let lower = wanted.term.to_lowercase();
                         function.name.to_lowercase().contains(&lower)
                     })
@@ -411,15 +437,15 @@ fn select(filter: Option<&FilterExpr>, objects: &Objects) -> Result<Vec<Timed>, 
                 }
             }
         }
-        return Err(format!(
+        format!(
             "`runtime.func` found no function named {} in the {} object(s) the target maps{}{}. \
              What was read:\n{}",
             terms.join(" or "),
-            read.len(),
-            if only.is_empty() {
+            objects.scanned.len(),
+            if self.only.is_empty() {
                 String::new()
             } else {
-                format!(" (kept to {})", only.join(", "))
+                format!(" (kept to {})", self.only.join(", "))
             },
             if near.is_empty() {
                 String::new()
@@ -430,17 +456,26 @@ fn select(filter: Option<&FilterExpr>, objects: &Objects) -> Result<Vec<Timed>, 
                 )
             },
             symbol_inventory(objects)
-        ));
+        )
     }
-    if chosen.len() > MAX_FUNCTIONS {
-        return Err(cannot_mean_anything(format!(
-            "`runtime.func` selects {} functions, and more than {MAX_FUNCTIONS} is a breakpoint \
-             on most of the program: every call pays two traps into the kernel. Name them more \
-             narrowly, or keep the search to one file with `object == '...'`",
-            chosen.len()
-        )));
-    }
-    Ok(chosen)
+}
+
+/// More functions than [`MAX_FUNCTIONS`], refused with what to do instead.
+fn too_many(count: usize) -> String {
+    cannot_mean_anything(format!(
+        "`runtime.func` selects {count} functions, and more than {MAX_FUNCTIONS} is a breakpoint \
+         on most of the program: every call pays two traps into the kernel. Name them more \
+         narrowly, or keep the search to one file with `object == '...'`"
+    ))
+}
+
+/// Every function the search names, in every object read.
+fn chosen(search: &Search, objects: &Objects) -> Vec<Timed> {
+    objects
+        .scanned
+        .iter()
+        .flat_map(|scanned| search.in_object(&scanned.path, &scanned.mapped))
+        .collect()
 }
 
 // ------------------------------------------------------------ the prepare
@@ -494,8 +529,37 @@ impl Prepared for Prepare {
             Target::Launch(argv) => objects::of_launch(argv)?,
             _ => objects::of_process(process)?,
         };
-        let timed = select(self.filter.as_ref(), &objects)?;
+        let search = Search::of(self.filter.as_ref())?;
+        let timed = chosen(&search, &objects);
+        // A launched program may name its functions in a library it has not
+        // loaded yet -- a plugin it opens with `dlopen` -- so finding none
+        // before it runs is a question for the end of the run, not a refusal.
+        let pending = if timed.is_empty() {
+            let refusal = search.not_found(&objects);
+            if !launched {
+                return Err(refusal);
+            }
+            Some(refusal)
+        } else {
+            None
+        };
+        if timed.len() > MAX_FUNCTIONS {
+            return Err(too_many(timed.len()));
+        }
         let symbol_time = searching.elapsed();
+        let mut searched_paths = BTreeSet::new();
+        let mut searched_files = BTreeSet::new();
+        for scanned in &objects.scanned {
+            let mapped = if launched {
+                std::fs::canonicalize(&scanned.mapped).unwrap_or_else(|_| scanned.mapped.clone())
+            } else {
+                scanned.mapped.clone()
+            };
+            searched_paths.insert(mapped);
+            if let Some(file) = file_identity(&scanned.path) {
+                searched_files.insert(file);
+            }
+        }
         Ok(Box::new(FuncCollector {
             filter: self.filter,
             pid: process,
@@ -504,6 +568,14 @@ impl Prepared for Prepare {
             timed,
             objects,
             symbol_time,
+            search,
+            searched_paths,
+            searched_files,
+            pending,
+            late: Vec::new(),
+            late_trouble: Vec::new(),
+            started: None,
+            last_rescan: None,
             program: None,
             fallback: None,
             losses: Losses::default(),
@@ -517,6 +589,33 @@ impl Prepared for Prepare {
     }
 }
 
+/// How often the target's maps are read for a library it mapped since:
+/// the most a call of a function in a `dlopen`ed library can go untimed,
+/// beyond the time it takes to search the library and place the probes.
+const RESCAN_INTERVAL: StdDuration = StdDuration::from_millis(100);
+
+/// A file as `stat` names it, so the same file reached by two paths -- the
+/// launch's resolution and the path the dynamic linker mapped -- is probed
+/// once and its calls are not timed twice.
+fn file_identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path)
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()))
+}
+
+/// A library the target mapped after the probes were first placed, and how
+/// late its functions were probed.
+struct Late {
+    object: String,
+    functions: Vec<String>,
+    /// When its probes were placed, from the start of the collection.
+    probed_after: StdDuration,
+    /// The most time between its mapping and its probes: since the read of
+    /// the maps before the one that found it.
+    at_most: StdDuration,
+}
+
 // ----------------------------------------------------------- the collector
 
 pub struct FuncCollector {
@@ -527,6 +626,19 @@ pub struct FuncCollector {
     timed: Vec<Timed>,
     objects: Objects,
     symbol_time: StdDuration,
+    search: Search,
+    /// Every path the target maps that has been searched, by the target's
+    /// name for it, and every file searched, by `stat`.
+    searched_paths: BTreeSet<std::path::PathBuf>,
+    searched_files: BTreeSet<(u64, u64)>,
+    /// Why nothing was found before a launched program ran: its failure, if
+    /// nothing it maps while it runs has the functions either.
+    pending: Option<String>,
+    late: Vec<Late>,
+    /// Libraries mapped later whose functions could not be probed, and why.
+    late_trouble: Vec<String>,
+    started: Option<std::time::Instant>,
+    last_rescan: Option<std::time::Instant>,
     program: Option<FuncProgram>,
     fallback: Option<String>,
     losses: Losses,
@@ -542,6 +654,98 @@ pub struct FuncCollector {
 }
 
 impl FuncCollector {
+    /// Reads the target's maps for objects it mapped since the last read,
+    /// and probes the functions the filter names in them: a library a
+    /// program opens with `dlopen` is not mapped when the run starts.
+    fn rescan(&mut self) {
+        let now = std::time::Instant::now();
+        if self
+            .last_rescan
+            .is_some_and(|last| now.duration_since(last) < RESCAN_INTERVAL)
+        {
+            return;
+        }
+        let previous = self.last_rescan.replace(now);
+        if self.program.is_none() {
+            return;
+        }
+        // A launched program is a fork of this tool until its `execve`, and
+        // what it maps then is this tool's own.
+        if self.launched
+            && file_identity(Path::new(&format!("/proc/{}/exe", self.pid)))
+                == file_identity(Path::new("/proc/self/exe"))
+        {
+            return;
+        }
+        let Ok(maps) = std::fs::read_to_string(format!("/proc/{}/maps", self.pid)) else {
+            return;
+        };
+        let mappings = crate::bpf::usdt::parse_maps(&maps);
+        let fresh: Vec<std::path::PathBuf> = mappings
+            .iter()
+            .map(|mapping| mapping.path.clone())
+            .filter(|path| !path.to_string_lossy().ends_with(" (deleted)"))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter(|path| !self.searched_paths.contains(path))
+            .collect();
+        for mapped in fresh {
+            self.searched_paths.insert(mapped.clone());
+            let identities: Vec<crate::stack::MappedIdentity> = mappings
+                .iter()
+                .filter(|mapping| mapping.path == mapped)
+                .map(|mapping| crate::stack::MappedIdentity {
+                    device: mapping.device,
+                    inode: mapping.inode,
+                    start: mapping.start,
+                    end: mapping.end,
+                })
+                .collect();
+            let reached = crate::stack::reach_mapped(self.pid, &mapped, &identities);
+            let path = reached.path().to_owned();
+            let Some(file) = file_identity(&path) else {
+                continue;
+            };
+            if !self.searched_files.insert(file) {
+                continue;
+            }
+            let found = self.search.in_object(&path, &mapped);
+            if found.is_empty() {
+                continue;
+            }
+            let object = found[0].object.clone();
+            if self.timed.len() + found.len() > MAX_FUNCTIONS {
+                self.late_trouble.push(format!(
+                    "{object}, mapped while the program ran, has {} more function(s) the filter \
+                     names, which would make more than {MAX_FUNCTIONS}: not probed",
+                    found.len()
+                ));
+                continue;
+            }
+            let placed: Vec<Placed> = found.iter().map(|timed| timed.placed.clone()).collect();
+            let Some(program) = self.program.as_mut() else {
+                return;
+            };
+            match program.add(&placed) {
+                Ok(()) => {
+                    let started = self.started.unwrap_or(now);
+                    self.late.push(Late {
+                        object,
+                        functions: found.iter().map(|timed| bare(&timed.function)).collect(),
+                        probed_after: std::time::Instant::now().duration_since(started),
+                        at_most: std::time::Instant::now()
+                            .duration_since(previous.unwrap_or(started).min(now)),
+                    });
+                    self.timed.extend(found);
+                }
+                Err(error) => self.late_trouble.push(format!(
+                    "{object}, mapped while the program ran, has functions the filter names, \
+                     and their probes could not be placed: {error}"
+                )),
+            }
+        }
+    }
+
     fn drain(&mut self, seq: u64) -> Vec<Event> {
         let Some(program) = self.program.as_mut() else {
             return Vec::new();
@@ -645,11 +849,34 @@ impl Collector for FuncCollector {
         let program = FuncProgram::load(&placed, self.pid, RING_BYTES)?;
         self.fallback = program.fallback.clone();
         self.program = Some(program);
+        self.started = Some(std::time::Instant::now());
         Ok(())
     }
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
+        self.rescan();
+        if let Some(program) = &self.program {
+            if program.fallback.is_some() && self.fallback.is_none() {
+                self.fallback = program.fallback.clone();
+            }
+        }
         Ok(self.drain(seq))
+    }
+
+    fn failure(&self) -> Option<String> {
+        if !self.timed.is_empty() {
+            return None;
+        }
+        self.pending.as_ref().map(|refusal| {
+            format!(
+                "{refusal}\nNor did any of the {} object(s) it mapped while it ran, read every {} \
+                 ms for a library it loaded with dlopen",
+                self.searched_paths
+                    .len()
+                    .saturating_sub(self.objects.scanned.len()),
+                RESCAN_INTERVAL.as_millis()
+            )
+        })
     }
 
     fn stop(&mut self) -> Vec<Event> {
@@ -704,12 +931,27 @@ impl Collector for FuncCollector {
                 .map(|(object, names)| format!("{} in {object}", names.join(", ")))
                 .collect::<Vec<_>>()
                 .join("; "),
-            if self.launched {
-                "; a library the program loads later with dlopen is not searched"
-            } else {
-                ""
+            match self
+                .late
+                .iter()
+                .map(|late| late.functions.len())
+                .sum::<usize>()
+            {
+                0 => String::new(),
+                late => format!(" ({late} of them probed late, in a library mapped later)"),
             }
         ));
+        for late in &self.late {
+            notes.push(format!(
+                "{} was mapped after the probes were first placed (a dlopen): {} probed {} into \
+                 the run, at most {} after it was mapped, and calls in between were not timed",
+                late.object,
+                late.functions.join(", "),
+                crate::triage::span(late.probed_after.as_nanos() as f64),
+                crate::triage::span(late.at_most.as_nanos() as f64),
+            ));
+        }
+        notes.extend(self.late_trouble.iter().cloned());
         notes.push(format!(
             "searched: {}",
             self.objects

@@ -41,6 +41,21 @@ Everything per-task takes a launch, `--pid`, `--tid`, `--cgroup`, `--cpu` or
 `--system`. `cpu.util` and `cpu.pressure` describe a machine, a core or a
 cgroup, never a process. `cpu.throttle` is a cgroup's alone.
 
+`cpu.profile` follows a process with a ring per thread. A process already
+running more threads than those rings fit in the user's locked-memory
+budget (`perf_event_mlock_kb` per cpu, then `RLIMIT_MEMLOCK`: about 150
+threads on a 24-cpu machine with the defaults) is sampled instead by an event
+per cpu, filtered in the kernel by a BPF program to its tasks, one ring per
+cpu whatever the thread count; the run says so. That needs `CAP_PERFMON` and
+`CAP_BPF`, which `make` grants; without them the refusal names the budget and
+the settings that raise it. A `--pid` in a container is symbolized and unwound
+from the container's own files (`/proc/<pid>/root`).
+
+A multiplexed time counter (`cpu.oncpu_time` in `count` mode, through
+`pmu:sw`, over a cgroup or a container) is scaled from the share of the window
+it ran; a scaled value above the window times the cpus is said not to be
+physical, and `<counter>_raw`, what was counted, is the bound below.
+
 ## Backends and cost
 
 - The hardware counters (`pmu`) are `low` and need a PMU. **A virtual machine

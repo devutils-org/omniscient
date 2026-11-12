@@ -4990,3 +4990,97 @@ fn the_program_and_the_stat_file_agree_on_a_spin_to_the_tick() {
         "the file summed {file} ns of a {file_reap} ns reap: more than a tick at each edge"
     );
 }
+
+/// A process already running more threads than a ring each fits in the
+/// locked-memory budget -- the ZML model server's late window, about 150
+/// threads -- is profiled at `--pid` without a system setting: by an event
+/// per cpu filtered in the kernel to its tasks, and the run says so.
+#[test]
+fn a_process_with_more_threads_than_the_ring_budget_is_profiled_per_cpu() {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("omn-many-threads");
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("many.c");
+    std::fs::write(
+        &source,
+        "#include <pthread.h>\n#include <stdlib.h>\n#include <unistd.h>\nstatic volatile unsigned long sink;\nstatic void *work(void *a) { (void)a; for (;;) { for (int i = 0; i < 200000; i++) sink++; usleep(20000); } return 0; }\nint main(int c, char **v) { int n = atoi(v[1]); pthread_t t; for (int i = 0; i < n; i++) pthread_create(&t, 0, work, 0); for (;;) pause(); }\n",
+    )
+    .unwrap();
+    let binary = dir.join(format!("many.{}", std::process::id()));
+    let built = Command::new("cc")
+        .args(["-O1", "-pthread", "-o"])
+        .arg(&binary)
+        .arg(&source)
+        .output();
+    if !built.is_ok_and(|built| built.status.success()) {
+        eprintln!("skipped: no C compiler for the many-thread workload");
+        return;
+    }
+    // More threads than perf_event_mlock_kb per cpu and RLIMIT_MEMLOCK hold
+    // at a ring of 33 pages each.
+    let read = |path: &str| {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| text.trim().parse::<u64>().ok())
+    };
+    let cpus = std::thread::available_parallelism().map_or(1, |n| n.get()) as u64;
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: a struct the kernel fills.
+    unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut limit) };
+    if limit.rlim_cur == libc::RLIM_INFINITY {
+        eprintln!("skipped: RLIMIT_MEMLOCK is unlimited, so every ring fits");
+        return;
+    }
+    let budget =
+        read("/proc/sys/kernel/perf_event_mlock_kb").unwrap_or(516) * 1024 * cpus + limit.rlim_cur;
+    let threads = (budget / (33 * 4096) + 64).min(3000);
+    let mut child = Command::new(&binary)
+        .arg(threads.to_string())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while std::fs::read_dir(format!("/proc/{pid}/task")).map_or(0, |tasks| tasks.count())
+        < threads as usize
+        && Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let output = Command::new(BINARY)
+        .args([
+            "cpu.profile",
+            "-e",
+            "stack",
+            "-d",
+            "1s",
+            "--pid",
+            &pid.to_string(),
+        ])
+        .output()
+        .unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_file(&binary);
+    let text = String::from_utf8_lossy(&output.stdout).into_owned()
+        + &String::from_utf8_lossy(&output.stderr);
+    if !output.status.success()
+        && (text.contains("CAP_PERFMON")
+            || text.contains("CAP_BPF")
+            || text.contains("perf_event_paranoid"))
+    {
+        eprintln!("skipped: no per-cpu event or BPF program here: {text}");
+        return;
+    }
+    assert!(output.status.success(), "{text}");
+    if !text.contains("a ring each did not fit") {
+        eprintln!("skipped: {threads} rings fit this machine's budget after all");
+        return;
+    }
+    assert!(text.contains("event per cpu"), "{text}");
+    assert!(
+        !text.contains(" 0 events over"),
+        "the target's threads were sampled: {text}"
+    );
+}

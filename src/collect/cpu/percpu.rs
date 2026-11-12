@@ -76,6 +76,12 @@ impl PerCpuCounters {
         } else {
             self.notes
                 .extend(multiplexing_notes(&readings, &format!("cpu {cpu}")));
+            self.notes.extend(super::counters::beyond_the_cpus(
+                &readings,
+                ts_ns.saturating_sub(self.opened_ns),
+                1,
+                &format!("cpu {cpu}"),
+            ));
             measured(self.spec, &readings, &mut self.losses)?
         };
         // `cpu` is a filter field the catalog declares, and a key is not a

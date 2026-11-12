@@ -632,6 +632,46 @@ pub(super) fn multiplexing_notes(readings: &[Reading], whose: &str) -> Vec<Strin
         .collect()
 }
 
+/// A scaled time no set of cpus could have run, in words that reach the
+/// user, with the raw count beside it.
+///
+/// A multiplexed counter's value is what it counted times the window over
+/// the time it ran, and a counter that ran for a sliver of the window is
+/// scaled by a large factor from a small sample: the Kyber campaign read up
+/// to 10^4 cpus' worth of `cpu.oncpu_time` from a container on a 24-cpu
+/// machine, under "on for 50 % of the window". Cpu time over `cpus` cpus
+/// cannot exceed `window_ns * cpus`, so a scaled value above it is said not
+/// to be physical. The value is left as it is -- the reader decides -- and
+/// `<counter>_raw`, what was counted, is the bound below.
+pub(super) fn beyond_the_cpus(
+    readings: &[Reading],
+    window_ns: u64,
+    cpus: usize,
+    whose: &str,
+) -> Vec<String> {
+    let bound = window_ns.saturating_mul(cpus as u64);
+    readings
+        .iter()
+        .filter(|reading| reading.name.ends_with("_ns") && reading.was_multiplexed())
+        .filter(|reading| window_ns > 0 && reading.value > bound)
+        .map(|reading| {
+            format!(
+                "`{}` on {whose} is {:.3} s of cpu, scaled from {:.3} s counted while it ran \
+                 {:.0} % of the window, and {cpus} cpu(s) over the {:.3} s window can run at \
+                 most {:.3} s: the scaled value is not physical. `{}_raw` is what was counted, \
+                 a bound below",
+                reading.name,
+                reading.value as f64 / 1e9,
+                reading.raw as f64 / 1e9,
+                reading.duty() * 100.0,
+                window_ns as f64 / 1e9,
+                bound as f64 / 1e9,
+                reading.name
+            )
+        })
+        .collect()
+}
+
 /// Reads one source's counters over one window.
 pub struct CounterCollector {
     pid: i32,
@@ -828,6 +868,15 @@ impl Collector for CounterCollector {
 
         self.notes
             .extend(multiplexing_notes(&readings, &format!("task {}", self.pid)));
+        let cpus = crate::capabilities::online_cpus().map_or(0, |cpus| cpus.len());
+        if cpus > 0 {
+            self.notes.extend(beyond_the_cpus(
+                &readings,
+                monotonic_ns().saturating_sub(self.opened_ns),
+                cpus,
+                &format!("task {}", self.pid),
+            ));
+        }
 
         if self.poll.is_some() {
             // The closing read is the last tick: what ran since the one before.
@@ -1875,6 +1924,55 @@ mod tests {
             event.attr("enabled_ns").unwrap().as_f64().unwrap(),
             4_000_000.0
         );
+    }
+
+    /// A scaled cpu time above what the cpus could run in the window is said
+    /// not to be physical, with the raw count named; one within the bound,
+    /// or one that was never scaled, is not flagged; and a counter of
+    /// something other than time is never held to a time's bound.
+    #[test]
+    fn a_scaled_cpu_time_beyond_the_cpus_is_said_not_to_be_physical() {
+        let scaled = |raw: u64, enabled: u64, running: u64| Reading {
+            name: "task_clock_ns",
+            raw,
+            value: (u128::from(raw) * u128::from(enabled) / u128::from(running)) as u64,
+            enabled_ns: enabled,
+            running_ns: running,
+        };
+        // 2 s counted while on for 1 % of the window: 200 s, on 24 cpus over
+        // a 1 s window that hold 24 s.
+        let notes = beyond_the_cpus(
+            &[scaled(2_000_000_000, 100_000_000_000, 1_000_000_000)],
+            1_000_000_000,
+            24,
+            "the cgroup c",
+        );
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("not physical"), "{}", notes[0]);
+        assert!(notes[0].contains("task_clock_ns_raw"), "{}", notes[0]);
+        assert!(notes[0].contains("24.000 s"), "{}", notes[0]);
+        // Half the window, scaled to 2 s on 24 cpus: possible.
+        assert!(beyond_the_cpus(
+            &[scaled(1_000_000_000, 2_000_000_000, 1_000_000_000)],
+            1_000_000_000,
+            24,
+            "c"
+        )
+        .is_empty());
+        // Not multiplexed: never flagged, whatever it says.
+        let counted = Reading {
+            name: "task_clock_ns",
+            raw: 50_000_000_000,
+            value: 50_000_000_000,
+            enabled_ns: 1,
+            running_ns: 1,
+        };
+        assert!(beyond_the_cpus(&[counted], 1_000_000_000, 24, "c").is_empty());
+        let cycles = Reading {
+            name: "cycles",
+            ..scaled(2_000_000_000, 100_000_000_000, 1_000_000_000)
+        };
+        assert!(beyond_the_cpus(&[cycles], 1_000_000_000, 24, "c").is_empty());
     }
 
     #[test]
