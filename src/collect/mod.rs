@@ -286,6 +286,14 @@ pub trait Collector {
         Ok(())
     }
 
+    /// Whether a snapshot is worth taking yet. A snapshot is read once, so a
+    /// collector whose target is still settling -- a launched program still
+    /// exec'ing through its wrappers -- says not yet, and is asked again a
+    /// millisecond later, without holding up the others.
+    fn ready(&mut self) -> bool {
+        true
+    }
+
     /// Produces the events observable right now.
     ///
     /// An error is a failed read, not the end of the run: a process that

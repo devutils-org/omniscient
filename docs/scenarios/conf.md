@@ -50,7 +50,13 @@ the thirty-first wave".
   7 chrt -b 0 prlimit ... choom -n 345 -- sleep` read `oom_score_adj` 0 in
   one run of three, on a quiet machine: the snapshot was taken after `nice`
   and before `choom`. The first read now waits until the executable is the
-  same 10 ms apart (250 ms at most): eight runs of eight read 345.
+  same 2 ms apart (250 ms at most): eight runs of eight read 345. **Not by
+  sleeping**: the first version slept in the read, and a 2 ms stall of the
+  run's rounds at its start made `advice_truth::swap_allowed_to_the_cgroup_ends_the_kill`
+  fail one run in two -- `omn` shares that test's 128 MB scope and weighs
+  about 60 MB against the program's 67 at the limit, and the stall tipped the
+  OOM killer onto `omn`. A collector says `ready()` no, and is asked again a
+  millisecond later while the others are read.
 
 ## What it does not cover
 

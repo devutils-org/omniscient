@@ -551,6 +551,10 @@ impl Ledger {
         round_started_ns: u64,
         spending: &mut Spending<'_>,
     ) -> Option<String> {
+        if pace.snapshot && !collector.ready() {
+            self.due_ns[index] = monotonic_ns() + 1_000_000;
+            return None;
+        }
         let entered_ns = if self.attributing { monotonic_ns() } else { 0 };
         match collector.sample(self.sequences[index]) {
             Ok(mut sampled) => {

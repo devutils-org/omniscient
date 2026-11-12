@@ -56,11 +56,13 @@ impl Prepared for Prepare {
                 kind: "conf.machine",
                 pid: None,
                 done: false,
+                settling: Settling::default(),
             }),
             Which::Process => Box::new(Once {
                 kind: "conf.process",
                 pid: Some(pid.ok_or("`conf.process` needs a process")?),
                 done: false,
+                settling: Settling::default(),
             }),
             Which::Changed(mode) => Box::new(Changed {
                 pid,
@@ -73,37 +75,49 @@ impl Prepared for Prepare {
                 first_ns: 0,
                 changed_at: BTreeMap::new(),
                 reads: 0,
+                settling: Settling::default(),
             }),
         })
     }
 }
 
 /// How long a process's executable must stay the same before it is read,
-/// and the longest the first read waits for that.
-const SETTLED: std::time::Duration = std::time::Duration::from_millis(10);
-const SETTLE_AT_MOST: std::time::Duration = std::time::Duration::from_millis(250);
+/// and the longest a read waits for that.
+const SETTLED_NS: u64 = 2_000_000;
+const SETTLE_AT_MOST_NS: u64 = 250_000_000;
 
-/// Waits until `pid` has stopped exec'ing: its executable the same at two
-/// looks [`SETTLED`] apart, for at most [`SETTLE_AT_MOST`]. A launched
-/// program is often a chain -- `taskset -c 0 nice -n 7 choom -n 345 -- prog`
-/// -- each link setting what the next inherits, and a read in the middle of
-/// it reads a wrapper's settings as the program's: the affinity before
-/// `taskset` applied it. Returns whether it settled; a process gone meanwhile
-/// is the read's to report.
-fn settle(pid: i32) -> bool {
-    let exe = || std::fs::read_link(format!("/proc/{pid}/exe")).ok();
-    let started = std::time::Instant::now();
-    let mut seen = exe();
-    loop {
-        std::thread::sleep(SETTLED);
-        let now = exe();
-        if now.is_none() || now == seen {
-            return now.is_some();
+/// Whether `pid` has stopped exec'ing, looked at without waiting: its
+/// executable the same as at the last look, [`SETTLED_NS`] or more ago. A
+/// launched program is often a chain -- `taskset -c 0 nice -n 7 choom -n
+/// 345 -- prog` -- each link setting what the next inherits, and a read in
+/// the middle of it reads a wrapper's settings as the program's: the
+/// affinity before `taskset` applied it. After [`SETTLE_AT_MOST_NS`], or
+/// with the process gone, it is read as it is.
+///
+/// Not a sleep: a collector that holds up the round holds up every other's
+/// reads, and a stall of 2 ms at a run's start was enough to make `omn`
+/// the OOM killer's choice in a cgroup it shared with the program.
+#[derive(Debug, Default)]
+struct Settling {
+    first_ns: Option<u64>,
+    last: Option<(u64, Option<std::path::PathBuf>)>,
+}
+
+impl Settling {
+    fn settled(&mut self, pid: i32) -> bool {
+        let now = crate::clock::monotonic_ns();
+        let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok();
+        let first = *self.first_ns.get_or_insert(now);
+        if exe.is_none() || now.saturating_sub(first) >= SETTLE_AT_MOST_NS {
+            return true;
         }
-        if started.elapsed() >= SETTLE_AT_MOST {
-            return false;
+        match &self.last {
+            Some((at, seen)) if *seen == exe => now.saturating_sub(*at) >= SETTLED_NS,
+            _ => {
+                self.last = Some((now, exe));
+                false
+            }
         }
-        seen = now;
     }
 }
 
@@ -210,6 +224,7 @@ struct Once {
     kind: &'static str,
     pid: Option<i32>,
     done: bool,
+    settling: Settling,
 }
 
 impl Collector for Once {
@@ -217,14 +232,18 @@ impl Collector for Once {
         "value"
     }
 
+    fn ready(&mut self) -> bool {
+        match self.pid {
+            Some(pid) => self.settling.settled(pid),
+            None => true,
+        }
+    }
+
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
         if self.done {
             return Ok(Vec::new());
         }
         self.done = true;
-        if let Some(pid) = self.pid {
-            settle(pid);
-        }
         let (readings, unread) = read_all(self.pid, self.pid.is_none())?;
         let ts_ns = monotonic_ns();
         let mut events: Vec<Event> = readings
@@ -269,13 +288,17 @@ struct Changed {
     /// When each setting was first seen to differ from its first reading.
     changed_at: BTreeMap<(String, Option<String>), u64>,
     reads: u64,
+    settling: Settling,
 }
 
 impl Changed {
     fn take(&mut self) -> Result<(), SampleError> {
-        // The baseline is the program's, not a wrapper's on the way to it.
+        // The baseline is the program's, not a wrapper's on the way to it: a
+        // poll before the chain has settled is skipped.
         if let (Some(pid), true) = (self.pid, self.first.is_empty()) {
-            settle(pid);
+            if !self.settling.settled(pid) {
+                return Ok(());
+            }
         }
         let (readings, _) = read_all(self.pid, true)?;
         let ts_ns = monotonic_ns();
