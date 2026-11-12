@@ -560,10 +560,9 @@ struct Kconfig {
 
 impl Kconfig {
     fn read() -> Self {
-        // `/proc/config.gz` is gzip, and this binary carries no inflater:
-        // `zcat` is not a measurement tool, and is the one shell-out the
-        // anti-goals do not cover, but the boot file is read first because
-        // it needs neither.
+        // The boot file first: it is plain text. `/proc/config.gz` is one
+        // gzip member, inflated here rather than through `zcat`, which is
+        // not on every machine and is no business of a measurement tool.
         let release = std::fs::read_to_string("/proc/sys/kernel/osrelease")
             .map(|text| text.trim().to_owned())
             .unwrap_or_default();
@@ -574,24 +573,54 @@ impl Kconfig {
                 from: boot,
             };
         }
-        if Path::new("/proc/config.gz").exists() {
-            if let Ok(output) = std::process::Command::new("zcat")
-                .arg("/proc/config.gz")
-                .output()
-            {
-                if output.status.success() {
-                    return Self {
-                        text: String::from_utf8(output.stdout).ok(),
-                        from: "/proc/config.gz".to_owned(),
-                    };
-                }
-            }
+        if let Some(text) = std::fs::read("/proc/config.gz")
+            .ok()
+            .and_then(|bytes| gunzip(&bytes))
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+        {
+            return Self {
+                text: Some(text),
+                from: "/proc/config.gz".to_owned(),
+            };
         }
         Self {
             text: None,
             from: format!("/proc/config.gz, {boot}"),
         }
     }
+}
+
+/// The contents of a gzip member (RFC 1952): the header skipped by its
+/// flags, the deflate stream inflated, and the trailer's length checked. `None`
+/// for anything that is not one well-formed member.
+fn gunzip(bytes: &[u8]) -> Option<Vec<u8>> {
+    const FHCRC: u8 = 0x02;
+    const FEXTRA: u8 = 0x04;
+    const FNAME: u8 = 0x08;
+    const FCOMMENT: u8 = 0x10;
+    if bytes.len() < 18 || bytes[0..3] != [0x1f, 0x8b, 8] {
+        return None;
+    }
+    let flags = bytes[3];
+    let mut at = 10;
+    if flags & FEXTRA != 0 {
+        let extra = usize::from(u16::from_le_bytes([*bytes.get(at)?, *bytes.get(at + 1)?]));
+        at += 2 + extra;
+    }
+    for flag in [FNAME, FCOMMENT] {
+        if flags & flag != 0 {
+            at += bytes.get(at..)?.iter().position(|&byte| byte == 0)? + 1;
+        }
+    }
+    if flags & FHCRC != 0 {
+        at += 2;
+    }
+    let body = bytes.get(at..bytes.len().checked_sub(8)?)?;
+    let inflated = miniz_oxide::inflate::decompress_to_vec(body).ok()?;
+    let trailer = &bytes[bytes.len() - 4..];
+    let size = u32::from_le_bytes([trailer[0], trailer[1], trailer[2], trailer[3]]);
+    // ISIZE is the length modulo 2^32.
+    (size == inflated.len() as u32).then_some(inflated)
 }
 
 /// Every machine setting of the table.
@@ -850,6 +879,45 @@ fn limit_number(value: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One member as Python's `gzip` writes it, with a file name in the
+    /// header: the name is skipped, the text comes back whole, and a member cut
+    /// short or with a wrong length is refused rather than read in part.
+    #[test]
+    fn a_gzip_member_is_inflated_and_a_damaged_one_refused() {
+        const MEMBER: &[u8] = &[
+            0x1f, 0x8b, 0x08, 0x08, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0x63, 0x6f, 0x6e, 0x66,
+            0x69, 0x67, 0x00, 0x73, 0xf6, 0xf7, 0x73, 0xf3, 0x74, 0x8f, 0x77, 0x0a, 0x70, 0xb3,
+            0xad, 0xe4, 0x52, 0x56, 0x70, 0x86, 0x70, 0xbd, 0x1d, 0x83, 0x1d, 0xfd, 0x14, 0x32,
+            0x8b, 0x15, 0xf2, 0xf2, 0x4b, 0x14, 0x8a, 0x53, 0x4b, 0xb8, 0x9c, 0xa9, 0xaa, 0x0c,
+            0x00, 0xba, 0x91, 0x76, 0x1a, 0x75, 0x00, 0x00, 0x00,
+        ];
+        let text = String::from_utf8(gunzip(MEMBER).expect("a member")).expect("text");
+        assert_eq!(text, "CONFIG_BPF=y\n# CONFIG_KASAN is not set\n".repeat(3));
+        assert_eq!(gunzip(&MEMBER[..MEMBER.len() - 10]), None);
+        let mut wrong = MEMBER.to_vec();
+        *wrong.last_mut().unwrap() = 1;
+        assert_eq!(gunzip(&wrong), None);
+        assert_eq!(gunzip(b"CONFIG_BPF=y\n"), None);
+    }
+
+    /// Where the running kernel serves `/proc/config.gz`, the inflater reads
+    /// what `zcat` reads -- `zcat` here only as an independent second reader.
+    #[test]
+    fn proc_config_gz_reads_as_zcat_reads_it() {
+        let Ok(bytes) = std::fs::read("/proc/config.gz") else {
+            eprintln!("skipped: this kernel serves no /proc/config.gz");
+            return;
+        };
+        let Ok(zcat) = std::process::Command::new("zcat")
+            .arg("/proc/config.gz")
+            .output()
+        else {
+            eprintln!("skipped: no zcat to compare with");
+            return;
+        };
+        assert_eq!(gunzip(&bytes).expect("the kernel's member"), zcat.stdout);
+    }
 
     #[test]
     fn the_table_loads_and_every_source_it_names_is_in_the_catalog() {

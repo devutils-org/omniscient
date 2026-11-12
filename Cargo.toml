@@ -27,6 +27,7 @@ rustc-demangle = "0.1"
 cpp_demangle = "0.5"
 framehop = { version = "0.16", default-features = false, features = ["std"] }
 omn-view = { path = "view" }
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 
 [profile.release]
 lto = "thin"

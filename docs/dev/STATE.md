@@ -341,8 +341,8 @@ What it leaves, in the order it is worth doing:
 3. ~~The victims of one workload~~: done after the wave -- `mem.oom`'s trace
    backend follows the target's descendants, and the rule reads the
    workload's victims.
-4. **The kernel build configuration without `zcat`**: an inflater for
-   `/proc/config.gz`, or leave it.
+4. ~~The kernel build configuration without `zcat`~~: done (2026-11-12),
+   `/proc/config.gz` inflated in process (`docs/DECISIONS.md`).
 5. ~~The portability matrix~~: swept after the wave (2026-11-11, `e1acbf4`):
    28 of 28 targets, 8 containers, the judges green, and every cell three
    sources up (`docs/distroproof.md`).

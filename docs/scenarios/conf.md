@@ -38,9 +38,11 @@ the thirty-first wave".
   (the victim rule's mechanism names it) and marked `computed`, never
   reported as a change.
 - **The kernel's build configuration is `/proc/config.gz` on Arch**, which is
-  gzip; there is no `/boot/config-<release>`. This build carries no
-  inflater, so `zcat` reads it, once per process. The boot file is tried
-  first.
+  gzip; there is no `/boot/config-<release>`. It is inflated in process
+  (`miniz_oxide`, since 2026-11-12; `zcat` before), once per process, and
+  held to what `zcat` reads where the kernel serves one
+  (`settings::tests::proc_config_gz_reads_as_zcat_reads_it`). The boot file
+  is tried first.
 - **A launched program is read after it starts**: the snapshot under
   `taskset -c 0` read `0` on five runs of five, and the one under `sh -c
   'echo 700 > oom_score_adj; exec sleep'` read 700.
