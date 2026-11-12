@@ -2121,9 +2121,21 @@ impl Module {
             }
         }
         if functions.is_empty() {
+            // Why debuginfod did not name it either, when it was asked: a
+            // stripped file whose server has no debug info for its build is
+            // named by nothing, and the reader should know which half failed.
+            let asked = match &origin {
+                unwind::NameOrigin::None(reason) => reason
+                    .split_once("debuginfod: ")
+                    .map(|(_, why)| format!("; debuginfod: {why}")),
+                _ => None,
+            };
             return (
                 None,
-                unwind::NameOrigin::None("it carries no function symbols".to_owned()),
+                unwind::NameOrigin::None(format!(
+                    "it carries no function symbols{}",
+                    asked.unwrap_or_default()
+                )),
             );
         }
         functions.sort_by(|left, right| {

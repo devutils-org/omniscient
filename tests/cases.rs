@@ -1616,6 +1616,24 @@ struct Naming {
     beyond_local: bool,
 }
 
+/// Why names this answer asked debuginfod for could not be had, when the
+/// server said it has none for the build: the case asks the right thing of a
+/// server that cannot answer it, which is the machine's state, not the tool's.
+fn server_had_nothing(answer: &Answer) -> Option<String> {
+    let said = answer
+        .how
+        .names
+        .iter()
+        .chain(&answer.how.unseen)
+        .find(|text| text.contains("debuginfod: no server had build id"))?;
+    let at = said.find("no server had build id")?;
+    let reason: String = said[at..].chars().take(200).collect();
+    Some(format!(
+        "debuginfod has no debug info for this build, so its frames have no name to be had: \
+         {reason}"
+    ))
+}
+
 fn check_answer(
     report: &mut Report,
     at: &str,
@@ -1669,6 +1687,12 @@ fn check_answer(
         });
     }
 
+    // The machine's debuginfod having nothing for the build is a reason
+    // names could not be had, as an unset DEBUGINFOD_URLS is.
+    let unavailable = naming
+        .unavailable
+        .clone()
+        .or_else(|| server_had_nothing(answer));
     if let Some(through) = &expect.through {
         let named = answer.frames.iter().filter(|f| is_named(f)).count();
         let outcome = if answer
@@ -1678,7 +1702,7 @@ fn check_answer(
         {
             Outcome::Pass
         } else if let (Some(why), true, true) = (
-            &naming.unavailable,
+            &unavailable,
             naming.beyond_local,
             named < answer.frames.len(),
         ) {
@@ -1739,6 +1763,9 @@ fn check_answer(
             let outcome = match (&naming.unavailable, &answer.leaf) {
                 (Some(why), _) => Outcome::Unchecked(why.clone()),
                 (None, Some(leaf)) if is_named(leaf) => Outcome::Pass,
+                (None, _) if unavailable.is_some() => {
+                    Outcome::Unchecked(unavailable.clone().unwrap_or_default())
+                }
                 (None, leaf) => Outcome::Fail(format!(
                     "the hottest function is {leaf:?} where the agent's session, asking \
                      debuginfod, names it; `omn latency` {} `--symbols`",

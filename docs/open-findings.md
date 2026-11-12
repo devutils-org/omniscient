@@ -14645,7 +14645,13 @@ the frames. The same test passed in the full run at `19488a3` the same day.
 The `gcc-shell` and `make-sqlite` checks that failed beside it in the full
 run passed when the test ran alone: load. A case that needs debuginfod should
 say "skipped: the server has no debug info for this build" rather than fail
--- filed, not done.
+-- **done 2026-11-12**: the naming checks are `unchecked` with the server's
+answer when the run says no server had the build id. Reading why showed a
+defect of the tool's own: a file with no function symbols at all was said to
+"carry no function symbols" and the debuginfod answer beside it was dropped,
+so the person was never told the server had nothing; the origin now carries
+both (`sqlite3: no names: it carries no function symbols; debuginfod: no
+server had build id de25d77...`).
 
 ## A launched program that ends before omn's first read has no process setting (2026-11-12)
 
