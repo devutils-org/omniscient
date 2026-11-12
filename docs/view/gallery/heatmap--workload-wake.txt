@@ -1,6 +1,6 @@
 omn top │ fixture workload-wake │ 264ms                           view: snapshot │ collectors ≥34.7% │ target 54.8% cpu
- 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
-┌ heatmap -- sched.runqlat latency over time ──────────────────────────────────────────────────────────────────────────┐
+ [F] Families  [I] Guide  1 system 2 flame 3 ledger 4 request 5 timebar 6 heatmap 7 lanes 8 wake 9 flows 0 process
+╭ heatmap -- sched.runqlat latency over time ──────────────────────────────────────────────────────────────────────────╮
 │ io.latency 0   sched.runqlat 947 in 60 rows   net.socket 0   gpu.kernel 0                                            │
 │947 run queue waits, 0ns to 19.7µs, p50 0ns, p99 11.4µs ~low det degraded                                             │
 │one regime  ~0ns 100% (947) in 18 bursts, all through                                                                 │
@@ -36,5 +36,5 @@ omn top │ fixture workload-wake │ 264ms                           view: snap
 │▲ 45.4ms to 48.3ms   1 run queue wait   p50 0ns   p99 19.7µs   max 19.7µs                                             │
 │  its slowest 19.7µs: python3 tid 2621136 (alone in a 95.2ms kernel window)                                           │
 │per cell ░<1 ▒1 ▒2 ▓4 ▓7 █11   rows 7.3/octave, columns 2.84ms each, kernel rows spread over their ~50.7ms window     │
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  s source  h/l cursor  +/- zoom  t narrow to slowest  ⏎ open it
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+[Enter] open lanes  q quit  F families  I guide  ? help  s source  h/l cursor  +/- zoom  t narrow to slowest  ⏎ open it

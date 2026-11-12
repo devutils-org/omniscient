@@ -1,8 +1,8 @@
 omn top │ fixture sqlite-commits │ 2.55s live                        view: snapshot │ collectors and target: at the end
- 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
+ [F] Families  [I] Guide  1 system 2 flame 3 ledger 4 request 5 timebar 6 heatmap 7 lanes 8 wake 9 flows 0 process
  flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference ────────────────────────────
 on cpu: 0 so far │ off cpu: 264 so far
-┌ on cpu cpu.profile ──────────────────────────────────────────────────────────────────────────────────────────────────┐
+╭ on cpu cpu.profile ──────────────────────────────────────────────────────────────────────────────────────────────────╮
 │0 samples on 0 stacks so far ~low det live degraded x5                                                                │
 │the icicle is drawn when the run ends: the runner names the stacks then. Below, what arrived over time.               │
 │                                                                                                                      │
@@ -17,8 +17,8 @@ on cpu: 0 so far │ off cpu: 264 so far
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-┌ off cpu sched.offcpu ────────────────────────────────────────────────────────────────────────────────────────────────┐
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ off cpu sched.offcpu ────────────────────────────────────────────────────────────────────────────────────────────────╮
 │264 blocks on 3 stacks so far ~low det live degraded                                                                  │
 │the icicle is drawn when the run ends: the runner names the stacks then. Below, what arrived over time.               │
 │                                                                                                                      │
@@ -33,8 +33,8 @@ on cpu: 0 so far │ off cpu: 264 so far
 │         █   █         █   █    █    █        █   █    █    █         █  █    █    █   █         █   █    █   █     █ │
 │▃        █   █         █   █    █    █        █   █    █    █         █  █    █    █   █         █   █    █   █     █ │
 │█        █   █         █   █    █    █        █   █    █    █   ▇     █  █    █    █   █         █   █    █   █     █ │
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 
 
 cpu.profile (+1 more, ! lists them): stacks unwound by `fp`: the caller of a function that sets up no frame pointer is …
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t split  d shape  ! caveats
+q quit  F families  I guide  ? help  ↑↓hl move  +/- zoom  /* find  om pane  t split  d shape  ! caveats

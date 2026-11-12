@@ -1,6 +1,6 @@
 omn top │ fixture file-serving │ 2.56s                            view: snapshot │ collectors ≥0.74% │ target 8.26% cpu
- 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
-┌ heatmap -- net.socket latency over time ─────────────────────────────────────────────────────────────────────────────┐
+ [F] Families  [I] Guide  1 system 2 flame 3 ledger 4 request 5 timebar 6 heatmap 7 lanes 8 wake 9 flows 0 process
+╭ heatmap -- net.socket latency over time ─────────────────────────────────────────────────────────────────────────────╮
 │ io.latency not asked   sched.runqlat not asked   net.socket 568 in 123 rows   gpu.kernel not asked                   │
 │568 socket calls, 1.39µs to 150ms, p50 44.4µs, p99 150ms ~low det degraded x3                                         │
 │3 regimes  ~44.4µs 96% (544) in 14 bursts, all through  │  ~4.14ms 2.1% (12) in bursts every ~173ms, 227µs to 2.00s  ││
@@ -36,5 +36,5 @@ omn top │ fixture file-serving │ 2.56s                            view: snap
 │▲ 523ms to 550ms   13 socket calls   p50 45.6µs   p99 150ms   max 150ms                                               │
 │  its slowest 150ms: Thread-1 (proce tid 2620523 recv 77B (alone in a 100.0ms kernel window)                          │
 │per cell ░<1 ▒1 ▒2 ▓3 ▓5 █7   rows 1.3/octave, columns 27.5ms each, kernel rows spread over their ~100.0ms window     │
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  s source  h/l cursor  +/- zoom  t narrow to slowest  ⏎ open it
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+[Enter] open lanes  q quit  F families  I guide  ? help  s source  h/l cursor  +/- zoom  t narrow to slowest  ⏎ open it

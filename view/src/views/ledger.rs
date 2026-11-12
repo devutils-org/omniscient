@@ -129,6 +129,7 @@ pub const NEEDS: &[Need] = &[
 /// The sheet's keys, for the help line.
 const KEYS: &[(&str, &str)] = &[
     ("↑/↓", "line"),
+    ("PgUp/Dn", "scroll detail"),
     ("t", "next task"),
     ("enter", "the view behind the line"),
 ];
@@ -137,6 +138,7 @@ const KEYS: &[(&str, &str)] = &[
 pub struct Ledger {
     /// The line whose detail is drawn under the sheet.
     selected: usize,
+    detail_scroll: u16,
     /// The sheet's lines as last drawn, each its index in `ITEMS`.
     regions: Vec<Region>,
 }
@@ -158,7 +160,14 @@ impl View for Ledger {
         let sheet = Sheet::of(ctx.data, ctx.focus);
         let against = ctx.against.map(|other| Sheet::of(other, ctx.focus));
         self.selected = self.selected.min(ITEMS.len() - 1);
-        self.regions = draw_sheet(frame, area, &sheet, against.as_ref(), self.selected);
+        self.regions = draw_sheet(
+            frame,
+            area,
+            &sheet,
+            against.as_ref(),
+            self.selected,
+            &mut self.detail_scroll,
+        );
     }
 
     fn regions(&self) -> &[Region] {
@@ -167,11 +176,29 @@ impl View for Ledger {
 
     fn select(&mut self, id: usize, _ctx: &Ctx<'_>) -> Action {
         self.selected = id.min(ITEMS.len() - 1);
+        self.detail_scroll = 0;
         Action::None
     }
 
     fn key(&mut self, key: KeyEvent, ctx: &Ctx<'_>) -> Action {
-        match key.code {
+        let previous = self.selected;
+        let action = match key.code {
+            KeyCode::PageDown => {
+                self.detail_scroll = self.detail_scroll.saturating_add(3);
+                Action::None
+            }
+            KeyCode::PageUp => {
+                self.detail_scroll = self.detail_scroll.saturating_sub(3);
+                Action::None
+            }
+            KeyCode::Home => {
+                self.selected = 0;
+                Action::None
+            }
+            KeyCode::End => {
+                self.selected = ITEMS.len().saturating_sub(1);
+                Action::None
+            }
             KeyCode::Down | KeyCode::Char('j') => {
                 self.selected = (self.selected + 1).min(ITEMS.len() - 1);
                 Action::None
@@ -198,7 +225,18 @@ impl View for Ledger {
                 None => Action::None,
             },
             _ => Action::None,
+        };
+        if self.selected != previous {
+            self.detail_scroll = 0;
         }
+        action
+    }
+
+    fn enter_label(&self, _: &Ctx<'_>) -> Option<String> {
+        ITEMS
+            .get(self.selected)
+            .and_then(|item| item.goto)
+            .map(|view| format!("open {view}"))
     }
 
     fn keys(&self) -> &'static [(&'static str, &'static str)] {
@@ -738,13 +776,13 @@ fn detail_of(spec: &ItemSpec, results: &[&Results], trust: &Trust) -> Vec<Line<'
         for degradation in &one.degradations {
             lines.push(Line::from(Span::styled(
                 format!("· the fallback says: {degradation}"),
-                Style::new().fg(palette::LOSS),
+                Style::new().fg(palette::loss()),
             )));
         }
         for (reason, count) in &one.losses.reasons {
             lines.push(Line::from(Span::styled(
                 format!("· {count}× {reason}"),
-                Style::new().fg(palette::LOSS),
+                Style::new().fg(palette::loss()),
             )));
         }
         for note in &one.notes {
@@ -765,7 +803,7 @@ fn detail_of(spec: &ItemSpec, results: &[&Results], trust: &Trust) -> Vec<Line<'
             }
             lines.push(Line::from(Span::styled(
                 cost,
-                Style::new().fg(palette::COST),
+                Style::new().fg(palette::cost()),
             )));
         }
     }
@@ -1897,13 +1935,19 @@ fn draw_sheet(
     sheet: &Sheet,
     against: Option<&Sheet>,
     selected: usize,
+    detail_scroll: &mut u16,
 ) -> Vec<Region> {
     let mut regions = Vec::new();
-    let block = Block::new().borders(Borders::ALL).title(Line::from(vec![
-        Span::raw(" ledger -- "),
-        Span::styled(title_of(sheet), Style::new().add_modifier(Modifier::BOLD)),
-        Span::raw(" "),
-    ]));
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(crate::theme::border())
+        .title_style(crate::theme::title())
+        .title(Line::from(vec![
+            Span::raw(" ledger -- "),
+            Span::styled(title_of(sheet), Style::new().add_modifier(Modifier::BOLD)),
+            Span::raw(" "),
+        ]));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width < 20 || inner.height < 4 {
@@ -1926,13 +1970,15 @@ fn draw_sheet(
         })
         .sum();
     let below = 1 + cost_lines(sheet).len() + 2;
-    let detail_rows: usize = detail_lines(sheet, selected)
-        .iter()
-        .map(|line| line.width().max(1).div_ceil(usize::from(inner.width)))
-        .sum::<usize>()
-        + 1;
-    let tall =
-        1 + sheet.items.len() + served + subs + below + detail_rows <= usize::from(inner.height);
+    // Reserve the same detail height for every selection, including long text.
+    // Small terminals retain enough room for the resource list.
+    let pane = if inner.height >= 10 {
+        (inner.height / 3).clamp(3, 9)
+    } else {
+        0
+    };
+    let tall = 1 + sheet.items.len() + served + subs + below + usize::from(pane)
+        <= usize::from(inner.height);
     let rows = if tall { 2 } else { 1 };
     let mut lines: Vec<Line<'static>> = vec![header_line(&columns, against.is_some())];
     for (index, item) in sheet.items.iter().enumerate() {
@@ -1944,13 +1990,10 @@ fn draw_sheet(
         } else {
             1
         };
-        if y < inner.y + inner.height {
-            let height = served_rows.min(inner.y + inner.height - y);
-            regions.push(Region::new(
-                Rect::new(inner.x, y, inner.width, height),
-                index,
-            ));
-        }
+        regions.push(Region::new(
+            Rect::new(inner.x, y, inner.width, served_rows),
+            index,
+        ));
         let other = against.and_then(|other| other.items.get(index));
         if served_rows == 2 {
             lines.push(upper_line(item, &columns));
@@ -1974,29 +2017,50 @@ fn draw_sheet(
                 .into(),
         ));
     }
-    let room = inner.height.saturating_sub(lines.len() as u16);
-    let pane = if room >= 3 { room } else { 0 };
     let [table, pane_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(pane)]).areas(inner);
-    frame.render_widget(Paragraph::new(lines), table);
+    // Keep the selected resource visible when a compact terminal cannot fit
+    // the whole table; the pane boundary itself never moves.
+    let scroll = regions
+        .iter()
+        .find(|region| region.id == selected)
+        .map(|region| (region.rect.y + region.rect.height).saturating_sub(table.y + table.height))
+        .unwrap_or(0);
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), table);
+    regions.retain_mut(|region| {
+        if region.rect.y < table.y + scroll {
+            return false;
+        }
+        region.rect.y -= scroll;
+        if region.rect.y >= table.y + table.height {
+            return false;
+        }
+        region.rect.height = region
+            .rect
+            .height
+            .min(table.y + table.height - region.rect.y);
+        true
+    });
     if pane > 0 {
         let spec = &ITEMS[selected.min(ITEMS.len() - 1)];
         let pane_block = Block::new()
             .borders(Borders::TOP)
             .border_style(Style::new().add_modifier(Modifier::DIM))
             .title(Span::styled(
-                format!(" {} -- ↑/↓ another line ", spec.resource),
-                Style::new().fg(palette::ACCENT),
+                format!(" {} · ↑↓ resource · PgUp/Dn detail ", spec.resource),
+                Style::new().fg(palette::accent()),
             ));
+        let detail = detail_lines(sheet, selected);
+        let content = Paragraph::new(detail).wrap(Wrap { trim: true });
+        let limit = content
+            .line_count(pane_area.width)
+            .saturating_sub(pane_area.height.saturating_sub(1) as usize);
+        *detail_scroll = (*detail_scroll).min(limit.min(u16::MAX as usize) as u16);
         frame.render_widget(
-            Paragraph::new(detail_lines(sheet, selected))
-                .block(pane_block)
-                .wrap(Wrap { trim: true }),
+            content.scroll((*detail_scroll, 0)).block(pane_block),
             pane_area,
         );
     }
-    // The detail pane may cover the sheet's last lines.
-    regions.retain(|region| region.rect.y < pane_area.y || pane == 0);
     regions
 }
 
@@ -2060,11 +2124,11 @@ fn item_line(
             Span::styled(
                 "▸ ",
                 Style::new()
-                    .fg(palette::ACCENT)
+                    .fg(palette::accent())
                     .add_modifier(Modifier::BOLD),
             ),
             Style::new()
-                .fg(palette::ACCENT)
+                .fg(palette::accent())
                 .add_modifier(Modifier::BOLD),
         )
     } else {
@@ -2084,7 +2148,7 @@ fn item_line(
     match &item.state {
         State::Refused(refusal) => spans.push(Span::styled(
             format!("refused: {}", refusal.reason),
-            Style::new().fg(palette::REFUSED),
+            Style::new().fg(palette::refused()),
         )),
         State::Absent => spans.push(Span::styled(
             format!("not in this run: {} was not asked for", item.spec.label),
@@ -2115,7 +2179,7 @@ fn item_line(
                 spans.push(Span::raw(" "));
                 spans.push(Span::styled(
                     format!("{:>w$}", cost_text(served.cost), w = columns.cost - 1),
-                    Style::new().fg(palette::COST),
+                    Style::new().fg(palette::cost()),
                 ));
                 spans.push(Span::raw("  "));
                 spans.extend(served.trust.badges());
@@ -2189,7 +2253,7 @@ fn upper_line(item: &Item, columns: &Columns) -> Line<'static> {
     let offset = 2 + columns.resource + columns.amount + columns.rate;
     Line::from(vec![
         Span::raw(" ".repeat(offset)),
-        Span::styled(rows[0].clone(), served.trust.style().fg(palette::ACCENT)),
+        Span::styled(rows[0].clone(), served.trust.style().fg(palette::accent())),
     ])
 }
 
@@ -2201,7 +2265,7 @@ fn graph_spans_rows(graph: &Graph, width: usize, style: Style, rows: usize) -> V
             let bottom = sparkline_rows(&values, *scale, rows)
                 .pop()
                 .unwrap_or_default();
-            vec![Span::styled(bottom, style.fg(palette::ACCENT))]
+            vec![Span::styled(bottom, style.fg(palette::accent()))]
         }
         Graph::Hist(counts, low, high) => {
             let low_text = units::duration(*low as f64);
@@ -2229,7 +2293,7 @@ fn graph_spans_rows(graph: &Graph, width: usize, style: Style, rows: usize) -> V
                 .zip(&shown)
                 .map(|(bar, count)| if *count == 0 { ' ' } else { bar })
                 .collect();
-            let bars = Span::styled(bars, style.fg(palette::ACCENT));
+            let bars = Span::styled(bars, style.fg(palette::accent()));
             if !labelled {
                 return vec![bars];
             }
@@ -2261,7 +2325,7 @@ fn cost_text(cost: Option<(u64, bool)>) -> String {
 /// The sheet's last line: what knowing all of it cost, beside what the
 /// target spent.
 fn cost_lines(sheet: &Sheet) -> Vec<Line<'static>> {
-    let style = Style::new().fg(palette::COST);
+    let style = Style::new().fg(palette::cost());
     let mut spans = vec![Span::styled(
         "  to know all of this",
         Style::new().add_modifier(Modifier::BOLD),
@@ -2917,6 +2981,34 @@ mod tests {
         assert_eq!(next_task(&tasks, &Focus::default()), Some(1));
         assert_eq!(next_task(&tasks, &on(1)), Some(2));
         assert_eq!(next_task(&tasks, &on(2)), None);
+    }
+
+    #[test]
+    fn selection_keeps_table_fixed_and_long_detail_scrolls() {
+        let data = fixture("http-server");
+        let mut app = App::new(data);
+        app.cost = Cost::Snapshot;
+        app.open("ledger").unwrap();
+        let mut first = None;
+        for _ in 0..ITEMS.len() {
+            let _ = snapshot::draw_app(&mut app, 100, 60);
+            let rows: Vec<_> = app.views[app.current]
+                .regions()
+                .iter()
+                .map(|region| (region.id, region.rect))
+                .collect();
+            if let Some(expected) = &first {
+                assert_eq!(&rows, expected);
+            } else {
+                first = Some(rows);
+            }
+            app.key(KeyEvent::from(KeyCode::Down));
+        }
+        app.key(KeyEvent::from(KeyCode::Home));
+        let before = snapshot::text(&snapshot::draw_app(&mut app, 60, 18));
+        app.key(KeyEvent::from(KeyCode::PageDown));
+        let after = snapshot::text(&snapshot::draw_app(&mut app, 60, 18));
+        assert_ne!(before, after, "long details should scroll");
     }
 
     /// The comparison of two runs, and one task narrowed to: drawn into the

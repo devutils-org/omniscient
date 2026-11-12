@@ -80,14 +80,19 @@ pub const NEEDS: &[Need] = &[
     },
 ];
 
-/// Bytes into the target: received, read.
-const INWARD: Color = Color::Cyan;
-/// Bytes out of the target: sent, written.
-const OUTWARD: Color = Color::Green;
-/// The machine's bytes, whoever moved them.
-const MACHINE: Color = Color::DarkGray;
-/// The bars a column's nodes are drawn as.
-const BAR: Color = Color::Gray;
+/// Directional and machine colours follow the selected theme.
+fn inward() -> Color {
+    crate::theme::choose(Color::Rgb(125, 207, 255), Color::Cyan)
+}
+fn outward() -> Color {
+    crate::theme::choose(Color::Rgb(158, 206, 106), Color::Green)
+}
+fn machine() -> Color {
+    crate::theme::choose(Color::Rgb(86, 95, 137), Color::DarkGray)
+}
+fn bar_colour() -> Color {
+    crate::theme::choose(Color::Rgb(169, 177, 214), Color::Gray)
+}
 
 /// Cells of a sparkline, lowest first.
 const SPARK: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
@@ -102,8 +107,8 @@ enum Dir {
 impl Dir {
     fn colour(self) -> Color {
         match self {
-            Dir::Out => OUTWARD,
-            Dir::In => INWARD,
+            Dir::Out => outward(),
+            Dir::In => inward(),
         }
     }
 }
@@ -270,26 +275,59 @@ impl View for Flows {
         if count > 0 && self.selected >= count {
             self.selected = count - 1;
         }
-        let block = Block::new().borders(Borders::ALL).title(format!(
-            " {} -- {} ",
-            self.name(),
-            self.title()
-        ));
+        let block = Block::new()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(crate::theme::border())
+            .title_style(crate::theme::title())
+            .title(format!(" {} -- {} ", self.name(), self.title()));
         let inner = block.inner(area);
         frame.render_widget(block, area);
         if inner.height < MIN_INNER.1 || inner.width < MIN_INNER.0 {
-            frame.render_widget(
-                Paragraph::new(format!(
-                    "too small for the flows: the view needs {}x{} cells, border included, \
-                     and has {}x{}",
-                    MIN_INNER.0 + 2,
-                    MIN_INNER.1 + 2,
-                    area.width,
-                    area.height
-                ))
-                .wrap(Wrap { trim: true }),
-                inner,
-            );
+            let visible = usize::from(inner.height.saturating_sub(4));
+            let start = self.selected.saturating_add(1).saturating_sub(visible);
+            let mut lines = vec![
+                Line::from("Compact view · enlarge for the flow diagram"),
+                summary_line(ctx, &bands),
+            ];
+            self.regions.clear();
+            for (index, object) in bands
+                .iter()
+                .flat_map(|band| band.objects.iter())
+                .enumerate()
+                .skip(start)
+                .take(visible)
+            {
+                let mut spans = vec![Span::styled(
+                    format!(
+                        "{} {}  out {}  in {}",
+                        if index == self.selected { "›" } else { " " },
+                        object.name,
+                        units::bytes(object.out_bytes as f64),
+                        units::bytes(object.in_bytes as f64)
+                    ),
+                    if index == self.selected {
+                        Style::new().add_modifier(Modifier::REVERSED)
+                    } else {
+                        object.trust.style()
+                    },
+                )];
+                spans.push(Span::raw("  "));
+                spans.extend(object.trust.badges());
+                let y = inner.y + lines.len() as u16;
+                if y < inner.bottom() && inner.width > 0 {
+                    self.regions
+                        .push(Region::new(Rect::new(inner.x, y, inner.width, 1), index));
+                }
+                lines.push(Line::from(spans));
+            }
+            if count > visible {
+                lines.push(Line::from(format!("{} objects · ↑↓ to select", count)));
+            }
+            lines.extend(detail_lines(&bands, (count > 0).then_some(self.selected)));
+            // Keep each selectable object on one terminal row so its mouse
+            // region stays aligned even when the summary is long.
+            frame.render_widget(Paragraph::new(lines), inner);
             return;
         }
         let band_rows = inner.height.saturating_sub(3) / 2;
@@ -327,6 +365,14 @@ impl View for Flows {
         let bands = bands(ctx);
         let count = selectable(&bands);
         match key.code {
+            KeyCode::Home => {
+                self.selected = 0;
+                Action::None
+            }
+            KeyCode::End => {
+                self.selected = count.saturating_sub(1);
+                Action::None
+            }
             KeyCode::Down | KeyCode::Char('j') if count > 0 => {
                 self.selected = (self.selected + 1).min(count - 1);
                 Action::None
@@ -347,6 +393,13 @@ impl View for Flows {
             },
             _ => Action::None,
         }
+    }
+
+    fn enter_label(&self, ctx: &Ctx<'_>) -> Option<String> {
+        let bands = bands(ctx);
+        selected_object(&bands, self.selected)
+            .filter(|object| object.pid.is_some() || object.tid.is_some())
+            .map(|_| "focus thread".to_owned())
     }
 
     fn keys(&self) -> &'static [(&'static str, &'static str)] {
@@ -743,7 +796,10 @@ fn title(data: &Data, held: &[&Results], source: &str) -> Vec<Span<'static>> {
         spans.push(Span::raw(format!(" {} ", first.backend)));
         spans.extend(Trust::joined(data, held.iter().copied()).badges());
     } else if data.refusal(source).is_some() {
-        spans.push(Span::styled(" refused", Style::new().fg(palette::REFUSED)));
+        spans.push(Span::styled(
+            " refused",
+            Style::new().fg(palette::refused()),
+        ));
     } else {
         spans.push(Span::styled(
             " not in this run",
@@ -1083,7 +1139,7 @@ fn summary_line(ctx: &Ctx<'_>, bands: &[Band; 2]) -> Line<'static> {
     if !ctx.focus.is_empty() {
         spans.push(Span::styled(
             format!("{} ", ctx.focus.describe()),
-            Style::new().fg(palette::ACCENT),
+            Style::new().fg(palette::accent()),
         ));
     } else if !pids.is_empty() {
         spans.push(Span::raw(match pids.as_slice() {
@@ -1111,20 +1167,20 @@ fn summary_line(ctx: &Ctx<'_>, bands: &[Band; 2]) -> Line<'static> {
         let style = band.target_trust.style();
         spans.push(Span::styled(
             units::bytes(band.out_bytes() as f64),
-            style.fg(OUTWARD),
+            style.fg(outward()),
         ));
         spans.push(Span::styled(format!(" {out_word}, "), style));
         spans.push(Span::styled(
             units::bytes(band.in_bytes() as f64),
-            style.fg(INWARD),
+            style.fg(inward()),
         ));
         spans.push(Span::styled(format!(" {in_word}   "), style));
     }
-    spans.push(Span::styled("█", Style::new().fg(OUTWARD)));
+    spans.push(Span::styled("█", Style::new().fg(outward())));
     spans.push(Span::raw(" out "));
-    spans.push(Span::styled("█", Style::new().fg(INWARD)));
+    spans.push(Span::styled("█", Style::new().fg(inward())));
     spans.push(Span::raw(" in "));
-    spans.push(Span::styled("█", Style::new().fg(MACHINE)));
+    spans.push(Span::styled("█", Style::new().fg(machine())));
     spans.push(Span::raw(" the machine's"));
     Line::from(spans)
 }
@@ -1338,7 +1394,7 @@ fn draw_band(
     title.push(Span::raw(" "));
     let block = Block::new()
         .borders(Borders::TOP)
-        .border_style(Style::new().fg(BAR))
+        .border_style(Style::new().fg(bar_colour()))
         .title(Line::from(title));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1523,7 +1579,7 @@ fn draw_band(
             usize::from(columns.sink_bar),
             (junction_top, junction_top + bottom - top),
             (top, bottom),
-            ribbon_style(MACHINE, &band.machine_trust),
+            ribbon_style(machine(), &band.machine_trust),
         );
         junction_top += bottom - top;
     }
@@ -1546,7 +1602,7 @@ fn draw_band(
             buffer,
             columns.task_bar,
             (top, bottom),
-            band.target_trust.style().fg(BAR),
+            band.target_trust.style().fg(bar_colour()),
         );
         let label = truncate(&task.comm, task_width);
         buffer.set_stringn(
@@ -1574,9 +1630,9 @@ fn draw_band(
         }
         let chosen = selected == Some(index);
         let bar_style = if chosen {
-            Style::new().fg(palette::ACCENT)
+            Style::new().fg(palette::accent())
         } else {
-            object.trust.style().fg(BAR)
+            object.trust.style().fg(bar_colour())
         };
         bar(buffer, columns.object_bar, (top, bottom), bar_style);
         bar(buffer, columns.object_bar_right, (top, bottom), bar_style);
@@ -1602,7 +1658,7 @@ fn draw_band(
             buffer,
             columns.junction,
             (0, junction_height),
-            Style::new().fg(BAR),
+            Style::new().fg(bar_colour()),
         );
     }
     for (index, sink) in band.sinks.iter().enumerate() {
@@ -1614,7 +1670,7 @@ fn draw_band(
             buffer,
             columns.sink_bar,
             span,
-            band.machine_trust.style().fg(MACHINE),
+            band.machine_trust.style().fg(machine()),
         );
         let line = sink_line(
             sink,
@@ -1728,13 +1784,16 @@ fn object_line(object: &Object, kind: Kind, chosen: bool, width: usize) -> Line<
         ),
         if chosen {
             Style::new()
-                .fg(palette::ACCENT)
+                .fg(palette::accent())
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::new().add_modifier(Modifier::BOLD)
         },
     )];
-    spans.push(Span::styled(sparkline(&object.spark), style.fg(BAR)));
+    spans.push(Span::styled(
+        sparkline(&object.spark),
+        style.fg(bar_colour()),
+    ));
     let (out_mark, in_mark) = match kind {
         Kind::Network => ("↑", "↓"),
         Kind::Storage => ("→", "←"),
@@ -1742,13 +1801,13 @@ fn object_line(object: &Object, kind: Kind, chosen: bool, width: usize) -> Line<
     if object.out_bytes > 0 {
         spans.push(Span::styled(
             format!(" {out_mark}{}", units::bytes(object.out_bytes as f64)),
-            style.fg(OUTWARD),
+            style.fg(outward()),
         ));
     }
     if object.in_bytes > 0 || object.out_bytes == 0 {
         spans.push(Span::styled(
             format!(" {in_mark}{}", units::bytes(object.in_bytes as f64)),
-            style.fg(INWARD),
+            style.fg(inward()),
         ));
     }
     // A loss is said on the object itself; the rest of a source's marks are
@@ -1790,7 +1849,7 @@ fn sink_line(sink: &Sink, kind: Kind, trust: &Trust, width: usize) -> Line<'stat
         ),
         Span::styled(format!("{:>7}", units::bytes(sink.bytes)), style),
         Span::raw(" "),
-        Span::styled(sparkline(&sink.spark), style.fg(BAR)),
+        Span::styled(sparkline(&sink.spark), style.fg(bar_colour())),
     ];
     if let Some((count, _)) = sink.fed {
         // The edge from the target's files or sockets, in words beside the
@@ -1876,7 +1935,7 @@ fn footer_line(band: &Band, dropped: &[String]) -> Line<'static> {
     for one in dropped {
         spans.push(Span::styled(
             format!(" · {one}"),
-            Style::new().fg(palette::LOSS),
+            Style::new().fg(palette::loss()),
         ));
     }
     if !band.sinks.is_empty() && band.idle > 0 {
@@ -1924,12 +1983,12 @@ fn detail_lines(bands: &[Band; 2], selected: Option<usize>) -> Vec<Line<'static>
     let seconds = band.seconds.max(1e-9);
     let mut spans = vec![Span::styled(
         format!("▶ {}: ", object.detail),
-        Style::new().fg(palette::ACCENT),
+        Style::new().fg(palette::accent()),
     )];
     let mut parts = Vec::new();
     for (word, bytes, calls, colour) in [
-        (out_word, object.out_bytes, object.out_calls, OUTWARD),
-        (in_word, object.in_bytes, object.in_calls, INWARD),
+        (out_word, object.out_bytes, object.out_calls, outward()),
+        (in_word, object.in_bytes, object.in_calls, inward()),
     ] {
         if calls == 0 {
             continue;
@@ -1953,7 +2012,7 @@ fn detail_lines(bands: &[Band; 2], selected: Option<usize>) -> Vec<Line<'static>
     if object.errors > 0 {
         spans.push(Span::styled(
             format!("; {} calls failed", units::count(object.errors as f64)),
-            Style::new().fg(palette::REFUSED),
+            Style::new().fg(palette::refused()),
         ));
     }
     let mut second = Vec::new();
@@ -1978,7 +2037,7 @@ fn detail_lines(bands: &[Band; 2], selected: Option<usize>) -> Vec<Line<'static>
     if !sentences.is_empty() {
         second.push(Span::styled(
             format!(" · {}", sentences.join("; ")),
-            Style::new().fg(palette::LOSS),
+            Style::new().fg(palette::loss()),
         ));
     }
     vec![Line::from(spans), Line::from(second)]
@@ -2296,7 +2355,7 @@ mod tests {
         let mut least = None;
         for height in 10..30 {
             let screen = text(&draw(file_server(), "flows", WIDTH, height));
-            if screen.contains("too small for the flows") {
+            if screen.contains("Compact view") {
                 assert!(least.is_none(), "too small at {height} after drawn");
                 continue;
             }

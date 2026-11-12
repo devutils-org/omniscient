@@ -95,11 +95,12 @@ impl View for Wake {
 
     fn draw(&mut self, frame: &mut Frame<'_>, area: Rect, ctx: &Ctx<'_>) {
         self.regions.clear();
-        let block = Block::new().borders(Borders::ALL).title(format!(
-            " {} -- {} ",
-            self.name(),
-            self.title()
-        ));
+        let block = Block::new()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(crate::theme::border())
+            .title_style(crate::theme::title())
+            .title(format!(" {} -- {} ", self.name(), self.title()));
         let held = served(ctx.data);
         if held.is_empty() {
             if let Some(refusal) = ctx.data.refusal(NEEDS[0].source) {
@@ -175,11 +176,12 @@ impl View for Wake {
             KeyCode::PageDown => select(at.map(|at| (at + GRID_ROWS).min(rows.len() - 1))),
             KeyCode::PageUp => select(at.map(|at| at.saturating_sub(GRID_ROWS))),
             KeyCode::Home => select(Some(0)),
-            KeyCode::Char('+') | KeyCode::Char('=') => {
+            KeyCode::End => select(rows.len().checked_sub(1)),
+            KeyCode::Char('+' | '=' | 'z') => {
                 self.depth = (self.depth + 1).min(DEPTH_MAX);
                 Action::None
             }
-            KeyCode::Char('-') => {
+            KeyCode::Char('-' | 'Z') => {
                 self.depth = self.depth.saturating_sub(1).max(1);
                 Action::None
             }
@@ -201,6 +203,20 @@ impl View for Wake {
             },
             _ => Action::None,
         }
+    }
+
+    fn enter_label(&self, ctx: &Ctx<'_>) -> Option<String> {
+        let (_, index) = self.cache.as_ref()?;
+        let rows = index.rows(ctx.focus);
+        let tid = self.root(&rows, ctx.focus)?;
+        Some(
+            if *ctx.focus == index.focus_of(tid) {
+                "open lanes"
+            } else {
+                "focus thread"
+            }
+            .to_owned(),
+        )
     }
 
     fn keys(&self) -> &'static [(&'static str, &'static str)] {
@@ -934,7 +950,7 @@ impl Index {
             String::new()
         };
         let mut title = vec![
-            Span::styled(self.thread(root), bold.fg(palette::ACCENT)),
+            Span::styled(self.thread(root), bold.fg(palette::accent())),
             Span::raw(match self.pid.get(&root) {
                 Some(pid) if *pid != root => format!(" (pid {pid})"),
                 _ => String::new(),
@@ -1088,7 +1104,7 @@ impl Index {
                 line.push(Span::raw("  "));
                 line.push(Span::styled(
                     sparkline(&node.when, self.opened_ns, self.closed_ns, busiest),
-                    figures.fg(palette::ACCENT),
+                    figures.fg(palette::accent()),
                 ));
             }
             lines.push(Line::from(line));
@@ -1139,13 +1155,13 @@ impl Index {
                     line.push(Span::styled("  <- ", dim));
                     let style = match link.waker {
                         Waker::Task(_) => Style::new(),
-                        _ => Style::new().fg(palette::TIME),
+                        _ => Style::new().fg(palette::time()),
                     };
                     line.push(Span::styled(self.waker_name(&link.waker), style));
                     if let Some(hold) = link.hold {
                         line.push(Span::styled(
                             format!(" {}", units::duration(hold as f64)),
-                            figures.fg(palette::ACCENT),
+                            figures.fg(palette::accent()),
                         ));
                     }
                 }
@@ -1200,7 +1216,7 @@ impl Index {
         let ends = |end: End| node.ends.get(&end).copied().unwrap_or(0);
         match &node.waker {
             Waker::Interrupt(context) => (
-                Style::new().fg(palette::TIME),
+                Style::new().fg(palette::time()),
                 match context.as_str() {
                     "hardirq" => "  a device",
                     "softirq" => "  a device, or a loopback send",
@@ -1208,7 +1224,7 @@ impl Index {
                 }
                 .to_owned(),
             ),
-            Waker::Idle => (Style::new().fg(palette::TIME), String::new()),
+            Waker::Idle => (Style::new().fg(palette::time()), String::new()),
             Waker::Task(tid) => {
                 // What ends here, said with its count when only some of the
                 // chains through this link end at it.

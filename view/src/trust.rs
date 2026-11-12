@@ -25,28 +25,52 @@ use ratatui::Frame;
 use crate::model::{Data, Refusal, Results};
 use crate::units;
 
-/// The colours every view draws with, so the trust style reads the same
-/// everywhere. Sixteen-colour names only: a terminal's own palette decides
-/// what they look like, which keeps a light and a dark theme legible.
+/// Semantic colours shared by every view. Text labels and badges accompany
+/// colour, and no terminal background is assumed.
 pub mod palette {
     use ratatui::style::Color;
 
     /// What a lost record is drawn in.
-    pub const LOSS: Color = Color::Yellow;
+    pub const LOSS: Color = Color::Indexed(130);
     /// What a clock's error is drawn in.
-    pub const TIME: Color = Color::Cyan;
+    pub const TIME: Color = Color::Indexed(97);
     /// What a refusal is drawn in.
-    pub const REFUSED: Color = Color::Red;
+    pub const REFUSED: Color = Color::Indexed(131);
     /// What a provisional figure is drawn in.
-    pub const LIVE: Color = Color::Blue;
+    pub const LIVE: Color = Color::Indexed(67);
     /// The view's own cost.
-    pub const COST: Color = Color::Magenta;
+    pub const COST: Color = Color::Indexed(97);
     /// Something faster, or less, in a comparison.
-    pub const BETTER: Color = Color::Blue;
+    pub const BETTER: Color = Color::Indexed(30);
     /// Something slower, or more, in a comparison.
-    pub const WORSE: Color = Color::Red;
+    pub const WORSE: Color = Color::Indexed(131);
     /// The accent of a selection.
-    pub const ACCENT: Color = Color::Green;
+    pub const ACCENT: Color = Color::Indexed(30);
+
+    pub fn loss() -> Color {
+        crate::theme::choose(Color::Rgb(224, 175, 104), LOSS)
+    }
+    pub fn time() -> Color {
+        crate::theme::choose(Color::Rgb(187, 154, 247), TIME)
+    }
+    pub fn refused() -> Color {
+        crate::theme::choose(Color::Rgb(247, 118, 142), REFUSED)
+    }
+    pub fn live() -> Color {
+        crate::theme::choose(Color::Rgb(122, 162, 247), LIVE)
+    }
+    pub fn cost() -> Color {
+        crate::theme::choose(Color::Rgb(187, 154, 247), COST)
+    }
+    pub fn better() -> Color {
+        crate::theme::choose(Color::Rgb(158, 206, 106), BETTER)
+    }
+    pub fn worse() -> Color {
+        crate::theme::choose(Color::Rgb(247, 118, 142), WORSE)
+    }
+    pub fn accent() -> Color {
+        crate::theme::accent()
+    }
 }
 
 /// How full a resource is, as a colour: the gradient `system` and `process`
@@ -58,12 +82,9 @@ pub mod palette {
 /// yellow, to red when it is full. That share is a measured fraction of a
 /// known bound, not a threshold someone chose, so the steps are even. A
 /// resource with no known capacity (energy, bytes on a device of unknown
-/// speed) is drawn in [`usage::NEUTRAL`] and its section says why.
-///
-/// The ramp is six steps of the 256-colour cube chosen to read on a dark and
-/// on a light background alike: every step is at least 3:1 against both
-/// (`tests/view_gradient.rs`). The brighter cube's yellows were 2.1:1 on
-/// white; these are the same hues a shade deeper.
+/// speed) is drawn in [`usage::neutral`] and its section says why.
+/// Tokyo Night is the default for dark terminals; accessible mode uses the
+/// 256-colour ramp tested on both light and dark backgrounds.
 pub mod usage {
     use ratatui::style::{Color, Style};
 
@@ -77,19 +98,37 @@ pub mod usage {
         Color::Indexed(160), // #d70000
     ];
 
-    /// What a resource with no known capacity is drawn in.
+    /// Tokyo Night's green-to-amber-to-coral gradient, as in the btop theme.
+    pub const TOKYO_RAMP: [Color; 6] = [
+        Color::Rgb(158, 206, 106),
+        Color::Rgb(191, 190, 105),
+        Color::Rgb(224, 175, 104),
+        Color::Rgb(232, 156, 116),
+        Color::Rgb(239, 137, 129),
+        Color::Rgb(247, 118, 142),
+    ];
+    /// What a resource with no known capacity is drawn in, for accessible mode.
     pub const NEUTRAL: Color = Color::Indexed(67); // #5f87af
+    pub fn ramp() -> &'static [Color; 6] {
+        match crate::theme::current() {
+            crate::theme::Theme::TokyoNight => &TOKYO_RAMP,
+            crate::theme::Theme::Accessible => &RAMP,
+        }
+    }
+    pub fn neutral() -> Color {
+        crate::theme::choose(crate::theme::TOKYO_ACCENT, NEUTRAL)
+    }
 
     /// The colour of `fraction` of a capacity: `0` is free, `1` full. A
     /// share past the capacity (a burst over a cgroup's limit) is full; one
     /// that is not a number has no colour of its own.
     pub fn colour(fraction: f64) -> Color {
         if !fraction.is_finite() {
-            return NEUTRAL;
+            return neutral();
         }
-        let steps = RAMP.len();
+        let steps = ramp().len();
         let index = (fraction.clamp(0.0, 1.0) * steps as f64) as usize;
-        RAMP[index.min(steps - 1)]
+        ramp()[index.min(steps - 1)]
     }
 
     /// The colour of `value` against `capacity`, or [`NEUTRAL`] when the
@@ -97,7 +136,7 @@ pub mod usage {
     pub fn of(value: f64, capacity: Option<f64>) -> Color {
         match capacity {
             Some(capacity) if capacity > 0.0 && capacity.is_finite() => colour(value / capacity),
-            _ => NEUTRAL,
+            _ => neutral(),
         }
     }
 
@@ -155,21 +194,21 @@ impl Mark {
                     ),
                     None => format!("{} lost", units::count(*missing as f64)),
                 },
-                Style::new().fg(palette::LOSS),
+                Style::new().fg(palette::loss()),
             ),
             Mark::Late { ticks } => {
-                Span::styled(format!("{ticks} late"), Style::new().fg(palette::LOSS))
+                Span::styled(format!("{ticks} late"), Style::new().fg(palette::loss()))
             }
             Mark::TimeError { ns } => Span::styled(
                 format!("±{}", units::duration(*ns as f64)),
-                Style::new().fg(palette::TIME),
+                Style::new().fg(palette::time()),
             ),
-            Mark::TimeErrorUnknown => Span::styled("±?", Style::new().fg(palette::TIME)),
-            Mark::LowDeterminism => Span::styled("~low det", Style::new().fg(palette::TIME)),
+            Mark::TimeErrorUnknown => Span::styled("±?", Style::new().fg(palette::time())),
+            Mark::LowDeterminism => Span::styled("~low det", Style::new().fg(palette::time())),
             Mark::Provisional => Span::styled(
                 "live",
                 Style::new()
-                    .fg(palette::LIVE)
+                    .fg(palette::live())
                     .add_modifier(Modifier::ITALIC),
             ),
             Mark::Degraded { count } => Span::styled(
@@ -178,7 +217,7 @@ impl Mark {
                 } else {
                     format!("degraded x{count}")
                 },
-                Style::new().fg(palette::LOSS),
+                Style::new().fg(palette::loss()),
             ),
         }
     }
@@ -418,10 +457,10 @@ pub fn figure_hued(text: impl Into<String>, trust: &Trust, colour: Color) -> Lin
 pub fn render_refusal(frame: &mut Frame<'_>, area: Rect, refusal: &Refusal) {
     let block = Block::new()
         .borders(Borders::ALL)
-        .border_style(Style::new().fg(palette::REFUSED))
+        .border_style(Style::new().fg(palette::refused()))
         .title(Span::styled(
             format!(" {} refused ", refusal.label),
-            Style::new().fg(palette::REFUSED),
+            Style::new().fg(palette::refused()),
         ));
     let paragraph = Paragraph::new(refusal_lines(refusal))
         .block(block)
@@ -434,7 +473,7 @@ pub fn refusal_lines(refusal: &Refusal) -> Vec<Line<'static>> {
     vec![
         Line::from(Span::styled(
             format!("{} was not served:", refusal.source),
-            Style::new().fg(palette::REFUSED),
+            Style::new().fg(palette::refused()),
         )),
         Line::from(refusal.reason.clone()),
     ]
@@ -466,7 +505,7 @@ pub fn error_bar(value: f64, low: f64, high: f64, max: f64, width: u16) -> Line<
     let blank = " ".repeat(width.saturating_sub(drawn));
     Line::from(vec![
         Span::raw(solid),
-        Span::styled(shaded, Style::new().fg(palette::LOSS)),
+        Span::styled(shaded, Style::new().fg(palette::loss())),
         Span::raw(blank),
     ])
 }
@@ -475,12 +514,12 @@ pub fn error_bar(value: f64, low: f64, high: f64, max: f64, width: u16) -> Line<
 /// worse, blue where it is better, by `ratio` = second / first.
 pub fn difference_colour(ratio: f64) -> Option<Color> {
     if !ratio.is_finite() {
-        return Some(palette::WORSE);
+        return Some(palette::worse());
     }
     if ratio > 1.05 {
-        Some(palette::WORSE)
+        Some(palette::worse())
     } else if ratio < 0.95 {
-        Some(palette::BETTER)
+        Some(palette::better())
     } else {
         None
     }
@@ -492,21 +531,25 @@ mod tests {
 
     #[test]
     fn usage_runs_from_green_to_red_by_the_share_of_capacity() {
-        assert_eq!(usage::colour(0.0), usage::RAMP[0]);
-        assert_eq!(usage::colour(1.0), usage::RAMP[5]);
-        assert_eq!(usage::colour(2.5), usage::RAMP[5], "past the limit is full");
-        assert_eq!(usage::colour(0.5), usage::RAMP[3]);
+        assert_eq!(usage::colour(0.0), usage::ramp()[0]);
+        assert_eq!(usage::colour(1.0), usage::ramp()[5]);
+        assert_eq!(
+            usage::colour(2.5),
+            usage::ramp()[5],
+            "past the limit is full"
+        );
+        assert_eq!(usage::colour(0.5), usage::ramp()[3]);
         let mut last = 0;
         for step in 0..=100 {
             let colour = usage::colour(f64::from(step) / 100.0);
-            let index = usage::RAMP.iter().position(|c| *c == colour).unwrap();
+            let index = usage::ramp().iter().position(|c| *c == colour).unwrap();
             assert!(index >= last, "the ramp never steps back");
             last = index;
         }
-        assert_eq!(usage::of(3.0, None), usage::NEUTRAL);
-        assert_eq!(usage::of(3.0, Some(0.0)), usage::NEUTRAL);
-        assert_eq!(usage::of(f64::NAN, Some(1.0)), usage::NEUTRAL);
-        assert_eq!(usage::of(4.0, Some(4.0)), usage::RAMP[5]);
+        assert_eq!(usage::of(3.0, None), usage::neutral());
+        assert_eq!(usage::of(3.0, Some(0.0)), usage::neutral());
+        assert_eq!(usage::of(f64::NAN, Some(1.0)), usage::neutral());
+        assert_eq!(usage::of(4.0, Some(4.0)), usage::ramp()[5]);
     }
 
     #[test]
@@ -517,13 +560,13 @@ mod tests {
                 fraction: None,
             }],
         };
-        let style = lossy.hued(usage::RAMP[4]);
-        assert_eq!(style.fg, Some(usage::RAMP[4]));
+        let style = lossy.hued(usage::ramp()[4]);
+        assert_eq!(style.fg, Some(usage::ramp()[4]));
         assert!(!style.add_modifier.contains(Modifier::DIM));
         assert!(style.add_modifier.contains(Modifier::UNDERLINED));
-        let line = figure_hued("3.2 GB", &lossy, usage::RAMP[4]);
+        let line = figure_hued("3.2 GB", &lossy, usage::ramp()[4]);
         assert!(line.spans.len() > 1, "the badge rides beside it");
-        let clean = Trust::clean().hued(usage::RAMP[0]);
+        let clean = Trust::clean().hued(usage::ramp()[0]);
         assert!(clean.add_modifier.is_empty());
     }
 

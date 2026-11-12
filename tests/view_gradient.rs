@@ -32,6 +32,49 @@ const FLOOR: f64 = 3.0;
 /// `usage::RAMP` (filed to the stream that owns `view/src/trust.rs`).
 const READS_ON_BOTH: [u8; 6] = [28, 64, 100, 136, 166, 160];
 
+#[test]
+fn interface_palette_remains_visible_on_dark_and_light_terminals() {
+    let accents = [
+        indexed(omn_view::theme::ACCENT),
+        indexed(omn_view::theme::BORDER),
+        indexed(omn_view::theme::TITLE),
+        indexed(omn_view::trust::palette::LOSS),
+        indexed(omn_view::trust::palette::TIME),
+        indexed(omn_view::trust::palette::REFUSED),
+        indexed(omn_view::trust::palette::LIVE),
+        indexed(omn_view::trust::palette::COST),
+        indexed(omn_view::trust::palette::BETTER),
+        indexed(omn_view::trust::palette::WORSE),
+    ];
+    for (name, background) in DARK.into_iter().chain(LIGHT) {
+        assert!(
+            below(&accents, background).is_empty(),
+            "{name}: {:?}",
+            below(&accents, background)
+        );
+    }
+}
+
+#[test]
+fn tokyo_night_matches_btop_and_remains_readable_on_its_background() {
+    let background = (0x1a, 0x1b, 0x26);
+    assert_eq!(omn_view::theme::TOKYO_ACCENT, Color::Rgb(0x7d, 0xcf, 0xff));
+    assert_eq!(omn_view::theme::TOKYO_BORDER, Color::Rgb(0x56, 0x5f, 0x89));
+    assert_eq!(omn_view::theme::TOKYO_TITLE, Color::Rgb(0xcf, 0xc9, 0xc2));
+    assert_eq!(usage::TOKYO_RAMP[0], Color::Rgb(0x9e, 0xce, 0x6a));
+    assert_eq!(usage::TOKYO_RAMP[2], Color::Rgb(0xe0, 0xaf, 0x68));
+    assert_eq!(usage::TOKYO_RAMP[5], Color::Rgb(0xf7, 0x76, 0x8e));
+    for color in usage::TOKYO_RAMP
+        .into_iter()
+        .chain([omn_view::theme::TOKYO_ACCENT, omn_view::theme::TOKYO_TITLE])
+    {
+        let Color::Rgb(r, g, b) = color else {
+            panic!("expected truecolor");
+        };
+        assert!(contrast((r, g, b), background) >= FLOOR, "{color:?}");
+    }
+}
+
 /// An index of the 256-colour palette as the RGB xterm gives it: the 16
 /// system colours are the terminal's own and not measured.
 fn rgb(index: u8) -> (u8, u8, u8) {

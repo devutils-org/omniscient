@@ -5,7 +5,7 @@
 //! over the run, the current value, the mean, the peak and the share of the
 //! machine, then the program's time split by state and the first suspect
 //! `omn latency` names (`docs/view/process.md`). The detail lives in the
-//! dedicated pages: `Enter` or a click on a line opens its page.
+//! dedicated pages: select a line and press `Enter` to open its page.
 //!
 //! A line reads only what the other views already ask for, and says what it
 //! could not read in place: a source refused with its reason, a source the
@@ -24,7 +24,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 use super::timebar::{self, Class, Verdict};
@@ -41,6 +41,7 @@ const NEEDS: &[Need] = &[];
 
 const KEYS: &[(&str, &str)] = &[
     ("↑↓ jk", "move between lines"),
+    ("gg/G", "first/last"),
     ("enter", "open the line's page"),
 ];
 
@@ -58,21 +59,21 @@ const EIGHTHS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇'
 
 /// The hue of a resource whose capacity is not known: neither free nor
 /// full, the one every view draws such a resource in.
-const NEUTRAL: Color = usage::NEUTRAL;
+fn neutral() -> Color {
+    usage::neutral()
+}
 
 /// The most a line's figures are given before its sparkline takes the rest
 /// of the width: a refusal's sentence longer than this is cut, not let push
 /// every sparkline back to its narrowest.
 const FIGURES: usize = 72;
 
-/// The most terminal rows one line's sparkline is drawn over.
-const TALLEST: usize = 12;
-
 #[derive(Default)]
 pub struct Process {
     /// The selected row: 0 is the header's cost, then the resources, then
     /// the suspect.
     selected: Option<usize>,
+    pending_g: bool,
     regions: Vec<Region>,
 }
 
@@ -146,7 +147,7 @@ impl Row {
                 self.figures = vec![
                     Span::styled(
                         format!("{} refused", refusal.source),
-                        Style::new().fg(palette::REFUSED),
+                        Style::new().fg(palette::refused()),
                     ),
                     dim_span(format!(": {}", refusal.reason)),
                 ];
@@ -215,7 +216,7 @@ impl Row {
     fn hue(&self, fill: Option<f64>) -> Color {
         match (self.neutral, fill) {
             (None, Some(fill)) => usage::colour(fill),
-            _ => NEUTRAL,
+            _ => neutral(),
         }
     }
 
@@ -297,41 +298,30 @@ impl View for Process {
     }
 
     fn draw(&mut self, frame: &mut Frame<'_>, area: Rect, ctx: &Ctx<'_>) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(crate::theme::border())
+            .title_style(crate::theme::title())
+            .title(" Process resources ");
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let area = inner;
         let width = area.width as usize;
-        let screen = screen_for(ctx, width);
+        // A stable column split: live values cannot resize the graphs.
+        let graph_share = if width < 80 { 15 } else { 30 };
+        let cells = width
+            .saturating_sub(LABEL + 8)
+            .min((width * graph_share / 100).clamp(1, 48));
+        let screen = screen_at(ctx, cells);
         let count = screen.rows.len() + 2;
         let selected = self.selected.unwrap_or(1).min(count - 1);
         self.selected = Some(selected);
         self.regions.clear();
-        // The header, two rules, the suspect, a blank and the notes are a
-        // row each; the resources share the rest, so the screen is filled
-        // top to bottom rather than drawn in its corner.
-        // A line with a sparkline grows; one with nothing drawn (a refusal,
-        // a GPU no kernel ran on) keeps one row, and the time's bar two.
-        let timed = screen
-            .rows
-            .iter()
-            .any(|row| row.held && row.heights.is_empty() && row.name == "Time");
-        let fixed = 5 + screen.notes.len() + usize::from(timed);
-        let spare = usize::from(area.height)
-            .saturating_sub(fixed)
-            .saturating_sub(screen.rows.len());
-        let growing = screen
-            .rows
-            .iter()
-            .filter(|row| !row.heights.is_empty())
-            .count()
-            .max(1);
-        let grown = (spare / growing).min(TALLEST - 1);
-        let tall = |row: &Row| {
-            if !row.heights.is_empty() {
-                1 + grown
-            } else if row.held && row.name == "Time" {
-                1 + grown.min(1)
-            } else {
-                1
-            }
-        };
+        // Keep compact, equal-height resource rows; a missing graph reserves
+        // the same space so arrivals never shift the rows.
+        let tall = if area.height >= 24 { 2 } else { 1 };
+        let separated = area.height >= 30;
         let mut lines: Vec<Line<'static>> = Vec::new();
         let mut regions = Vec::new();
         let mut place =
@@ -357,12 +347,27 @@ impl View for Process {
         }
         place(&mut lines, vec![Line::from(header)], Some(0));
         place(&mut lines, vec![rule(width)], None);
+        let header = format!(
+            " {:<label$} {:<graph$} │  Current / detail",
+            "RESOURCE",
+            "HISTORY",
+            label = LABEL - 2,
+            graph = cells
+        );
+        place(
+            &mut lines,
+            vec![Line::from(Span::styled(header, crate::theme::title()))],
+            None,
+        );
         for (index, row) in screen.rows.iter().enumerate() {
             place(
                 &mut lines,
-                draw_row(row, selected == index + 1, tall(row)),
+                draw_row(row, selected == index + 1, tall, width),
                 Some(index + 1),
             );
+            if separated && index + 1 < screen.rows.len() {
+                place(&mut lines, vec![rule(width)], None);
+            }
         }
         place(&mut lines, vec![rule(width)], None);
         let mut suspect = screen.suspect.clone();
@@ -370,13 +375,6 @@ impl View for Process {
             if let Some(first) = suspect.first_mut() {
                 first.style = first.style.add_modifier(Modifier::REVERSED);
             }
-        }
-        let used: usize = suspect.iter().map(|span| span.width()).sum();
-        let hint = "Enter/click → detail";
-        let hint_width = hint.chars().count();
-        if used + hint_width + 2 <= width {
-            suspect.push(Span::raw(" ".repeat(width - used - hint_width)));
-            suspect.push(dim_span(hint.to_owned()));
         }
         place(&mut lines, vec![Line::from(suspect)], Some(count - 1));
         place(&mut lines, vec![Line::default()], None);
@@ -390,14 +388,26 @@ impl View for Process {
     fn key(&mut self, key: KeyEvent, ctx: &Ctx<'_>) -> Action {
         let count = screen(ctx).rows.len() + 2;
         let at = self.selected.unwrap_or(1).min(count - 1);
+        let was_g = self.pending_g;
+        self.pending_g = key.code == KeyCode::Char('g');
         match key.code {
             KeyCode::Down | KeyCode::Char('j') => self.selected = Some((at + 1).min(count - 1)),
             KeyCode::Up | KeyCode::Char('k') => self.selected = Some(at.saturating_sub(1)),
-            KeyCode::Home => self.selected = Some(1),
+            KeyCode::Home | KeyCode::Char('g') if key.code == KeyCode::Home || was_g => {
+                self.selected = Some(1)
+            }
+            KeyCode::End | KeyCode::Char('G') => self.selected = Some(count - 1),
             KeyCode::Enter => return self.open(ctx),
             _ => {}
         }
         Action::None
+    }
+
+    fn enter_label(&self, ctx: &Ctx<'_>) -> Option<String> {
+        match self.open(ctx) {
+            Action::Goto { view, .. } => Some(format!("open {view}")),
+            _ => None,
+        }
     }
 
     fn keys(&self) -> &'static [(&'static str, &'static str)] {
@@ -410,6 +420,7 @@ impl View for Process {
 
     fn select(&mut self, id: usize, _ctx: &Ctx<'_>) -> Action {
         self.selected = Some(id);
+        self.pending_g = false;
         Action::None
     }
 }
@@ -1325,7 +1336,10 @@ fn header(
         ];
         let cost_at = spans.len();
         let mut spans = spans;
-        spans.push(Span::styled(omn_cost(data), Style::new().fg(palette::COST)));
+        spans.push(Span::styled(
+            omn_cost(data),
+            Style::new().fg(palette::cost()),
+        ));
         return (spans, cost_at);
     }
     let name = bar
@@ -1359,7 +1373,10 @@ fn header(
         Span::raw(format!("  {} · ", said.join(" · "))),
     ];
     let cost_at = spans.len();
-    spans.push(Span::styled(omn_cost(data), Style::new().fg(palette::COST)));
+    spans.push(Span::styled(
+        omn_cost(data),
+        Style::new().fg(palette::cost()),
+    ));
     (spans, cost_at)
 }
 
@@ -1393,7 +1410,7 @@ fn omn_cost(data: &Data) -> String {
 
 /// A line over `rows` terminal rows: its name and figures on the first, its
 /// sparkline over all of them.
-fn draw_row(row: &Row, selected: bool, rows: usize) -> Vec<Line<'static>> {
+fn draw_row(row: &Row, selected: bool, rows: usize, width: usize) -> Vec<Line<'static>> {
     let mut label = Style::new().add_modifier(Modifier::BOLD);
     if selected {
         label = label.add_modifier(Modifier::REVERSED);
@@ -1410,10 +1427,47 @@ fn draw_row(row: &Row, selected: bool, rows: usize) -> Vec<Line<'static>> {
                 Span::raw(" "),
                 Span::styled(format!("{name:<width$}", width = LABEL - 1), label),
             ];
+            let graph_width: usize = graph.iter().map(Span::width).sum();
             spans.extend(graph);
+            spans.push(Span::raw(" ".repeat(row.cells.saturating_sub(graph_width))));
+            spans.push(Span::styled(" │ ", crate::theme::border()));
+            let badges = row.trust.badges();
+            let badge_width: usize = badges.iter().map(Span::width).sum();
             if index == 0 {
-                spans.push(Span::raw("   "));
-                spans.extend(row.figures.iter().cloned());
+                let mut used: usize = spans.iter().map(Span::width).sum();
+                // In a compact one-line row keep room for quality badges.
+                let reserve = if rows == 1 && !badges.is_empty() {
+                    badge_width + 1
+                } else {
+                    0
+                };
+                let figure_limit = width.saturating_sub(reserve);
+                let figures_end = if !badges.is_empty() && row.figures.ends_with(&badges) {
+                    row.figures.len() - badges.len()
+                } else {
+                    row.figures.len()
+                };
+                for figure in &row.figures[..figures_end] {
+                    let figure_width = figure.width();
+                    if used + figure_width > figure_limit {
+                        let room = figure_limit.saturating_sub(used);
+                        if !row.held && room > 1 {
+                            let prefix: String = figure.content.chars().take(room - 1).collect();
+                            spans.push(Span::styled(format!("{prefix}…"), figure.style));
+                        } else if room > 0 {
+                            spans.push(Span::raw("…"));
+                        }
+                        break;
+                    }
+                    used += figure_width;
+                    spans.push(figure.clone());
+                }
+                if rows == 1 && !badges.is_empty() {
+                    spans.push(Span::raw(" "));
+                    spans.extend(badges);
+                }
+            } else if index == 1 && !badges.is_empty() {
+                spans.extend(badges);
             }
             Line::from(spans)
         })
@@ -1519,14 +1573,70 @@ mod tests {
     }
 
     #[test]
+    fn vim_jumps_go_to_first_and_last_process_rows() {
+        let data = recording();
+        let focus = Focus::default();
+        let ctx = Ctx {
+            data: &data,
+            against: None,
+            focus: &focus,
+        };
+        let mut view = Process::default();
+        view.key(KeyEvent::from(KeyCode::Char('G')), &ctx);
+        assert_eq!(view.selected, Some(screen(&ctx).rows.len() + 1));
+        view.key(KeyEvent::from(KeyCode::Char('g')), &ctx);
+        view.key(KeyEvent::from(KeyCode::Char('g')), &ctx);
+        assert_eq!(view.selected, Some(1));
+    }
+
+    #[test]
+    fn quality_badges_remain_visible_in_compact_and_wide_rows() {
+        for (width, height) in [(60, 18), (120, 40)] {
+            let mut app = App::new(recording());
+            app.open("process").unwrap();
+            let screen = snapshot::text(&snapshot::draw_app(&mut app, width, height));
+            let lines: Vec<_> = screen.lines().collect();
+            let cpu = lines
+                .iter()
+                .position(|line| line.starts_with("│ CPU "))
+                .unwrap();
+            let quality = if height >= 30 {
+                lines[cpu + 1]
+            } else {
+                lines[cpu]
+            };
+            assert!(quality.contains("~low det"), "{width}x{height}: {quality}");
+        }
+    }
+
+    #[test]
+    fn missing_measurements_do_not_move_resource_rows() {
+        let full = recording();
+        let mut empty = full.clone();
+        empty.run.results.clear();
+        empty.refused.clear();
+        let mut before = App::new(empty);
+        let mut after = App::new(full);
+        before.open("process").unwrap();
+        after.open("process").unwrap();
+        let before = snapshot::draw_app(&mut before, WIDTH, HEIGHT);
+        let after = snapshot::draw_app(&mut after, WIDTH, HEIGHT);
+        for label in [
+            " CPU", " Memory", " Disk", " Network", " GPU", " Energy", " Time",
+        ] {
+            assert_eq!(
+                snapshot::find(&before, label).map(|p| p.1),
+                snapshot::find(&after, label).map(|p| p.1),
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
     fn snapshot_on_the_process_workload() {
         let mut app = App::new(recording());
         app.cost = Cost::Snapshot;
-        assert_eq!(
-            name(&app),
-            "process",
-            "a run with a target opens on the process view"
-        );
+        app.open("process").unwrap();
         let buffer = snapshot::draw_app(&mut app, WIDTH, HEIGHT);
         snapshot::assert_snapshot("process--process-run", &buffer);
     }
@@ -1678,6 +1788,7 @@ mod tests {
         );
         for (index, page) in pages.iter().enumerate() {
             let mut app = App::new(recording());
+            app.open("process").unwrap();
             app.cost = Cost::Snapshot;
             snapshot::draw_app(&mut app, WIDTH, HEIGHT);
             app.key(KeyEvent::from(KeyCode::Char('k')));
@@ -1689,19 +1800,20 @@ mod tests {
             app.key(KeyEvent::from(KeyCode::Backspace));
             assert_eq!(name(&app), "process", "back from {page}");
         }
-        // By the mouse: a click selects the line, a second goes in.
+        // A click selects the line; Enter opens its destination.
         for (needle, page) in [
             (" Network", "flows"),
             (" Time", "timebar"),
             ("omn costs", "ledger"),
         ] {
             let mut app = App::new(recording());
+            app.open("process").unwrap();
             app.cost = Cost::Snapshot;
             let buffer = snapshot::draw_app(&mut app, WIDTH, HEIGHT);
             let (column, row) = snapshot::find(&buffer, needle).expect(needle);
             snapshot::click(&mut app, column + 1, row);
             snapshot::draw_app(&mut app, WIDTH, HEIGHT);
-            snapshot::click(&mut app, column + 1, row);
+            app.key(KeyEvent::from(KeyCode::Enter));
             assert_eq!(name(&app), page, "{needle}");
             snapshot::right_click(&mut app, 0, 0);
             assert_eq!(name(&app), "process");
@@ -1776,9 +1888,9 @@ mod tests {
     /// machine's capacity; a trust mark keeps the hue.
     #[test]
     fn usage_takes_the_gradient_by_the_capacity_and_trust_keeps_the_hue() {
-        assert_eq!(usage::colour(0.1), usage::RAMP[0]);
-        assert_eq!(usage::colour(0.6), usage::RAMP[3]);
-        assert_eq!(usage::colour(0.95), usage::RAMP[5]);
+        assert_eq!(usage::colour(0.1), usage::ramp()[0]);
+        assert_eq!(usage::colour(0.6), usage::ramp()[3]);
+        assert_eq!(usage::colour(0.95), usage::ramp()[5]);
 
         let mut data = recording();
         data.live = Some(Live {
@@ -1805,7 +1917,7 @@ mod tests {
         assert!(energy.text.contains("estimated"), "{}", energy.text);
         // A resource with no capacity keeps the neutral hue.
         let network = row(&screen, "Network");
-        assert_eq!(network.figures[0].style.fg, Some(NEUTRAL));
+        assert_eq!(network.figures[0].style.fg, Some(neutral()));
     }
 
     /// The lock the workload's main thread waits on is the timebar's lock
@@ -1926,21 +2038,21 @@ mod tests {
             let lines: Vec<&str> = text.lines().collect();
             let cpu = lines
                 .iter()
-                .position(|line| line.starts_with(" CPU "))
+                .position(|line| line.starts_with("│ CPU "))
                 .expect("the cpu line");
             let time = lines
                 .iter()
-                .position(|line| line.starts_with(" Time "))
+                .position(|line| line.starts_with("│ Time "))
                 .expect("the time line");
             let last = lines
                 .iter()
                 .rposition(|line| line.contains("in one hue"))
                 .expect("the notes");
-            // The frame's help line is the last row; the notes end above it,
-            // at most a row or two left over from the division.
+            // The outer border and fixed resource slots may leave unused
+            // space; notes must still remain inside the terminal.
             assert!(
-                last + 2 + 7 >= usize::from(height) || height <= 24,
-                "{width}x{height} live {live}: the notes end at row {last}"
+                last < usize::from(height) - 1,
+                "{width}x{height} live {live}"
             );
             assert!(time > cpu, "{width}x{height}");
             if height > 24 {
@@ -1953,16 +2065,18 @@ mod tests {
                     "{width}x{height}: the lines keep one row each"
                 );
             }
-            let graph = |line: &str| {
+            let split = |line: &str| {
                 line.chars()
-                    .skip(LABEL)
-                    .take_while(|c| !c.is_ascii_alphanumeric())
-                    .count()
+                    .enumerate()
+                    .filter(|(_, c)| *c == '│')
+                    .nth(1)
+                    .map(|(index, _)| index)
             };
-            let drawn = graph(lines[time]);
-            assert!(
-                drawn + LABEL + 3 + FIGURES + 1 >= usize::from(width),
-                "{width}x{height}: the time bar is {drawn} cells wide"
+            let cpu_split = split(lines[cpu]);
+            let time_split = split(lines[time]);
+            assert_eq!(
+                cpu_split, time_split,
+                "{width}x{height}: graph column moves"
             );
         }
     }

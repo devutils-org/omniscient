@@ -1237,7 +1237,7 @@ impl Lanes {
                 label_style = label_style.add_modifier(Modifier::BOLD | Modifier::REVERSED);
             } else if Some(lane.id()) == waker {
                 label_style = label_style
-                    .fg(palette::ACCENT)
+                    .fg(palette::accent())
                     .add_modifier(Modifier::UNDERLINED);
             }
             buffer.set_stringn(
@@ -1364,7 +1364,7 @@ impl Lanes {
         if let Some(column) = cursor_column {
             let marker = format!("▲ {}", at(model, cursor));
             let x = (x_time + column).min(area.x + area.width - marker.chars().count() as u16);
-            buffer.set_string(x, y, marker, Style::new().fg(palette::ACCENT));
+            buffer.set_string(x, y, marker, Style::new().fg(palette::accent()));
         }
         y += 1;
         Paragraph::new(detail_lines)
@@ -1439,7 +1439,7 @@ fn status_line(model: &Model) -> Line<'static> {
             .chain(model.gpu_refused.iter())
             .any(|refusal| refusal.source == held.source)
         {
-            spans.push(Span::styled("refused", Style::new().fg(palette::REFUSED)));
+            spans.push(Span::styled("refused", Style::new().fg(palette::refused())));
         } else {
             spans.push(Span::styled(
                 if held.emits.is_empty() {
@@ -1480,7 +1480,7 @@ fn held_lines(model: &Model) -> Vec<Line<'static>> {
             {
                 spans.push(Span::styled(
                     "refused: its reason is below",
-                    Style::new().fg(palette::REFUSED),
+                    Style::new().fg(palette::refused()),
                 ));
             } else if held.emits.is_empty() {
                 spans.push(Span::styled(
@@ -1923,11 +1923,12 @@ impl View for Lanes {
     }
 
     fn draw(&mut self, frame: &mut Frame<'_>, area: Rect, ctx: &Ctx<'_>) {
-        let block = Block::new().borders(Borders::ALL).title(format!(
-            " {} -- {} ",
-            self.name(),
-            self.title()
-        ));
+        let block = Block::new()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(crate::theme::border())
+            .title_style(crate::theme::title())
+            .title(format!(" {} -- {} ", self.name(), self.title()));
         let inner = block.inner(area);
         frame.render_widget(block, area);
         self.regions.clear();
@@ -1946,6 +1947,16 @@ impl View for Lanes {
             }
         }
         Action::None
+    }
+
+    fn enter_label(&self, ctx: &Ctx<'_>) -> Option<String> {
+        let (_, model) = self.cache.as_ref()?;
+        let selected = self.selected.as_ref()?;
+        model
+            .lanes(ctx.focus)
+            .iter()
+            .any(|lane| &lane.id() == selected)
+            .then(|| "focus lane".to_owned())
     }
 
     fn key(&mut self, key: KeyEvent, ctx: &Ctx<'_>) -> Action {
@@ -1968,6 +1979,8 @@ impl View for Lanes {
         let mut to = None;
         let mut window = self.window;
         match key.code {
+            KeyCode::Home => selected = lanes.first().map(|lane| lane.id()),
+            KeyCode::End => selected = lanes.last().map(|lane| lane.id()),
             KeyCode::Up | KeyCode::Char('k') => {
                 if let Some(index) = index.filter(|index| *index > 0) {
                     selected = Some(lanes[index - 1].id());
@@ -1989,7 +2002,7 @@ impl View for Lanes {
             KeyCode::Char(']') => {
                 to = lane.and_then(|lane| lane.edges().into_iter().find(|edge| *edge > cursor))
             }
-            KeyCode::Char('z') | KeyCode::Char('+') => {
+            KeyCode::Char('z' | '+' | '=') => {
                 let width = ((high - low) / 2).max(10_000);
                 let low = cursor
                     .saturating_sub(width / 2)
@@ -2065,7 +2078,7 @@ impl View for Lanes {
             ("↑/↓", "lane"),
             ("h/l H/L", "cursor"),
             ("[/]", "prev/next change"),
-            ("z/Z", "zoom"),
+            ("+/-", "zoom"),
             ("w", "to waker"),
             ("enter", "focus"),
         ]

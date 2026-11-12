@@ -124,7 +124,7 @@ pub(crate) fn top_replay(
                 .map(|view| view.name().to_owned())
                 .collect(),
             (_, Some(name)) => vec![name.clone()],
-            (None, None) => vec![omn_view::views::registry()[0].name().to_owned()],
+            (None, None) => vec!["overview".to_owned()],
         };
         let mut out = std::io::stdout().lock();
         for name in names {
@@ -436,12 +436,8 @@ pub(crate) fn top_live(catalog: &Catalog, args: &TopArgs) -> anyhow::Result<Exit
             None
         }
         Some(screen) => {
-            // A target and no `--view`: the system view for that one process
-            // is the first screen; the machine's is, without one.
-            let start_on = args.view.clone().or_else(|| {
-                (args.file.is_none() && (!args.program.is_empty() || !args.pid.is_empty()))
-                    .then(|| "process".to_owned())
-            });
+            // App::new chooses the overview; only an explicit --view overrides it.
+            let start_on = args.view.clone();
             let opening = opening.clone();
             let quit = std::sync::Arc::clone(&quit);
             let handover = std::sync::Arc::clone(&handover);

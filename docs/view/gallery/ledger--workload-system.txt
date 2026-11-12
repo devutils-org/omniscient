@@ -1,6 +1,6 @@
 omn top │ fixture workload-system │ 2.00s                         view: snapshot │ collectors ≥14.6% │ target 92.6% cpu
- 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
-┌ ledger -- what task 2621722 and 2 more cost over 2.00s of wall-clock ────────────────────────────────────────────────┐
+ [F] Families  [I] Guide  1 system 2 flame 3 ledger 4 request 5 timebar 6 heatmap 7 lanes 8 wake 9 flows 0 process
+╭ ledger -- what task 2621722 and 2 more cost over 2.00s of wall-clock ────────────────────────────────────────────────╮
 │  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST               │
 │▸ cpu time        2.07s on cpu     104% of one cpu           ▂▂▂▅▅▅█████████▇▄▄▃▁▁▁▁▁    ≥23.6ms  ~low det            │
 │    2621722 system…     1.04s  ██████       50.3%                                                                     │
@@ -27,14 +27,14 @@ omn top │ fixture workload-system │ 2.00s                         view: snap
 │  GPU memory      0B peak          of 655MiB on the device   ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁     1.24ms                      │
 │  GPU time        0ns on GPU       0 kernels and copies      no series kept               ≥312µs  12 late degraded    │
 │  energy          102J machine     51.2W on average          ▆▆▆██████▇▇▇▆▆▆▅▄▄▄▄▄       ≥45.7µs                      │
-│    ≈ the target's      76.8J  an estimate, not a measurement: its share of the machine's busy cpu, 2.07s of 2.76s    │
-│                                                                                                                      │
-│  to know all of this: ≥169ms of omn's cpu, ≥8.16% of what the target spent                                           │
-│    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which           │
-│ cpu time -- ↑/↓ another line ────────────────────────────────────────────────────────────────────────────────────────│
+│ cpu time · ↑↓ resource · PgUp/Dn detail ─────────────────────────────────────────────────────────────────────────────│
 │cpu.oncpu_time via bpf:raw_tp -- cpu time, per thread                                                                 │
 │· the source is not reproducible between two runs of the same workload                                                │
 │· to know it: 23.6ms of omn's cpu, and unknown inside the target -- the kernel is not timing eBPF programs on this    │
 │run: `kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl       │
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ line  t next task  enter the view behind the line
+│kernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable                 │
+│· own account: the launched program's cpu time and its descendants' (the scheduler's own nanoseconds, or clock ticks  │
+│where it could not be read, of 2621722 and of every process it started while they ran, its orphans adopted by omn     │
+│included, and getrusage(RUSAGE_CHILDREN) in microseconds once it was reaped, the helpers omn ran itself left out)     │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+[Enter] open flame  q quit  F families  I guide  ? help  ↑/↓ line  PgUp/Dn scroll detail  t next task  enter the view be

@@ -1,6 +1,6 @@
 omn top │ fixture workload-flows │ 993ms                          view: snapshot │ collectors ≥16.4% │ target 5.63% cpu
- 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
-┌ ledger -- what task 2621407 and 1 more cost over 993ms of wall-clock ────────────────────────────────────────────────┐
+ [F] Families  [I] Guide  1 system 2 flame 3 ledger 4 request 5 timebar 6 heatmap 7 lanes 8 wake 9 flows 0 process
+╭ ledger -- what task 2621407 and 1 more cost over 993ms of wall-clock ────────────────────────────────────────────────╮
 │  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST               │
 │▸ cpu time        73.2ms on cpu    7.37% of one cpu          ██████▆▅▅▅▅▅▅▁▁▁▁▁▁▁▁▁▁▁    ≥13.9ms  ~low det            │
 │    2621407 flows-…    39.0ms  ██████       53.2%                                                                     │
@@ -27,7 +27,7 @@ omn top │ fixture workload-flows │ 993ms                          view: snap
 │                                                                                                                      │
 │  to know all of this: ≥131ms of omn's cpu, ≥180% of what the target spent                                            │
 │    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which           │
-│ cpu time -- ↑/↓ another line ────────────────────────────────────────────────────────────────────────────────────────│
+│ cpu time · ↑↓ resource · PgUp/Dn detail ─────────────────────────────────────────────────────────────────────────────│
 │cpu.oncpu_time via bpf:raw_tp -- cpu time, per thread                                                                 │
 │· the source is not reproducible between two runs of the same workload                                                │
 │· to know it: 13.9ms of omn's cpu, and unknown inside the target -- the kernel is not timing eBPF programs on this    │
@@ -36,5 +36,5 @@ omn top │ fixture workload-flows │ 993ms                          view: snap
 │· own account: the launched program's cpu time and its descendants' (the scheduler's own nanoseconds, or clock ticks  │
 │where it could not be read, of 2621407 and of every process it started while they ran, its orphans adopted by omn     │
 │included, and getrusage(RUSAGE_CHILDREN) in microseconds once it was reaped, the helpers omn ran itself left out)     │
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ line  t next task  enter the view behind the line
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+[Enter] open flame  q quit  F families  I guide  ? help  ↑/↓ line  PgUp/Dn scroll detail  t next task  enter the view be

@@ -1,20 +1,20 @@
 omn top │ fixture http-server │ 2.85s        view: snapshot
- 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatma
- python3  pid 2618476 · 4 threads · 2.84s · omn costs ≥19.9%
-────────────────────────────────────────────────────────────
- CPU     ▇█▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▆   0.890 cores    avg 0.982
- Memory  ▅▅██████████████████████   25.2MiB        +3.16MiB/
- Disk                               no block request of the
- Network ▁█▇▇▃▆▇▇▇█▇▇▇▇▄▅▇█▇▇▇█▇▂   ↓ 635B/s       ↑ 9.97MiB
- GPU                                no kernel launched   VRA
- Energy  ▇█▇▇▇▇▇▇▇▇▇▇▇████▇▇▇▇▇▇▇   49.6 W         avg 53.5
- Time    █░░░░░░░░░░░░░░░░░░░░░░░   sleep 96.7%   on cpu 2.2
-────────────────────────────────────────────────────────────
-▶ suspect: sleep (blocked: sleeping)  96.7%
-
-CPU in one hue: the machine's cores are not in the recording
-Memory in one hue: the machine's memory is not in the record
-Network in one hue: a link's speed is not known
-Energy in one hue: energy has no capacity
-
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓ jk
+ [F] Families  [I] Guide  1 2 3 4 5 6 7 8 9 0  overview
+ Target resources
+ Select a family · Enter opens it · 1 refused sources
+╭ › CPU ───────────────────────────────────────────────────╮
+│0.834 cores    avg 0.982   peak 1.21   …                  │
+╰──────────────────────────────────────────────────────────╯
+╭   Memory ────────────────────────────────────────────────╮
+│25.2MiB        +3.16MiB/s   peak 26.2MiB                  │
+╰──────────────────────────────────────────────────────────╯
+╭   Disk ──────────────────────────────────────────────────╮
+│no block request of the process                           │
+╰──────────────────────────────────────────────────────────╯
+╭   Network ───────────────────────────────────────────────╮
+│↓ 635B/s       ↑ 9.97MiB/s   0 retrans (machine)  ~low det│
+╰──────────────────────────────────────────────────────────╯
+╭   GPU ───────────────────────────────────────────────────╮
+│no kernel launched   VRAM 0B                              │
+╰──────────────────────────────────────────────────────────╯
+[Enter] open CPU  q quit  F families  I guide  ? help  hjkl/

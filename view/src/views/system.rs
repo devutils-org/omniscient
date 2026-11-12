@@ -131,7 +131,7 @@ const KEYS: &[(&str, &str)] = &[
     ("↑/↓", "process"),
     ("enter", "its ledger"),
     ("s", "sort"),
-    ("i", "idle devices"),
+    ("i", "show/hide idle"),
 ];
 
 /// What the process list can be sorted by, in the order `s` steps through.
@@ -240,8 +240,9 @@ impl View for System {
             },
             ..area
         };
-        let [list, corner] = Layout::horizontal([
+        let [list, _, corner] = Layout::horizontal([
             Constraint::Min(0),
+            Constraint::Length(u16::from(area.width >= 80)),
             Constraint::Length(34.min(area.width / 3)),
         ])
         .areas(bottom);
@@ -256,6 +257,14 @@ impl View for System {
             .and_then(|key| procs.rows.iter().position(|row| row.key() == key));
         let last = procs.rows.len().saturating_sub(1);
         match key.code {
+            KeyCode::Home => {
+                self.selected = procs.rows.first().map(Proc::key);
+                Action::None
+            }
+            KeyCode::End => {
+                self.selected = procs.rows.last().map(Proc::key);
+                Action::None
+            }
             KeyCode::Down | KeyCode::Char('j') => {
                 let next = index.map_or(0, |index| (index + 1).min(last));
                 self.selected = procs.rows.get(next).map(Proc::key);
@@ -295,6 +304,10 @@ impl View for System {
         }
     }
 
+    fn enter_label(&self, _: &Ctx<'_>) -> Option<String> {
+        self.selected.map(|_| "open ledger".to_owned())
+    }
+
     fn keys(&self) -> &'static [(&'static str, &'static str)] {
         KEYS
     }
@@ -317,7 +330,7 @@ pub fn view() -> Box<dyn View> {
         selected: None,
         sort: 0,
         shown: Vec::new(),
-        idle: false,
+        idle: true,
         regions: Vec::new(),
     })
 }
@@ -1217,7 +1230,12 @@ fn panel<'a>(name: &str, note: &str, trust: Option<&Trust>) -> Block<'a> {
     if !note.is_empty() {
         title.push(Span::styled(format!("{note} "), dim()));
     }
-    let mut block = Block::new().borders(Borders::ALL).title(Line::from(title));
+    let mut block = Block::new()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(crate::theme::border())
+        .title_style(crate::theme::title())
+        .title(Line::from(title));
     if let Some(trust) = trust {
         let badges = trust.badges();
         if !badges.is_empty() {
@@ -1392,8 +1410,10 @@ impl<'a> Strips<'a> {
             dim(),
         ));
         self.lines.push(boxed(axis, self.inner));
-        self.lines
-            .push(Line::from(format!("└{}┘", "─".repeat(self.inner))));
+        self.lines.push(Line::from(Span::styled(
+            format!("╰{}╯", "─".repeat(self.inner)),
+            crate::theme::border(),
+        )));
         Machine {
             lines: self.lines,
             sections: self.sections,
@@ -1405,7 +1425,7 @@ impl<'a> Strips<'a> {
     /// `├ disk  bytes moved ───── ~low det ┤`.
     fn section(&mut self, name: &str, note: &str, trust: Option<&Trust>) {
         let (open, close) = if self.lines.is_empty() {
-            ("┌", "┐")
+            ("╭", "╮")
         } else {
             self.sections.push((name.to_owned(), self.lines.len()));
             ("├", "┤")
@@ -1416,11 +1436,11 @@ impl<'a> Strips<'a> {
             right.extend(badges);
             right.push(Span::raw(" "));
         }
-        right.push(Span::raw(close));
+        right.push(Span::styled(close, crate::theme::border()));
         let right_width: usize = right.iter().map(Span::width).sum();
         let mut left = vec![
-            Span::raw(format!("{open} ")),
-            Span::styled(name.to_owned(), Style::new().add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{open} "), crate::theme::border()),
+            Span::styled(name.to_owned(), crate::theme::title()),
             Span::raw(" "),
         ];
         if !note.is_empty() {
@@ -1434,8 +1454,9 @@ impl<'a> Strips<'a> {
             left
         };
         let used: usize = spans.iter().map(Span::width).sum();
-        spans.push(Span::raw(
+        spans.push(Span::styled(
             "─".repeat(total.saturating_sub(used + right_width)),
+            crate::theme::border(),
         ));
         spans.extend(right);
         self.lines.push(Line::from(spans));
@@ -1457,7 +1478,7 @@ impl<'a> Strips<'a> {
         let text = match held {
             Some(Held::Refused(refusal)) => Span::styled(
                 format!("{} refused: {}", refusal.source, refusal.reason),
-                Style::new().fg(palette::REFUSED),
+                Style::new().fg(palette::refused()),
             ),
             _ => Span::styled("not in this run", dim()),
         };
@@ -1490,7 +1511,7 @@ impl<'a> Strips<'a> {
         );
         // A share of the whole machine: its capacity is one.
         let whole_machine = Some(1.0);
-        let style = trust.hued(usage::NEUTRAL);
+        let style = trust.hued(usage::neutral());
         let top = ceiling(track.peak());
         let cells = self.axis.cells(&track.points, self.chart);
         let name = |word: &str| Span::styled(format!("{word:<5}"), dim());
@@ -1674,7 +1695,7 @@ impl<'a> Strips<'a> {
                     let half = (error as f64 / self.axis.span_ns as f64 * self.chart as f64).round()
                         as usize;
                     let cells = (2 * half + 1).clamp(3, self.chart.max(3));
-                    let time = Style::new().fg(palette::TIME);
+                    let time = Style::new().fg(palette::time());
                     self.row(
                         dim_label("when"),
                         vec![Span::styled(format!("├{}┤", "─".repeat(cells - 2)), time)],
@@ -1754,7 +1775,7 @@ impl<'a> Strips<'a> {
         let text = match held {
             Some(Held::Refused(refusal)) => Span::styled(
                 format!("refused: {}", refusal.reason),
-                Style::new().fg(palette::REFUSED),
+                Style::new().fg(palette::refused()),
             ),
             _ => Span::styled("not in this run", dim()),
         };
@@ -1801,7 +1822,7 @@ impl<'a> Strips<'a> {
         // figure that is the target's rather than the machine's.
         if let Some(Held::Served(rss, rss_trust, _)) = on_target(self.data, "mem.rss") {
             // The machine's memory is not in the run: one neutral hue.
-            let rss_style = rss_trust.hued(usage::NEUTRAL);
+            let rss_style = rss_trust.hued(usage::neutral());
             let rss_tracks = self.tracks_of(&rss);
             let several = rss_tracks.len() > 1;
             for track in rss_tracks {
@@ -1855,7 +1876,7 @@ impl<'a> Strips<'a> {
              events only"
         };
         self.section("power", &unlabelled(note, scope), Some(&trust));
-        let style = trust.hued(usage::NEUTRAL);
+        let style = trust.hued(usage::neutral());
         let top = all.iter().map(Track::peak).fold(0.0, f64::max);
         for track in &all {
             if let Some(most) = track.tangled {
@@ -1921,7 +1942,7 @@ impl<'a> Strips<'a> {
             )
         };
         self.section(what.name, &unlabelled(&note, assumed), Some(&trust));
-        let style = trust.hued(usage::NEUTRAL);
+        let style = trust.hued(usage::neutral());
         // One scale for every row, so two devices compare by height.
         let top = all.iter().map(Track::peak).fold(0.0, f64::max);
         let idle: Vec<String> = all
@@ -2025,7 +2046,7 @@ impl Machine {
                         left.len(),
                         left.join(" ")
                     ),
-                    Style::new().fg(palette::LOSS),
+                    Style::new().fg(palette::loss()),
                 ),
             ],
             inner,
@@ -2045,9 +2066,9 @@ impl Machine {
 
 /// A line of the box: its content between two borders.
 fn boxed(spans: Vec<Span<'static>>, inner: usize) -> Line<'static> {
-    let mut line = vec![Span::raw("│")];
+    let mut line = vec![Span::styled("│", crate::theme::border())];
     line.extend(fit(spans, inner));
-    line.push(Span::raw("│"));
+    line.push(Span::styled("│", crate::theme::border()));
     Line::from(line)
 }
 
@@ -2531,9 +2552,9 @@ impl System {
                 ctx.focus.tid == Some(row.tid)
             };
             let marker = if chosen {
-                Span::styled("▶", Style::new().fg(palette::ACCENT))
+                Span::styled("▶", Style::new().fg(palette::accent()))
             } else if focused {
-                Span::styled("●", Style::new().fg(palette::ACCENT))
+                Span::styled("●", Style::new().fg(palette::accent()))
             } else {
                 Span::raw(" ")
             };
@@ -2794,9 +2815,12 @@ pub fn batch(data: &Data, sort: &str) -> Result<String, String> {
 /// What each of this view's collectors cost, as a share of one cpu over its
 /// window: what drawing these panels asked of the machine.
 fn draw_cost(frame: &mut Frame<'_>, area: Rect, data: &Data) {
-    let style = Style::new().fg(palette::COST);
+    let style = Style::new().fg(palette::cost());
     let block = Block::new()
         .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(crate::theme::border())
+        .title_style(crate::theme::title())
         .border_style(style)
         .title(Span::styled(" cost, share of one cpu ", style));
     let inner = block.inner(area);
@@ -2957,14 +2981,31 @@ mod tests {
         ] {
             assert!(screen.contains(panel), "no {panel:?} in\n{screen}");
         }
-        // The busiest interface listed, the idle ones folded into one line.
+        // Idle devices are expanded by default; i can fold them.
         assert!(screen.contains("wlan0"), "{screen}");
-        assert!(screen.contains("moved nothing"), "{screen}");
+        assert!(
+            screen.contains("docker0") || screen.contains("tailscale"),
+            "{screen}"
+        );
         // The process list's source is served on this run (per thread, the
         // eBPF backend): the busiest tasks listed by cpu, the rest counted.
         assert!(!screen.contains("cpu.oncpu_time refused"), "{screen}");
         assert!(screen.contains("by cpu"), "{screen}");
         assert!(screen.contains(" more "), "{screen}");
+    }
+
+    #[test]
+    fn idle_devices_are_visible_by_default_and_can_be_folded() {
+        let mut app = crate::app::App::new(fixture("machine"));
+        app.open("system").unwrap();
+        let initial = text(&crate::snapshot::draw_app(&mut app, 160, 48));
+        assert!(initial.contains("docker0"), "{initial}");
+        app.key(KeyEvent::from(KeyCode::Char('i')));
+        let folded = text(&crate::snapshot::draw_app(&mut app, 160, 48));
+        assert!(folded.contains("moved nothing"), "{folded}");
+        app.key(KeyEvent::from(KeyCode::Char('i')));
+        let expanded = text(&crate::snapshot::draw_app(&mut app, 160, 48));
+        assert!(expanded.contains("docker0"), "{expanded}");
     }
 
     #[test]
@@ -2995,7 +3036,7 @@ mod tests {
         let cpu_cells: Vec<_> = (cpu + 1..cpu + 4).flat_map(glyphs).collect();
         assert!(!cpu_cells.is_empty());
         assert!(
-            cpu_cells.iter().all(|fg| usage::RAMP.contains(fg)),
+            cpu_cells.iter().all(|fg| usage::ramp().contains(fg)),
             "{cpu_cells:?}"
         );
         // A network's bytes have no capacity the run knows: one hue.
@@ -3003,7 +3044,7 @@ mod tests {
         let net_cells: Vec<_> = (net + 1..net + 3).flat_map(glyphs).collect();
         assert!(!net_cells.is_empty());
         assert!(
-            net_cells.iter().all(|fg| *fg == usage::NEUTRAL),
+            net_cells.iter().all(|fg| *fg == usage::neutral()),
             "{net_cells:?}"
         );
         assert!(text(&buffer).contains("speed unknown"));
@@ -3255,7 +3296,7 @@ mod tests {
         );
         assert!(screen.contains("network"), "{screen}");
         assert!(screen.contains("a cell is"), "{screen}");
-        assert!(screen.contains("└──"), "{screen}");
+        assert!(screen.contains("╰──"), "{screen}");
         // Tall enough, nothing is left out.
         let screen = screen_of_height(60);
         assert!(!screen.contains("left out"), "{screen}");

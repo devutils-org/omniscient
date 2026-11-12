@@ -23,6 +23,7 @@ pub mod feed;
 pub mod model;
 pub mod snapshot;
 pub mod term;
+pub mod theme;
 pub mod trust;
 pub mod units;
 pub mod views;

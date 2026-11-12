@@ -166,19 +166,18 @@ impl Class {
         }
     }
 
-    /// Sixteen-colour names only, as the trust palette: the terminal's theme
-    /// decides what they look like.
+    /// State colours use the selected theme; glyphs also distinguish states.
     pub fn colour(self) -> Color {
         match self {
-            Class::OnCpu => Color::Green,
-            Class::RunQueue => Color::Magenta,
-            Class::Lock => Color::Red,
-            Class::Io => Color::Blue,
-            Class::Blocked => Color::Blue,
-            Class::Child => Color::LightMagenta,
-            Class::Network => Color::Cyan,
-            Class::Sleep => Color::Gray,
-            Class::Other => Color::DarkGray,
+            Class::OnCpu => crate::theme::choose(Color::Rgb(158, 206, 106), Color::Green),
+            Class::RunQueue => crate::theme::choose(Color::Rgb(187, 154, 247), Color::Magenta),
+            Class::Lock => crate::theme::choose(Color::Rgb(247, 118, 142), Color::Red),
+            Class::Io => crate::theme::choose(Color::Rgb(122, 162, 247), Color::Blue),
+            Class::Blocked => crate::theme::choose(Color::Rgb(122, 162, 247), Color::Blue),
+            Class::Child => crate::theme::choose(Color::Rgb(187, 154, 247), Color::LightMagenta),
+            Class::Network => crate::theme::choose(Color::Rgb(125, 207, 255), Color::Cyan),
+            Class::Sleep => crate::theme::choose(Color::Rgb(169, 177, 214), Color::Gray),
+            Class::Other => crate::theme::choose(Color::Rgb(86, 95, 137), Color::DarkGray),
         }
     }
 
@@ -1562,7 +1561,7 @@ fn segments(bar: &Bar, dims: bool) -> Vec<Segment> {
         if let Some(upper) = part.upper {
             out.push(Segment {
                 glyph: '▒',
-                style: dimmed(Style::new().fg(palette::LOSS)),
+                style: dimmed(Style::new().fg(palette::loss())),
                 amount: upper - amount,
                 label: None,
             });
@@ -1741,7 +1740,7 @@ impl Timebar {
             if let Some(refusal) = ctx.data.refused.iter().find(|r| r.label == label) {
                 line.push(Span::styled(
                     format!("refused: {}", refusal.reason),
-                    Style::new().fg(palette::REFUSED),
+                    Style::new().fg(palette::refused()),
                 ));
             } else if held.is_empty() {
                 line.push(Span::styled("not in this run", dim()));
@@ -1761,7 +1760,7 @@ impl Timebar {
             for text in wrap(&format!("Not drawn: {why}."), width, "", "  ") {
                 lines.push(Line::from(Span::styled(
                     text,
-                    Style::new().fg(palette::REFUSED),
+                    Style::new().fg(palette::refused()),
                 )));
             }
         }
@@ -2014,6 +2013,22 @@ impl View for Timebar {
         NEEDS
     }
 
+    fn enter_label(&self, ctx: &Ctx<'_>) -> Option<String> {
+        let sheets = sheets(ctx.data);
+        let sheet = sheets.get(self.sheet.min(sheets.len().saturating_sub(1)))?;
+        let (visible, _) = Self::visible(sheet, ctx.focus);
+        let bar = visible
+            .get(self.selected.min(visible.len().saturating_sub(1)))
+            .map(|index| &sheet.bars[*index])?;
+        if bar.request.is_some() {
+            Some("open request".to_owned())
+        } else if bar.tid.is_some() {
+            Some("open lanes".to_owned())
+        } else {
+            None
+        }
+    }
+
     fn keys(&self) -> &'static [(&'static str, &'static str)] {
         &[
             ("↑↓", "bar"),
@@ -2032,6 +2047,8 @@ impl View for Timebar {
         let sheet = &sheets[self.sheet];
         let (visible, _) = Self::visible(sheet, ctx.focus);
         match key.code {
+            KeyCode::Home => self.selected = 0,
+            KeyCode::End => self.selected = visible.len().saturating_sub(1),
             KeyCode::Up | KeyCode::Char('k') => self.selected = self.selected.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => {
                 self.selected = (self.selected + 1).min(visible.len().saturating_sub(1))
@@ -2084,6 +2101,9 @@ impl View for Timebar {
         self.regions.clear();
         let block = Block::new()
             .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(crate::theme::border())
+            .title_style(crate::theme::title())
             .title(format!(" timebar -- {} ", self.title()));
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -2113,7 +2133,7 @@ impl View for Timebar {
         // The heading: which split, what a bar's whole is.
         let mut lines: Vec<Line<'static>> = Vec::new();
         let mut heading = vec![
-            Span::styled(sheet.id.clone(), bold().fg(palette::ACCENT)),
+            Span::styled(sheet.id.clone(), bold().fg(palette::accent())),
             Span::styled(
                 format!(
                     "  one bar per {}, whole: {}",
@@ -2140,7 +2160,7 @@ impl View for Timebar {
                 } else {
                     format!("  focus {}: not among these bars", ctx.focus.describe())
                 },
-                Style::new().fg(palette::ACCENT),
+                Style::new().fg(palette::accent()),
             ));
         }
         lines.push(Line::from(heading));
@@ -2208,7 +2228,7 @@ impl View for Timebar {
             let one = &sheet.bars[index];
             let picked = shown == self.selected;
             let style = if picked {
-                bold().fg(palette::ACCENT)
+                bold().fg(palette::accent())
             } else {
                 Style::new()
             };
@@ -2294,7 +2314,7 @@ impl View for Timebar {
             legend.push(Span::raw(format!(" {}   ", class.short())));
         }
         if bracket {
-            legend.push(Span::styled("▒", Style::new().fg(palette::LOSS)));
+            legend.push(Span::styled("▒", Style::new().fg(palette::loss())));
             legend.push(Span::raw(" bracketed   "));
         }
         if unread {

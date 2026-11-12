@@ -1,6 +1,6 @@
 omn top │ fixture cpython-hot-heavier │ 7.93s                     view: snapshot │ collectors ≥8.12% │ target 95.9% cpu
- 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
-┌ flows -- where the bytes went: process to socket to interface, process to file to device ────────────────────────────┐
+ [F] Families  [I] Guide  1 system 2 flame 3 ledger 4 request 5 timebar 6 heatmap 7 lanes 8 wake 9 flows 0 process
+╭ flows -- where the bytes went: process to socket to interface, process to file to device ────────────────────────────╮
 │pid 2627262 over 7.93s   10.7KiB written, 484KiB read   █ out █ in █ the machine's                                    │
 │ network · net.socket bpf:fentry ~low det degraded x3 · net.bytes fs:proc ~low det degraded ──────────────────────────│
 │         thread             socket                                             stack         interface, the machine's │
@@ -36,5 +36,5 @@ omn top │ fixture cpython-hot-heavier │ 7.93s                     view: snap
 │descriptors 495KiB -> devices 12.0MiB · 2 devices idle · no ratio: a descriptor may be a socket or a pipe, whose bytes│
 │▶ descriptor 4 of process 2627262, which may be a file, a pipe or a socket: 428KiB read in 59 calls, 54.0KiB/s        │
 │pid 2627262, thread 2627262 -- enter narrows every view to it                                                         │
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ socket or file  enter focus its thread
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+[Enter] focus thread  q quit  F families  I guide  ? help  ↑/↓ socket or file  enter focus its thread

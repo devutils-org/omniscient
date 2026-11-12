@@ -1,40 +1,40 @@
 omn top │ fixture workload-flame │ 2.05s                          view: snapshot │ collectors ≥13.2% │ target 61.6% cpu
- 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
+ [F] Families  [I] Guide  1 system 2 flame 3 ledger 4 request 5 timebar 6 heatmap 7 lanes 8 wake 9 flows 0 process
  flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference ────────────────────────────
 on cpu: 1.40k · hottest own py::burn:/omniscient/view/workloads/flame/../common.py 98.0% │ off cpu: 2.61s · hottest own
-┌ on cpu cpu.profile 1.40k 23 late ~low det degraded x4 ───┐┌ off cpu sched.offcpu 2.61s ~low det degraded ────────────┐
-│width ∝ samples · heaviest left           100 frames deep ││width ∝ time off cpu · heaviest left       30 frames deep │
-│▏all 1.40k                                                ││▏all 2.61s                                                │
-│▏py::Thread._bootstrap_inner:/usr/lib/python3.14/threadi… ││▏py::Thread.join:/usr/lib/python3.14/threadi…▏py::nap:/om…│
-│▏⋯libpython3.14+0x16af1c 69.8%          ▏py::burn:/omnis… ││▏⋯libc+0xa08f2 38.4%  ▏⋯libc+0xa08f2 38.2%   ▏+0xa08f2    │
-│▏py::burn:/omniscient/view/work…▏py::bu…▏_P▏l▏P           ││                                                          │
-│▏_Py▏lib▏Py▏li▏_▏_P                                       ││heaviest on their own (where it ends, every path summed)  │
-│                                                          ││  100% ████████████ libc+0xa08f2                          │
-│                                                          ││                                                          │
-│heaviest on their own (the innermost frame a perf map nam…││‼ bpf:raw_tp: user stacks only: the kernel side of a block│
-│ 98.0% ████████████ py::burn:/omniscient/view/workloads/f…││  is always the scheduler, and what it was waiting for is │
-│ 0.21% ▏            py::_compile_bytecode:<frozen importl…││  the task state                                          │
-│ 0.14% ▏            py::FileLoader.get_data:<frozen impor…││‼ names came from -- perf-2620696.map: perf-map, the 481  │
-│ 0.14% ▏            py::SourceLoader.get_code:<frozen imp…││  lines the program wrote for code no file holds;         │
-│ 0.14% ▏            py::_call_with_frames_removed:<frozen…││  python3.14: its dynamic symbols only: its internal      │
-│ 0.07% ▏            _PyUnicode_InternImmortal             ││  functions are unnamed; libc.so.6: its dynamic symbols   │
-│ 0.07% ▏            _Py_hashtable_get                     ││  only: its internal functions are unnamed;               │
-│                                                          ││  libpython3.14.so.1.0: its dynamic symbols only: its     │
-│‼ pmu:sw: time-based sampling: blind to phases running at ││  internal functions are unnamed                          │
-│  reduced frequency                                       ││                                                          │
-│‼ 1 frames fell in no mapping of the target and are       ││                                                          │
-│  reported by address                                     ││                                                          │
-│‼ 2 tasks the target started were found on a tick after   ││                                                          │
-│  they began, and had used 33.97 ms of cpu by then, by the││                                                          │
-│  kernel's own account: that time is in no sample here. A ││                                                          │
-│  task that started and ended between two ticks is in none││                                                          │
-│  at all                                                  ││                                                          │
-│‼ stacks unwound by `fp`: the caller of a function that   ││                                                          │
-│  sets up no frame pointer is lost -- every frameless     ││                                                          │
-│  leaf, and whole stacks of a target built without them   ││                                                          │
-│‼ 1 more on the last line; ! lists every caveat whole     ││                                                          │
-└──────────────────────────────────────────────────────────┘└ own cost at the leaf: these stacks do not say which frame┘
+╭ on cpu cpu.profile 1.40k 23 late ~low det degraded x4 ───╮ ╭ off cpu sched.offcpu 2.61s ~low det degraded ───────────╮
+│width ∝ samples · heaviest left           100 frames deep │ │width ∝ time off cpu · heaviest left      30 frames deep │
+│▏all 1.40k                                                │ │▏all 2.61s                                               │
+│▏py::Thread._bootstrap_inner:/usr/lib/python3.14/threadi… │ │▏py::Thread.join:/usr/lib/python3.14/thread…▏py::nap:/om…│
+│▏⋯libpython3.14+0x16af1c 69.8%          ▏py::burn:/omnis… │ │▏⋯libc+0xa08f2 38.4%  ▏⋯libc+0xa08f2 38.2%  ▏+0xa08f2    │
+│▏py::burn:/omniscient/view/work…▏py::bu…▏_P▏l▏P           │ │                                                         │
+│▏_Py▏lib▏Py▏li▏_▏_P                                       │ │heaviest on their own (where it ends, every path summed) │
+│                                                          │ │  100% ████████████ libc+0xa08f2                         │
+│                                                          │ │                                                         │
+│heaviest on their own (the innermost frame a perf map nam…│ │‼ bpf:raw_tp: user stacks only: the kernel side of a     │
+│ 98.0% ████████████ py::burn:/omniscient/view/workloads/f…│ │  block is always the scheduler, and what it was waiting │
+│ 0.21% ▏            py::_compile_bytecode:<frozen importl…│ │  for is the task state                                  │
+│ 0.14% ▏            py::FileLoader.get_data:<frozen impor…│ │‼ names came from -- perf-2620696.map: perf-map, the 481 │
+│ 0.14% ▏            py::SourceLoader.get_code:<frozen imp…│ │  lines the program wrote for code no file holds;        │
+│ 0.14% ▏            py::_call_with_frames_removed:<frozen…│ │  python3.14: its dynamic symbols only: its internal     │
+│ 0.07% ▏            _PyUnicode_InternImmortal             │ │  functions are unnamed; libc.so.6: its dynamic symbols  │
+│ 0.07% ▏            _Py_hashtable_get                     │ │  only: its internal functions are unnamed;              │
+│                                                          │ │  libpython3.14.so.1.0: its dynamic symbols only: its    │
+│‼ pmu:sw: time-based sampling: blind to phases running at │ │  internal functions are unnamed                         │
+│  reduced frequency                                       │ │                                                         │
+│‼ 1 frames fell in no mapping of the target and are       │ │                                                         │
+│  reported by address                                     │ │                                                         │
+│‼ 2 tasks the target started were found on a tick after   │ │                                                         │
+│  they began, and had used 33.97 ms of cpu by then, by the│ │                                                         │
+│  kernel's own account: that time is in no sample here. A │ │                                                         │
+│  task that started and ended between two ticks is in none│ │                                                         │
+│  at all                                                  │ │                                                         │
+│‼ stacks unwound by `fp`: the caller of a function that   │ │                                                         │
+│  sets up no frame pointer is lost -- every frameless     │ │                                                         │
+│  leaf, and whole stacks of a target built without them   │ │                                                         │
+│‼ 1 more on the last line; ! lists every caveat whole     │ │                                                         │
+╰──────────────────────────────────────────────────────────╯ ╰ own cost at the leaf: these stacks do not say which fram╯
 on cpu ▸ all
 1.40k samples ≈ 1.40s · 100% of all · own 0 · 1.40k events
 cpu.profile: names came from -- perf-2620696.map: perf-map, the 480 lines the program wrote for code no file holds; pyt…
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t split  d shape  ! caveats
+[Enter] zoom frame  q quit  F families  I guide  ? help  ↑↓hl move  +/- zoom  /* find  om pane  t split  d shape  ! cave

@@ -63,7 +63,7 @@ pub const NEEDS: &[Need] = &[
 /// The view's keys, for the help line.
 const KEYS: &[(&str, &str)] = &[
     ("↑↓hl", "move"),
-    ("⏎⌫", "zoom"),
+    ("+/-", "zoom"),
     ("/*", "find"),
     ("om", "pane"),
     ("t", "split"),
@@ -1263,7 +1263,7 @@ fn caveat_lines(caveat: &str, width: usize) -> Vec<Line<'static>> {
             Line::from(vec![
                 Span::styled(
                     if at == 0 { "‼ " } else { "  " },
-                    Style::new().fg(palette::LOSS),
+                    Style::new().fg(palette::loss()),
                 ),
                 Span::styled(text, Style::new().add_modifier(Modifier::DIM)),
             ])
@@ -1298,9 +1298,9 @@ fn difference_colour(compare: &Compare, value: [f64; 2]) -> Color {
     let strong = !(0.5..=1.5).contains(&ratio);
     match (significant, b > a, strong) {
         (false, _, _) => Color::DarkGray,
-        (true, true, true) => palette::WORSE,
+        (true, true, true) => palette::worse(),
         (true, true, false) => Color::LightRed,
-        (true, false, true) => palette::BETTER,
+        (true, false, true) => palette::better(),
         (true, false, false) => Color::LightBlue,
     }
 }
@@ -1372,7 +1372,7 @@ impl Flame {
             if active == ON {
                 left - 2
             } else {
-                total - left - 2
+                total - left - 3
             }
         } else {
             total - 2
@@ -1407,12 +1407,12 @@ impl Flame {
             KeyCode::Char('l') | KeyCode::Char(']') => {
                 icicle.rows[row].get(index + 1).map(|cell| cell.node)
             }
-            KeyCode::Enter => {
+            KeyCode::Enter | KeyCode::Char('+' | '=' | 'z') => {
                 state.zoom = tree.path(here.start);
                 state.scroll = 0;
                 Some(here.node)
             }
-            KeyCode::Backspace | KeyCode::Char('u') => {
+            KeyCode::Backspace | KeyCode::Char('u' | '-' | 'Z') => {
                 // Out to the nearest ancestor that shows more than this one,
                 // by at least a cell.
                 let cell = tree.weight(zoom) / f64::from(width.max(1));
@@ -1445,6 +1445,10 @@ impl View for Flame {
 
     fn needs(&self) -> &'static [Need] {
         NEEDS
+    }
+
+    fn enter_label(&self, _: &Ctx<'_>) -> Option<String> {
+        (!self.regions.is_empty() && self.typing.is_none()).then(|| "zoom frame".to_owned())
     }
 
     fn keys(&self) -> &'static [(&'static str, &'static str)] {
@@ -1519,7 +1523,7 @@ impl View for Flame {
     }
 
     /// A box clicked is selected in its pane, which becomes the one the keys
-    /// move in; clicked again, it is zoomed into, as `Enter` does.
+    /// move in; Enter zooms into it.
     fn select(&mut self, id: usize, ctx: &Ctx<'_>) -> Action {
         let (node, pane) = (id / 2, id % 2);
         let panes = self.panes(ctx);
@@ -1566,8 +1570,12 @@ impl View for Flame {
             self.draw_pane(frame, middle, &panes[active], active, true);
         } else if self.side_by_side(&panes, middle.width) {
             let left = middle.width / 2;
-            let [one, two] =
-                Layout::horizontal([Constraint::Length(left), Constraint::Min(0)]).areas(middle);
+            let [one, _, two] = Layout::horizontal([
+                Constraint::Length(left),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .areas(middle);
             self.draw_pane(frame, one, &panes[ON], ON, active == ON);
             self.draw_pane(frame, two, &panes[OFF], OFF, active == OFF);
         } else if panes.iter().any(is_tree) {
@@ -1688,7 +1696,7 @@ impl Flame {
                 )),
                 Body::Empty(_) => spans.push(Span::raw("nothing recorded")),
                 Body::Refused(_) => {
-                    spans.push(Span::styled("refused", Style::new().fg(palette::REFUSED)))
+                    spans.push(Span::styled("refused", Style::new().fg(palette::refused())))
                 }
                 Body::Missing => spans.push(Span::raw("not in this run")),
             }
@@ -1713,7 +1721,7 @@ impl Flame {
             Span::styled(
                 format!("{} ▸ ", pane.title),
                 Style::new()
-                    .fg(palette::ACCENT)
+                    .fg(palette::accent())
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(one.name.clone(), Style::new().add_modifier(Modifier::BOLD)),
@@ -1774,9 +1782,9 @@ impl Flame {
                 let colour = if !significant {
                     Color::Reset
                 } else if b > a {
-                    palette::WORSE
+                    palette::worse()
                 } else {
-                    palette::BETTER
+                    palette::better()
                 };
                 second.push(Span::styled(
                     format!(
@@ -1859,7 +1867,7 @@ impl Flame {
         left.extend(pane.caveats[said..].iter().cloned());
         match left.split_first() {
             None => Line::from(Span::styled(
-                "⏎ zooms into the selected box, ⌫ out · / finds a name, * the selected one · o \
+                "+ zooms into the selected box, - out · / finds a name, * the selected one · o \
                  switches pane, m shows it alone · t splits off cpu by thread · ! lists caveats",
                 Style::new().add_modifier(Modifier::DIM),
             )),
@@ -1871,7 +1879,7 @@ impl Flame {
                 };
                 let room = usize::from(width).saturating_sub(head.chars().count());
                 Line::from(vec![
-                    Span::styled(head, Style::new().fg(palette::LOSS)),
+                    Span::styled(head, Style::new().fg(palette::loss())),
                     Span::styled(fit(first, room), Style::new().add_modifier(Modifier::DIM)),
                 ])
             }
@@ -1883,7 +1891,10 @@ impl Flame {
     fn draw_listing(&self, frame: &mut Frame<'_>, area: Rect, panes: &[Pane; 2]) {
         let block = Block::new()
             .borders(Borders::ALL)
-            .border_style(Style::new().fg(palette::LOSS))
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(crate::theme::border())
+            .title_style(crate::theme::title())
+            .border_style(Style::new().fg(palette::loss()))
             .title(Span::styled(
                 " caveats, whole ",
                 Style::new().add_modifier(Modifier::BOLD),
@@ -1945,7 +1956,7 @@ impl Flame {
         active: bool,
     ) {
         let border = if active {
-            Style::new().fg(palette::ACCENT)
+            Style::new().fg(palette::accent())
         } else {
             Style::new().add_modifier(Modifier::DIM)
         };
@@ -1975,12 +1986,15 @@ impl Flame {
         }
         let mut block = Block::new()
             .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(crate::theme::border())
+            .title_style(crate::theme::title())
             .border_style(border)
             .title(Line::from(title));
         if let Some(aside) = &pane.aside {
             block = block.title_bottom(Line::from(Span::styled(
                 format!(" {aside} "),
-                Style::new().fg(palette::LOSS),
+                Style::new().fg(palette::loss()),
             )));
         }
         let inner = block.inner(area);
@@ -2058,7 +2072,7 @@ impl Flame {
                 frame.render_widget(
                     Sparkline::default()
                         .data(&spark)
-                        .style(pane.trust.style().fg(palette::LIVE)),
+                        .style(pane.trust.style().fg(palette::live())),
                     chart,
                 );
             }
@@ -2111,7 +2125,7 @@ impl Flame {
             Paragraph::new(Line::from(vec![
                 Span::styled(
                     format!("{:<room$}", fit(&crumb_text, room)),
-                    Style::new().fg(palette::ACCENT),
+                    Style::new().fg(palette::accent()),
                 ),
                 Span::styled(right, Style::new().add_modifier(Modifier::DIM)),
             ])),
@@ -2170,7 +2184,11 @@ impl Flame {
                     modifier |= Modifier::BOLD;
                 }
                 if cell.start == selected.start && cell.node == selected.node {
-                    background = if active { palette::ACCENT } else { Color::Gray };
+                    background = if active {
+                        palette::accent()
+                    } else {
+                        Color::Gray
+                    };
                     modifier |= Modifier::BOLD;
                 }
                 if difference.contains(node.name.as_str()) {
@@ -2295,10 +2313,10 @@ impl Flame {
                     format!("{more} more; ! lists every caveat whole")
                 };
                 said_lines.push(Line::from(vec![
-                    Span::styled("‼ ", Style::new().fg(palette::LOSS)),
+                    Span::styled("‼ ", Style::new().fg(palette::loss())),
                     Span::styled(
                         fit(&more, width.saturating_sub(2)),
-                        Style::new().fg(palette::LOSS),
+                        Style::new().fg(palette::loss()),
                     ),
                 ]));
             }
@@ -2390,8 +2408,8 @@ impl Flame {
                 for (name, a, b, sigmas, significant) in ranked.into_iter().take(entries) {
                     let colour = match (significant, b > a) {
                         (false, _) => Color::Reset,
-                        (true, true) => palette::WORSE,
-                        (true, false) => palette::BETTER,
+                        (true, true) => palette::worse(),
+                        (true, false) => palette::better(),
                     };
                     let ratio = if a > 0.0 {
                         format!("x{:.2}", b / a)
@@ -2870,11 +2888,11 @@ mod tests {
         // Down from the root, into the heaviest callee, and zoom.
         press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Down);
-        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('='));
         let zoomed = text(&draw(&mut app));
         assert!(zoomed.contains("zoom: "), "{zoomed}");
-        press(&mut app, KeyCode::Backspace);
-        press(&mut app, KeyCode::Backspace);
+        press(&mut app, KeyCode::Char('-'));
+        press(&mut app, KeyCode::Char('Z'));
         let out = text(&draw(&mut app));
         assert!(out.contains("width ∝ samples"), "{out}");
         // A search says the share of each pane it covers.

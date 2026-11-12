@@ -1312,7 +1312,7 @@ pub struct TopArgs {
     #[arg(long, value_name = "RUN")]
     pub against: Option<PathBuf>,
 
-    /// The view to open on: system, flame, ledger, request, timebar, heatmap,
+    /// The view to open on: overview, system, flame, ledger, request, timebar, heatmap,
     /// lanes, wake or flows.
     #[arg(long, value_name = "NAME")]
     pub view: Option<String>,

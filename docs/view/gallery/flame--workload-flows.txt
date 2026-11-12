@@ -1,40 +1,40 @@
 omn top │ fixture workload-flows │ 993ms                          view: snapshot │ collectors ≥16.4% │ target 5.63% cpu
- 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
+ [F] Families  [I] Guide  1 system 2 flame 3 ledger 4 request 5 timebar 6 heatmap 7 lanes 8 wake 9 flows 0 process
  flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference ────────────────────────────
 on cpu: 65 · hottest own _Py_hashtable_get 6.15% │ off cpu: 942ms · hottest own clock_nanosleep 95.5%
-┌ on cpu cpu.profile 65 11 late ~low det degraded x7 ──────┐┌ off cpu sched.offcpu 942ms ~low det degraded x3 ─────────┐
-│width ∝ samples · heaviest left            98 frames deep ││width ∝ time off cpu · heaviest left       15 frames deep │
-│▏all 65                                                   ││▏all › ⋯11⋯ › libpython3.14+0x5dfc1 940ms                 │
-│▏_start › ⋯2⋯ › Py_BytesMain 95.4%                        ││▏clock_nanosleep 95.5%                                 ▏a │
-│▏Py_RunMain 81.5%                              ▏Py_Ini…   ││                                                          │
-│▏⋯libpython3.14+0x1b9172 69.2%          ▏lib▏l ▏lib▏l     ││heaviest on their own (where it ends, every path summed)  │
-│▏⋯libpython3.14+0x1e478b 53.8% ▏cr▏_ ▏i                   ││ 95.5% ████████████ clock_nanosleep                       │
-│▏libpython3.14+0x693f9 47.7%                              ││ 3.07% ▏            accept4                               │
-│▏+0x1b9172 43.1%         ▏li                              ││ 0.77% ▏            fsync                                 │
-│▏+0x1e478b 40.0%                                          ││ 0.53% ▏            wait4                                 │
-│▏+0x1b9172 27.7% ▏lib                                     ││ 0.08% ▏            0x7f6ef8322a45                        │
-│▏+0x1e478b       ▏li                                      ││                                                          │
-│▏PyImpor…▏_r                                              ││‼ bpf:raw_tp: user stacks only: the kernel side of a block│
-│▏PyI…▏l                                                   ││  is always the scheduler, and what it was waiting for is │
-│▏__                                                       ││  the task state                                          │
-│                                                          ││‼ 1 blocks ended without this run having seen the wakeup  │
-│heaviest on their own (where it ends, every path summed)  ││  that released them, so their `wake_to_run_ns` is zero   │
-│ 6.15% ████████████ _Py_hashtable_get                     ││  because it is unknown rather than because there was no  │
-│ 4.62% █████████    __tls_get_addr                        ││  wait: the task was woken before the programs attached,  │
-│ 4.62% █████████    perf_swevent_event                    ││  or by a path that does not raise `sched_wakeup`         │
-│                                                          ││‼ 1 blocks ended with no queue stamp in the kernel's      │
-│‼ pmu:sw: time-based sampling: blind to phases running at ││  `sched_info`, so their `queued_ns` is zero as the kernel│
-│  reduced frequency                                       ││  counts it: the wait after their wakeup is in            │
-│‼ 14 of 17 samples landed in a function that sets up no   ││  `blocked_ns`, as it is in the task's `schedstat`        │
-│  frame pointer (10 in libc.so.6, 3 in                    ││‼ names came from -- python3.14: its dynamic symbols only:│
-│  ld-linux-x86-64.so.2, 1 in libpython3.14.so.1.0), so the││  its internal functions are unnamed; libc.so.6: its      │
-│  frames under the leaf are not its callers: most of them ││  dynamic symbols only: its internal functions are        │
-│  are outside the target's own code, which is where the   ││  unnamed; libpython3.14.so.1.0: its dynamic symbols only:│
-│  callers are lost; `--stack fp+leaf` recovers the leaf's ││  its internal functions are unnamed;                     │
-│  caller and `--stack dwarf` the whole chain              ││  _socket.cpython-314-x86_64-linux-gnu.so: its dynamic    │
-│‼ 7 more on the last line; ! lists every caveat whole     ││  symbols only: its internal functions are unnamed        │
-└──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
+╭ on cpu cpu.profile 65 11 late ~low det degraded x7 ──────╮ ╭ off cpu sched.offcpu 942ms ~low det degraded x3 ────────╮
+│width ∝ samples · heaviest left            98 frames deep │ │width ∝ time off cpu · heaviest left      15 frames deep │
+│▏all 65                                                   │ │▏all › ⋯11⋯ › libpython3.14+0x5dfc1 940ms                │
+│▏_start › ⋯2⋯ › Py_BytesMain 95.4%                        │ │▏clock_nanosleep 95.5%                                ▏a │
+│▏Py_RunMain 81.5%                              ▏Py_Ini…   │ │                                                         │
+│▏⋯libpython3.14+0x1b9172 69.2%          ▏lib▏l ▏lib▏l     │ │heaviest on their own (where it ends, every path summed) │
+│▏⋯libpython3.14+0x1e478b 53.8% ▏cr▏_ ▏i                   │ │ 95.5% ████████████ clock_nanosleep                      │
+│▏libpython3.14+0x693f9 47.7%                              │ │ 3.07% ▏            accept4                              │
+│▏+0x1b9172 43.1%         ▏li                              │ │ 0.77% ▏            fsync                                │
+│▏+0x1e478b 40.0%                                          │ │ 0.53% ▏            wait4                                │
+│▏+0x1b9172 27.7% ▏lib                                     │ │ 0.08% ▏            0x7f6ef8322a45                       │
+│▏+0x1e478b       ▏li                                      │ │                                                         │
+│▏PyImpor…▏_r                                              │ │‼ bpf:raw_tp: user stacks only: the kernel side of a     │
+│▏PyI…▏l                                                   │ │  block is always the scheduler, and what it was waiting │
+│▏__                                                       │ │  for is the task state                                  │
+│                                                          │ │‼ 1 blocks ended without this run having seen the wakeup │
+│heaviest on their own (where it ends, every path summed)  │ │  that released them, so their `wake_to_run_ns` is zero  │
+│ 6.15% ████████████ _Py_hashtable_get                     │ │  because it is unknown rather than because there was no │
+│ 4.62% █████████    __tls_get_addr                        │ │  wait: the task was woken before the programs attached, │
+│ 4.62% █████████    perf_swevent_event                    │ │  or by a path that does not raise `sched_wakeup`        │
+│                                                          │ │‼ 1 blocks ended with no queue stamp in the kernel's     │
+│‼ pmu:sw: time-based sampling: blind to phases running at │ │  `sched_info`, so their `queued_ns` is zero as the      │
+│  reduced frequency                                       │ │  kernel counts it: the wait after their wakeup is in    │
+│‼ 14 of 17 samples landed in a function that sets up no   │ │  `blocked_ns`, as it is in the task's `schedstat`       │
+│  frame pointer (10 in libc.so.6, 3 in                    │ │‼ names came from -- python3.14: its dynamic symbols     │
+│  ld-linux-x86-64.so.2, 1 in libpython3.14.so.1.0), so the│ │  only: its internal functions are unnamed; libc.so.6:   │
+│  frames under the leaf are not its callers: most of them │ │  its dynamic symbols only: its internal functions are   │
+│  are outside the target's own code, which is where the   │ │  unnamed; libpython3.14.so.1.0: its dynamic symbols     │
+│  callers are lost; `--stack fp+leaf` recovers the leaf's │ │  only: its internal functions are unnamed;              │
+│  caller and `--stack dwarf` the whole chain              │ │  _socket.cpython-314-x86_64-linux-gnu.so: its dynamic   │
+│‼ 7 more on the last line; ! lists every caveat whole     │ │  symbols only: its internal functions are unnamed       │
+╰──────────────────────────────────────────────────────────╯ ╰─────────────────────────────────────────────────────────╯
 on cpu ▸ all
 65 samples ≈ 65.2ms · 100% of all · own 0 · 65 events
 cpu.profile (+6 more, ! lists them): 2 frames fell in no mapping of the target and are reported by address
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t split  d shape  ! caveats
+[Enter] zoom frame  q quit  F families  I guide  ? help  ↑↓hl move  +/- zoom  /* find  om pane  t split  d shape  ! cave

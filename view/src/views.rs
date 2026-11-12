@@ -21,15 +21,20 @@ use ratatui::Frame;
 use crate::model::Data;
 use crate::trust::{self, palette, Trust};
 
+pub(crate) mod articles;
 pub mod flame;
 pub mod flows;
 pub mod heatmap;
 pub mod lanes;
 pub mod ledger;
+pub(crate) mod lessons;
+pub mod overview;
 pub mod process;
 pub mod request;
+pub(crate) mod source_help;
 pub mod system;
 pub mod timebar;
+pub(crate) mod view_help;
 pub mod wake;
 
 /// What a view is handed to draw.
@@ -93,8 +98,7 @@ pub enum Action {
 /// it, handed back to [`View::select`]; `rect` is where it was drawn, in the
 /// terminal's cells.
 ///
-/// A click selects what is under it; a click on what is already selected
-/// goes in, as `Enter` does. So a view that reports its regions and answers
+/// A click selects what is under it; Enter or the explicit open control goes in. So a view that reports its regions and answers
 /// [`View::select`] is clickable with nothing else to write: going in is its
 /// `Enter`, and coming back is the frame's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,6 +182,10 @@ pub trait View {
     fn keys(&self) -> &'static [(&'static str, &'static str)] {
         &[]
     }
+    /// Explain what Enter will do to the current selection, when known.
+    fn enter_label(&self, _ctx: &Ctx<'_>) -> Option<String> {
+        None
+    }
     /// Whether the view is taking text -- a search being typed -- so every
     /// printable key is its own, `q`, `?`, `f`, digits and `Backspace`
     /// included. The frame keeps only `Ctrl-C`.
@@ -208,7 +216,7 @@ pub trait View {
 
 /// Every view, in the order of the tabs.
 pub fn registry() -> Vec<Box<dyn View>> {
-    vec![
+    let mut views = vec![
         system::view(),
         flame::view(),
         ledger::view(),
@@ -219,7 +227,10 @@ pub fn registry() -> Vec<Box<dyn View>> {
         wake::view(),
         flows::view(),
         process::view(),
-    ]
+        overview::overview(),
+    ];
+    views.extend(overview::families());
+    views
 }
 
 /// Every need of every view, merged: one per source and scope, with the
@@ -337,7 +348,7 @@ pub fn draw_stub(frame: &mut Frame<'_>, area: Rect, ctx: &Ctx<'_>, view: &dyn Vi
         {
             line.push(Span::styled(
                 format!("refused: {}", refusal.reason),
-                Style::new().fg(palette::REFUSED),
+                Style::new().fg(palette::refused()),
             ));
         } else if held.is_empty() {
             line.push(Span::styled(
@@ -376,13 +387,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ten_views_each_with_a_name_of_its_own() {
+    fn every_view_has_a_name_of_its_own() {
         let views = registry();
-        assert_eq!(views.len(), 10);
+        assert_eq!(views.len(), 18);
         let mut names: Vec<_> = views.iter().map(|view| view.name()).collect();
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names.len(), 10, "two views share a name");
+        assert_eq!(names.len(), views.len(), "two views share a name");
     }
 
     #[test]

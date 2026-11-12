@@ -1,6 +1,6 @@
 omn top │ fixture many-requests │ 15.8s                           view: snapshot │ collectors ≥5.21% │ target 0.35% cpu
- 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
-┌ request -- what one request costs ───────────────────────────────────────────────────────────────────────────────────┐
+ [F] Families  [I] Guide  1 system 2 flame 3 ledger 4 request 5 timebar 6 heatmap 7 lanes 8 wake 9 flows 0 process
+╭ request -- what one request costs ───────────────────────────────────────────────────────────────────────────────────╮
 │300 requests served by server (pid 2619831) · slowest a0d7 5.49ms · median 2.18ms · in order of arrival  168 late degr│
 │                                                                                                                      │
 │  req      span  its life by state, to one scale: the slowest is 5.49ms             mostly                            │
@@ -36,5 +36,5 @@ omn top │ fixture many-requests │ 15.8s                           view: snap
 │                                                                                                                      │
 │                                                                                                                      │
 │  what sets it apart from the other 299 requests: ░ net in +93.3µs (theirs 26.6µs)                                    │
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ request  s sort  enter focus it, then its lanes  l its thread
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+[Enter] focus request  q quit  F families  I guide  ? help  ↑/↓ request  s sort  enter focus it, then its lanes  l its t

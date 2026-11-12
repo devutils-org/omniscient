@@ -131,6 +131,21 @@ impl View for Heatmap {
         NEEDS
     }
 
+    fn enter_label(&self, ctx: &Ctx<'_>) -> Option<String> {
+        let chosen = self.selected(ctx.data);
+        let samples = Samples::of(ctx, chosen);
+        let cursor = self.cursor_ns.or_else(|| samples.slowest_ns())?;
+        let half = (self.column_ns / 2.0).max(1.0);
+        let sample = samples.slowest_in(cursor as f64 - half, cursor as f64 + half)?;
+        if sample.request.is_some() {
+            Some("open request".to_owned())
+        } else if sample.pid.is_some() || sample.tid.is_some() {
+            Some("open lanes".to_owned())
+        } else {
+            None
+        }
+    }
+
     fn keys(&self) -> &'static [(&'static str, &'static str)] {
         &[
             ("s", "source"),
@@ -162,11 +177,11 @@ impl View for Heatmap {
                 };
                 self.cursor_ns = Some(moved.clamp(start as f64, end as f64) as u64);
             }
-            KeyCode::Char('+') | KeyCode::Char('=') => {
+            KeyCode::Char('+' | '=' | 'z') => {
                 self.pin_cursor(ctx, chosen);
                 self.zoom = (self.zoom + 1).min(MAX_ZOOM);
             }
-            KeyCode::Char('-') => self.zoom = self.zoom.saturating_sub(1),
+            KeyCode::Char('-' | 'Z') => self.zoom = self.zoom.saturating_sub(1),
             KeyCode::Char('t') | KeyCode::Enter => {
                 self.pin_cursor(ctx, chosen);
                 let Some(cursor) = self.cursor_ns else {
@@ -233,7 +248,12 @@ impl View for Heatmap {
         if !ctx.focus.is_empty() {
             title.push_str(&format!("-- {} ", ctx.focus.describe()));
         }
-        let block = Block::new().borders(Borders::ALL).title(title);
+        let block = Block::new()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(crate::theme::border())
+            .title_style(crate::theme::title())
+            .title(title);
         let inner = block.inner(area);
         frame.render_widget(block, area);
         if inner.height < 4 || inner.width < 30 {
@@ -334,11 +354,33 @@ impl Heatmap {
         trust: &Trust,
     ) {
         if area.height < 14 || area.width < 40 {
-            let text = format!(
-                "{}: too small a screen for the map, which needs 40x14 inside its frame",
-                need.source
-            );
-            frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), area);
+            let all = samples.quantiles(f64::NEG_INFINITY, f64::INFINITY);
+            let unit = &results[0].unit;
+            let mut lines = vec![
+                Line::from("Compact summary · enlarge for the heatmap"),
+                trust::figure(
+                    format!("{} {}", counted(all.weight, noun(need.source)), need.source),
+                    trust,
+                ),
+                Line::from(format!(
+                    "p50 {}   p99 {}",
+                    units::quantity(all.p50, unit),
+                    units::quantity(all.p99, unit)
+                )),
+                Line::from(format!(
+                    "min {}   max {}",
+                    units::quantity(all.min, unit),
+                    units::quantity(all.max, unit)
+                )),
+            ];
+            if samples.whole_run > 0 || samples.summed > 0 {
+                lines.push(Line::from(format!(
+                    "{} whole-run rows and {} summed rows excluded",
+                    samples.whole_run, samples.summed
+                )));
+            }
+            lines.push(Line::from("s: source · I: guide"));
+            frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
             return;
         }
         let unit = results[0].unit.clone();
@@ -656,7 +698,7 @@ fn tabs(data: &Data, chosen: usize) -> Line<'static> {
         let style = if index == chosen {
             Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD)
         } else if refused {
-            Style::new().fg(palette::REFUSED)
+            Style::new().fg(palette::refused())
         } else if results.iter().all(|results| results.events().is_empty()) {
             Style::new().add_modifier(Modifier::DIM)
         } else {
@@ -1751,7 +1793,7 @@ impl Losses {
     /// were lost, and said in words, which the shading makes room for when
     /// the margin is too narrow to hold them.
     fn strip(&self, grid: &Grid, cols: u16, width: u16) -> Line<'static> {
-        let shade = Style::new().fg(palette::LOSS);
+        let shade = Style::new().fg(palette::loss());
         let late = (self.late > 0).then(|| {
             format!(
                 "{} rounds of reads came late: nothing is missing, the drains were further apart \

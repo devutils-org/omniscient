@@ -1,6 +1,6 @@
 omn top │ fixture system-wakeup │ 1.00s                                          view: snapshot │ collectors ≥0.99% cpu
- 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
-┌ timebar -- where the wall-clock went: one bar per thread, by state ──────────────────────────────────────────────────┐
+ [F] Families  [I] Guide  1 system 2 flame 3 ledger 4 request 5 timebar 6 heatmap 7 lanes 8 wake 9 flows 0 process
+╭ timebar -- where the wall-clock went: one bar per thread, by state ──────────────────────────────────────────────────╮
 │ Nothing to split: this run holds no decomposition, and no per-thread state to read one from.                         │
 │                                                                                                                      │
 │ cpu.profile     not in this run  -- on cpu                                                                           │
@@ -36,5 +36,5 @@ omn top │ fixture system-wakeup │ 1.00s                                     
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓ bar  d decomposition  s scale  enter open
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+q quit  F families  I guide  ? help  ↑↓ bar  d decomposition  s scale  enter open

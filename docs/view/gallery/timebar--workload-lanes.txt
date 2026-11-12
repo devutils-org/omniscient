@@ -1,6 +1,6 @@
 omn top │ fixture workload-lanes │ 2.24s                          view: snapshot │ collectors ≥9.70% │ target 73.8% cpu
- 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
-┌ timebar -- where the wall-clock went: one bar per thread, by state ──────────────────────────────────────────────────┐
+ [F] Families  [I] Guide  1 system 2 flame 3 ledger 4 request 5 timebar 6 heatmap 7 lanes 8 wake 9 flows 0 process
+╭ timebar -- where the wall-clock went: one bar per thread, by state ──────────────────────────────────────────────────╮
 │ the view's reading  one bar per thread, whole: the run's window                                                      │
 │                                                                                                                      │
 │ ▶ first suspect  2621955 lanes-main (the program): blocked: sleeping, on a futex 2.08s (92.6% of its wall clock)     │
@@ -36,5 +36,5 @@ omn top │ fixture workload-lanes │ 2.24s                          view: snap
 │ No decomposition splits this run by task: these bars are the view's own reading of the traced sources, per thread    │
 │   over the run's window, and the suspect follows `omn latency`'s rule without being its answer. For its answer: `omn │
 │   latency --objective latency --dump-session -- PROG > s.yml`, then `omn top -f s.yml`.…                             │
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓ bar  d decomposition  s scale  enter open
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+[Enter] open lanes  q quit  F families  I guide  ? help  ↑↓ bar  d decomposition  s scale  enter open

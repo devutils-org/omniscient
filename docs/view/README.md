@@ -25,15 +25,30 @@ omn top --headless -o DIR -- ./prog      # live, no screen: collect and write
 omn top --dump-session -- ./prog         # the session a live run would ask for
 ```
 
-Keys: `q` quits, `←`/`→` or `tab` move between views, `1`-`9` jump and `0`
+Keys: `q` quits, `tab` moves between views, `1`-`9` jump and `0`
 opens the tenth, `enter` goes into what is selected and `⌫` (backspace)
 comes back, `f` clears the focus, `M` turns the mouse off and on, `?` opens
 the help (the keys and the trust legend). A view adds its own keys to the
 help line.
 
-The first screen is `process` when the run has a target of its own (a
-launched program: its results carry its `lifetime`), and `system` when it is
-the machine's. `--view NAME` opens on another.
+The first screen is `overview`, with one fixed row for each resource family.
+Select a family with `hjkl` or the arrow keys (left/right and up/down on a
+grid, up/down on a single column) and press Enter to open its detail page.
+`gg` and `G` jump to the first and last family; the same jumps work in family
+source lists, the guide, and the process, system, ledger, timebar, wake, flows
+and lanes lists. Request already supports `g` and `G` for its list. In flame, lanes and heatmap,
+left/right match their existing `h`/`l` movement; `Tab` still changes view;
+Enter there opens an existing detailed view, and Backspace returns. `v` opens
+the existing process or system view; `F` returns to the overview. The original
+views retain their numbered shortcuts and `--view NAME` still opens any view.
+The `[F] Families` button is clickable from every view. `I` opens the guide for the current view: start with the view overview, then
+select a source with the arrows or click its name or description; Escape closes the guide. The `[I] Guide`
+button is also clickable.
+In flame, heatmap and lanes, `+` or `=` zooms in and `-` zooms out; `z` and `Z` are aliases. Backspace returns through navigation history. In ledger, Page Up/Down scrolls the selected resource detail without changing the table height. The help popup uses the same scrolling keys, and `?` or Escape closes it.
+
+In `system`, idle devices and interfaces are shown by default; `i` folds or
+expands them. The family pages reserve source rows even when data has not arrived. Refusals
+and trust badges remain visible, and the detailed views provide further analysis.
 
 A live run lasts until the view is quit, the launched program exits, or
 `--duration` (10 minutes when not given, and said). Quitting ends the run;
@@ -112,8 +127,7 @@ and `⌫` (or a right click) comes back to where it was, with the focus it had:
 | process | a tile | the view that has its detail (its stream's) |
 
 The frame keeps the history of each `Goto`; a `Goto` to where the frame
-already is does not add to it. A view's own `⌫` (the flame's zoom out) is
-reached by its other key (`u`) while there is a history to go back through.
+already is does not add to it. Flame zooms out with `-` or `Z`, regardless of navigation history.
 
 ### The mouse
 
@@ -124,7 +138,7 @@ routes the mouse to them:
 
 - a **click** selects what is under it, through the view's `select(id)`,
   which moves the selection exactly as the keys would;
-- a **click on the selection** goes in, as `enter` does;
+- repeated clicks only select; **Enter** or the explicit open control goes in;
 - the **wheel** scrolls as `↑`/`↓` do (`wheel`), and zooms where the view
   zooms (the heatmap: in time, as `+`/`-`);
 - a **right click** comes back, as `⌫` does;
@@ -216,8 +230,9 @@ high, max, width)` draws a bar whose certain part is solid and uncertain part
 shaded -- for a lower bound from a lossy run, `high` is what it would be had
 nothing been lost (`Shortfall::fraction` says how much). `render_refusal`
 draws a refusal into the rectangle the panel would have had. `palette` holds
-the colours: sixteen-colour names only, so a terminal's theme decides what
-they look like.
+the semantic colours. Tokyo Night is the default, using the terminal's
+existing background. For light terminals or the former high-contrast 256-colour
+palette, start with `OMN_TUI_THEME=accessible`.
 
 Most of the catalog's traced sources are `low` determinism, so most of a view
 is drawn dimmed: that is the brief's rule applied as written, and the
@@ -369,3 +384,39 @@ read the text back with `snapshot::text`.
 (read by both, written back by both, compared), and this page's table to the
 code. `tests/view_live.rs` runs `omn top` headless live, replay, gallery and
 `--dump-session`, and what it refuses.
+
+## Exploring resource families with recorded data
+
+The family demos replay committed recordings, so they need neither eBPF
+capabilities nor a GPU on the machine used to view them. Build once with
+`make`, then run `python3 scripts/view-family-demo.py` and choose a family, or
+pass its name directly, for example `python3 scripts/view-family-demo.py gpu`.
+Press `F` for the overview, Enter to drill down, Backspace to return through
+history, and `v` for the original views. `python3 scripts/view-family-demo.py
+--check` renders every page headlessly and checks for a characteristic figure.
+
+| Family | Recording | What to look for |
+|---|---|---|
+| CPU | `workload-flame` | CPU load and a hot profiled function |
+| Memory | `workload-ledger` | A 64 MiB allocation, RSS growth and faults |
+| Disk | `sqlite-commits` | Repeated writes, throughput and p99 latency |
+| Network | `workload-flows` | Known socket transfers and network rate |
+| GPU | `workload-lanes` | Recorded kernels, GPU activity and VRAM |
+| Energy | `workload-system` | Machine power during two CPU burners |
+| Time | `workload-timebar` | Lock, sleep, CPU and run-queue time |
+
+These are real recordings, not synthetic values. They include the original
+machine's refusals, losses and sampling limitations; the badges describe
+those limitations. The checks confirm a representative figure is visible,
+not that every metric is represented. The source table shows the first summary series; select a source to inspect
+all its summary series and quality details. Use Page Up/Down to scroll the
+detail panel. Press `I` for a guide to the view and its sources, including how to read the
+measurements and units. Press `d` for a deeper lesson about the selected view
+or source, then `d` or Escape to return to the short guide; `I` closes it.
+Each deep dive includes an article explaining the mechanism and an example,
+followed by observations, interpretation limits and follow-up checks. Use
+Page Up/Down to read through the full article.
+Custom sources without a lesson say so explicitly. Sources supplied by a custom recording are included even when
+they are not part of the default collection. The original views provide
+additional analysis of events, histograms and stacks. See `view/workloads/README.md` and the workload manifests
+for the intended load and its limits.

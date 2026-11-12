@@ -1,40 +1,40 @@
 omn top │ fixture workload-flows │ 993ms                          view: snapshot │ collectors ≥16.4% │ target 5.63% cpu
- 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
- flows-main  pid 2621407 · 2 threads · 982ms · omn costs ≥16.4% cpu
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- CPU                       █                   0.00897 cores   avg 0.0746   peak 1.23   hottest _Py_hashtable_get 6.15%
-                           █
-                           █
-         ▁▂▂▂▂▂▂▂▂▁▁▁▁▁▁▁▁▁█▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
- Memory   ███████████████████████████          14.1MiB        +196KiB/s   peak 14.1MiB
-          ███████████████████████████
-          ███████████████████████████
-          ███████████████████████████
- Disk               █                          R 0B/s         W 9.31MiB/s   p99 4.64ms  10 late ~low det degraded x2
-                    █
-                    █▃
-         ▁▁▁▁▁▁▁▁▁▁▁██▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
- Network            ▄███                       ↓ 1.02MiB/s    ↑ 4.07MiB/s   0 retrans (machine)  ~low det degraded x3
-                    ████
-                    ████
-         ▁▁▁▁▁▁▁▁▁▁▁████▆▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
- GPU                                           no kernel launched   VRAM 0B
- Energy   ▃▃▃▃▃▃▃▃▇████████▅▅▅▅▅▅▅▅▅           36.2 W         avg 45.0 W   the machine's, not apportioned
-         ▅██████████████████████████▆▆▆▆▆▆▆▆
-         ███████████████████████████████████
-         ███████████████████████████████████
- Time    ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   sleep 93.6%   on cpu 3.92%   I/O 0.74%   child 0.50%  ~low det degraded x
-         ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-▶ suspect: sleep (blocked: sleeping)  93.6%                                                         Enter/click → detail
-
-CPU in one hue: the machine's cores are not in the recording
-Memory in one hue: the machine's memory is not in the recording
-Disk in one hue: a device's speed is not known
-Network in one hue: a link's speed is not known
-Energy in one hue: energy has no capacity
-
-
-
-
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓ jk move between lines  enter open the line's page
+ [F] Families  [I] Guide  1 system 2 flame 3 ledger 4 request 5 timebar 6 heatmap 7 lanes 8 wake 9 flows 0 process
+╭ Process resources ───────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ flows-main  pid 2621407 · 2 threads · 982ms · omn costs ≥16.4% cpu                                                   │
+│──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────│
+│ RESOURCE HISTORY                             │  Current / detail                                                     │
+│ CPU                       █                 │ 0.00897 cores   avg 0.0746   peak 1.23   …                             │
+│         ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁█▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │ ~low det                                                               │
+│──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────│
+│ Memory   ███████████████████████████        │ 14.1MiB        +196KiB/s   peak 14.1MiB                                │
+│          ███████████████████████████        │                                                                        │
+│──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────│
+│ Disk               █                        │ R 0B/s         W 9.31MiB/s   p99 4.64ms                                │
+│         ▁▁▁▁▁▁▁▁▁▁▁█▅▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │ 10 late ~low det degraded x2                                           │
+│──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────│
+│ Network            ▆███                     │ ↓ 1.02MiB/s    ↑ 4.07MiB/s   0 retrans (machine)                       │
+│         ▁▁▁▁▁▁▁▁▁▁▁████▃▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │ ~low det degraded x3                                                   │
+│──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────│
+│ GPU                                         │ no kernel launched   VRAM 0B                                           │
+│                                             │ 7 late degraded                                                        │
+│──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────│
+│ Energy  ▂▆▆▆▆▆▆▆▆█████████▇▇▇▇▇▇▇▇▇▃▃▃▃▃▃▃▃ │ 36.2 W         avg 45.0 W   the machine's, not apportioned             │
+│         ███████████████████████████████████ │                                                                        │
+│──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────│
+│ Time    ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │ sleep 93.6%   on cpu 3.92%   I/O 0.74%   child 0.50%                   │
+│         ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │ ~low det degraded x4                                                   │
+│──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────│
+│▶ suspect: sleep (blocked: sleeping)  93.6%                                                                           │
+│                                                                                                                      │
+│CPU in one hue: the machine's cores are not in the recording                                                          │
+│Memory in one hue: the machine's memory is not in the recording                                                       │
+│Disk in one hue: a device's speed is not known                                                                        │
+│Network in one hue: a link's speed is not known                                                                       │
+│Energy in one hue: energy has no capacity                                                                             │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+[Enter] open flame  q quit  F families  I guide  ? help  ↑↓ jk move between lines  gg/G first/last  enter open the line'

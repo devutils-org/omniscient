@@ -1,6 +1,6 @@
 omn top │ fixture workload-wake │ 264ms                           view: snapshot │ collectors ≥34.7% │ target 54.8% cpu
- 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
-┌ flows -- where the bytes went: process to socket to interface, process to file to device ────────────────────────────┐
+ [F] Families  [I] Guide  1 system 2 flame 3 ledger 4 request 5 timebar 6 heatmap 7 lanes 8 wake 9 flows 0 process
+╭ flows -- where the bytes went: process to socket to interface, process to file to device ────────────────────────────╮
 │pid 2621136 over 264ms   11B written, 1.55MiB read   █ out █ in █ the machine's                                       │
 │ network · net.socket bpf:fentry ~low det degraded x3 · net.bytes fs:proc ~low det degraded ──────────────────────────│
 │         thread             socket                                             stack         interface, the machine's │
@@ -36,5 +36,5 @@ omn top │ fixture workload-wake │ 264ms                           view: snap
 │descriptors 1.55MiB · no ratio: a descriptor may be a socket or a pipe, whose bytes never reach a device              │
 │▶ descriptor 3 of process 2621136, which may be a file, a pipe or a socket: 1.55MiB read in 166 calls, 5.88MiB/s      │
 │pid 2621136, thread 2621136 -- enter narrows every view to it                                                         │
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ socket or file  enter focus its thread
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+[Enter] focus thread  q quit  F families  I guide  ? help  ↑/↓ socket or file  enter focus its thread

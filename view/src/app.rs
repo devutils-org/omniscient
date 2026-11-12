@@ -7,7 +7,7 @@ use ratatui::crossterm::event::{
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::cost::Meter;
@@ -33,6 +33,14 @@ pub struct App {
     pub current: usize,
     pub focus: Focus,
     pub help: bool,
+    help_scroll: u16,
+    source_guide: bool,
+    guide_selected: usize,
+    guide_scroll: u16,
+    guide_pending_g: bool,
+    vim_pending: Option<usize>,
+    guide_deep: bool,
+    guide_regions: Vec<Region>,
     /// Stepping through every view on one run (`--gallery`).
     pub gallery: bool,
     pub cost: Cost,
@@ -43,8 +51,8 @@ pub struct App {
     /// Whether the mouse is captured. On by default; `M` turns it off, which
     /// gives the terminal its own text selection back.
     pub mouse: bool,
-    /// The region last clicked, as (view, id): a click on it again goes in.
-    clicked: Option<(usize, usize)>,
+    /// Explicit open control in the footer, when the view provides a destination.
+    enter_region: Option<Rect>,
     /// Where each tab was drawn, its id the view's index.
     tabs: Vec<Region>,
 }
@@ -52,8 +60,9 @@ pub struct App {
 /// The keys the frame takes before a view sees any.
 pub const FRAME_KEYS: &[(&str, &str)] = &[
     ("q", "quit"),
-    ("←/→ tab", "view"),
-    ("1-9", "jump"),
+    ("←/→", "move in family grid or chart, otherwise view"),
+    ("tab", "next view"),
+    ("1-9/0", "jump"),
     ("f", "clear focus"),
     ("?", "help"),
 ];
@@ -62,14 +71,16 @@ pub const FRAME_KEYS: &[(&str, &str)] = &[
 /// room for them, and `⌫` is in it whenever there is somewhere to go back to.
 pub const MORE_KEYS: &[(&str, &str)] = &[
     ("0", "the tenth view"),
+    ("F", "resource families"),
+    ("I", "view and source guide"),
+    ("gg/G", "first/last in supported lists"),
     ("⌫", "back where enter came from"),
     ("M", "mouse on/off"),
 ];
 
 /// What the mouse does, for the help.
-const MOUSE: &str = "Mouse: a click selects, a click on the selection goes in, the wheel scrolls \
-                     (or zooms where the view zooms), a right click goes back; M gives the \
-                     terminal its own text selection back.";
+const MOUSE: &str = "Mouse: click to select, use Enter or the open button to go in; the wheel scrolls \
+                     (or zooms where the view zooms), and right click goes back. M returns text selection to the terminal.";
 
 impl App {
     pub fn new(data: Data) -> App {
@@ -80,22 +91,23 @@ impl App {
             current: 0,
             focus: Focus::default(),
             help: false,
+            help_scroll: 0,
+            source_guide: false,
+            guide_selected: 0,
+            guide_scroll: 0,
+            guide_pending_g: false,
+            vim_pending: None,
+            guide_deep: false,
+            guide_regions: Vec::new(),
             gallery: false,
             cost: Cost::Measured(Meter::start()),
             quit: false,
             history: Vec::new(),
             mouse: true,
-            clicked: None,
+            enter_region: None,
             tabs: Vec::new(),
         };
-        // The first screen: one process's when the run has a target of its
-        // own, the machine's otherwise.
-        let first = if app.data.has_target() {
-            "process"
-        } else {
-            "system"
-        };
-        let _ = app.open(first);
+        let _ = app.open("overview");
         app
     }
 
@@ -104,6 +116,7 @@ impl App {
     pub fn open(&mut self, name: &str) -> Result<(), String> {
         match self.views.iter().position(|view| view.name() == name) {
             Some(index) => {
+                self.vim_pending = None;
                 self.current = index;
                 Ok(())
             }
@@ -120,32 +133,140 @@ impl App {
 
     /// Handles one key: the frame's first, the current view's otherwise.
     pub fn key(&mut self, key: KeyEvent) {
-        if self.help {
-            // Any key closes the help; it does nothing else.
-            self.help = false;
-            return;
-        }
-        let count = self.views.len();
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.quit = true;
             return;
         }
+        if self.help {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('?' | 'q') => self.help = false,
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.help_scroll = self.help_scroll.saturating_add(1)
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.help_scroll = self.help_scroll.saturating_sub(1)
+                }
+                KeyCode::PageDown => self.help_scroll = self.help_scroll.saturating_add(5),
+                KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(5),
+                KeyCode::Home => self.help_scroll = 0,
+                _ => {}
+            }
+            return;
+        }
+        if self.source_guide {
+            let count = self.guide_sources().len() + 1;
+            let was_g = self.guide_pending_g;
+            self.guide_pending_g = key.code == KeyCode::Char('g');
+            match key.code {
+                KeyCode::Esc if self.guide_deep => {
+                    self.guide_deep = false;
+                    self.guide_scroll = 0;
+                }
+                KeyCode::Esc | KeyCode::Char('I') | KeyCode::Char('q') => self.source_guide = false,
+                KeyCode::Char('d') => {
+                    self.guide_deep = !self.guide_deep;
+                    self.guide_scroll = 0;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.guide_selected = (self.guide_selected + 1).min(count.saturating_sub(1));
+                    self.guide_scroll = 0;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.guide_selected = self.guide_selected.saturating_sub(1);
+                    self.guide_scroll = 0;
+                }
+                KeyCode::Home | KeyCode::Char('g') if key.code == KeyCode::Home || was_g => {
+                    self.guide_selected = 0;
+                    self.guide_scroll = 0;
+                }
+                KeyCode::End | KeyCode::Char('G') => {
+                    self.guide_selected = count.saturating_sub(1);
+                    self.guide_scroll = 0;
+                }
+                KeyCode::PageDown => self.guide_scroll = self.guide_scroll.saturating_add(3),
+                KeyCode::PageUp => self.guide_scroll = self.guide_scroll.saturating_sub(3),
+                _ => {}
+            }
+            return;
+        }
+        let count = if self.gallery { self.views.len() } else { 10 };
         if self.views[self.current].takes_text() {
             // A search being typed: every key is the view's.
             self.pass_on(key);
             return;
         }
+        // Views with list semantics opt in; others retain their own g/G keys.
+        let jump_view = matches!(
+            self.views[self.current].name(),
+            "system" | "ledger" | "timebar" | "wake" | "flows" | "lanes"
+        );
+        if jump_view && key.code == KeyCode::Char('g') {
+            if self.vim_pending == Some(self.current) {
+                self.vim_pending = None;
+                self.pass_on(KeyEvent::from(KeyCode::Home));
+            } else {
+                self.vim_pending = Some(self.current);
+            }
+            return;
+        }
+        self.vim_pending = None;
+        if jump_view && key.code == KeyCode::Char('G') {
+            self.pass_on(KeyEvent::from(KeyCode::End));
+            return;
+        }
         match key.code {
             KeyCode::Char('q') => self.quit = true,
+            KeyCode::Char('I') => {
+                self.source_guide = true;
+                self.guide_deep = false;
+                self.guide_pending_g = false;
+                self.guide_selected = 0;
+                self.guide_scroll = 0;
+            }
+            KeyCode::Char('v') if self.current >= 10 => {
+                let _ = self.open(if self.data.has_target() {
+                    "process"
+                } else {
+                    "system"
+                });
+            }
+            KeyCode::Char('F') | KeyCode::Char('O') => {
+                let _ = self.open("overview");
+            }
             KeyCode::Backspace if !self.history.is_empty() => self.back(),
             KeyCode::Char('M') => self.mouse = !self.mouse,
-            KeyCode::Char('?') => self.help = true,
+            KeyCode::Char('?') => {
+                self.help_scroll = 0;
+                self.help = true;
+            }
+            KeyCode::Right | KeyCode::Left
+                if self.views[self.current].name() == "overview" && !self.gallery =>
+            {
+                self.pass_on(key)
+            }
+            KeyCode::Right | KeyCode::Left
+                if matches!(
+                    self.views[self.current].name(),
+                    "flame" | "lanes" | "heatmap"
+                ) && !self.gallery =>
+            {
+                let code = if key.code == KeyCode::Left {
+                    KeyCode::Char('h')
+                } else {
+                    KeyCode::Char('l')
+                };
+                self.pass_on(KeyEvent::new(code, key.modifiers));
+            }
             KeyCode::Right | KeyCode::Tab => self.current = (self.current + 1) % count,
             KeyCode::Char(' ') | KeyCode::Char('n') if self.gallery => {
                 self.current = (self.current + 1) % count
             }
-            KeyCode::Char('p') if self.gallery => self.current = (self.current + count - 1) % count,
-            KeyCode::Left | KeyCode::BackTab => self.current = (self.current + count - 1) % count,
+            KeyCode::Char('p') if self.gallery => {
+                self.current = (self.current % count + count - 1) % count
+            }
+            KeyCode::Left | KeyCode::BackTab => {
+                self.current = (self.current % count + count - 1) % count
+            }
             KeyCode::Char(digit @ '0'..='9') => {
                 // `0` is the tenth.
                 let index = (digit as usize + 9 - '0' as usize) % 10;
@@ -189,30 +310,90 @@ impl App {
         if let Some((view, focus)) = self.history.pop() {
             self.current = view;
             self.focus = focus;
-            self.clicked = None;
+            self.enter_region = None;
         }
     }
 
     /// Handles one mouse event: a click selects what is under it, a click on
-    /// what is selected goes in, the wheel moves as `↑`/`↓` do, a right click
+    /// on the open control goes in, the wheel moves as `↑`/`↓` do, a right click
     /// comes back. Every one of these is a key too: nothing is reachable by
     /// the mouse only.
     pub fn mouse(&mut self, event: MouseEvent) {
         if !self.mouse {
             return;
         }
-        if self.help {
-            if matches!(event.kind, MouseEventKind::Down(_)) {
-                self.help = false;
+        if self.source_guide {
+            match event.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(region) = self
+                        .guide_regions
+                        .iter()
+                        .find(|r| r.contains(event.column, event.row))
+                    {
+                        self.guide_selected = region.id;
+                        self.guide_pending_g = false;
+                        self.guide_scroll = 0;
+                    }
+                }
+                MouseEventKind::Down(MouseButton::Right) => self.source_guide = false,
+                MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                    let down = event.kind == MouseEventKind::ScrollDown;
+                    if self
+                        .guide_regions
+                        .iter()
+                        .any(|r| r.contains(event.column, event.row))
+                    {
+                        self.guide_selected = if down {
+                            (self.guide_selected + 1).min(self.guide_sources().len())
+                        } else {
+                            self.guide_selected.saturating_sub(1)
+                        };
+                        self.guide_scroll = 0;
+                    } else {
+                        self.guide_scroll = if down {
+                            self.guide_scroll.saturating_add(3)
+                        } else {
+                            self.guide_scroll.saturating_sub(3)
+                        };
+                    }
+                }
+                _ => {}
             }
             return;
         }
+        if self.help {
+            match event.kind {
+                MouseEventKind::ScrollDown => self.help_scroll = self.help_scroll.saturating_add(3),
+                MouseEventKind::ScrollUp => self.help_scroll = self.help_scroll.saturating_sub(3),
+                MouseEventKind::Down(MouseButton::Right) => self.help = false,
+                _ => {}
+            }
+            return;
+        }
+        self.vim_pending = None;
         let (column, row) = (event.column, event.row);
         match event.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                if self
+                    .enter_region
+                    .is_some_and(|rect| Region::new(rect, 0).contains(column, row))
+                {
+                    self.pass_on(KeyEvent::from(KeyCode::Enter));
+                    return;
+                }
                 if let Some(tab) = self.tabs.iter().find(|tab| tab.contains(column, row)) {
-                    self.current = tab.id;
-                    self.clicked = None;
+                    if tab.id == usize::MAX {
+                        let _ = self.open("overview");
+                    } else if tab.id == usize::MAX - 1 {
+                        self.source_guide = true;
+                        self.guide_deep = false;
+                        self.guide_pending_g = false;
+                        self.guide_selected = 0;
+                        self.guide_scroll = 0;
+                    } else {
+                        self.current = tab.id;
+                    }
+                    self.enter_region = None;
                     return;
                 }
                 let hit = self.views[self.current]
@@ -224,21 +405,15 @@ impl App {
                 let Some(id) = hit else {
                     return;
                 };
-                let here = (self.current, id);
                 let ctx = Ctx {
                     data: &self.data,
                     against: self.against.as_ref(),
                     focus: &self.focus,
                 };
                 let action = self.views[self.current].select(id, &ctx);
-                if self.clicked == Some(here) {
-                    // A click on the selection goes in, as `Enter` does.
+                // Selecting a region never changes the view.
+                if !matches!(action, Action::Goto { .. }) {
                     self.act(action);
-                    self.clicked = None;
-                    self.pass_on(KeyEvent::from(KeyCode::Enter));
-                } else {
-                    self.act(action);
-                    self.clicked = Some(here);
                 }
             }
             MouseEventKind::Down(MouseButton::Right) => self.back(),
@@ -276,6 +451,8 @@ impl App {
         self.draw_footer(frame, footer);
         if self.help {
             self.draw_help(frame, body);
+        } else if self.source_guide {
+            self.draw_source_guide(frame, body);
         }
     }
 
@@ -293,7 +470,7 @@ impl App {
             after.push(Span::raw(" │ "));
             after.push(Span::styled(
                 format!("focus: {}", self.focus.describe()),
-                Style::new().fg(palette::ACCENT),
+                Style::new().fg(palette::accent()),
             ));
         }
         // On a narrow terminal the corner says the view's cost alone: the
@@ -311,7 +488,12 @@ impl App {
         let room = usize::from(area.width).saturating_sub(fixed);
         let origin = ellipsis_start(&self.data.origin, room);
         let mut left = vec![
-            Span::styled("omn top", Style::new().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "omn top",
+                Style::new()
+                    .fg(crate::theme::accent())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" │ "),
             Span::raw(origin),
         ];
@@ -331,7 +513,7 @@ impl App {
     /// each as a share of one cpu over the run's wall-clock -- one measure
     /// for the three, so they can be read against each other.
     fn cost_line(&self, with_others: bool) -> Line<'static> {
-        let style = Style::new().fg(palette::COST);
+        let style = Style::new().fg(palette::cost());
         let view = match &self.cost {
             Cost::Measured(meter) => match meter.percent() {
                 Some(percent) => format!("view {} cpu", units::percent(percent)),
@@ -392,8 +574,89 @@ impl App {
                 Style::new().add_modifier(Modifier::BOLD),
             ));
         }
-        for (index, view) in self.views.iter().enumerate() {
-            let label = format!(" {} {} ", (index + 1) % 10, view.name());
+        let families = if area.width < 55 {
+            " [F] "
+        } else {
+            " [F] Families "
+        };
+        if area.width > 0 && area.height > 0 {
+            self.tabs.push(Region::new(
+                Rect::new(area.x, area.y, area.width.min(families.len() as u16), 1),
+                usize::MAX,
+            ));
+        }
+        spans.push(Span::styled(
+            families,
+            Style::new()
+                .fg(crate::theme::accent())
+                .add_modifier(Modifier::BOLD),
+        ));
+        let guide = if area.width < 55 {
+            " [I] "
+        } else {
+            " [I] Guide "
+        };
+        let x = area.x.saturating_add(families.len() as u16);
+        let width = area
+            .x
+            .saturating_add(area.width)
+            .saturating_sub(x)
+            .min(guide.len() as u16);
+        if width > 0 && area.height > 0 {
+            self.tabs
+                .push(Region::new(Rect::new(x, area.y, width, 1), usize::MAX - 1));
+        }
+        spans.push(Span::styled(
+            guide,
+            Style::new()
+                .fg(crate::theme::accent())
+                .add_modifier(Modifier::BOLD),
+        ));
+        if self.current >= 10 && !self.gallery && area.width >= 110 {
+            spans.push(Span::raw(format!(
+                " › {}   |   v views",
+                self.views[self.current].title()
+            )));
+            frame.render_widget(Paragraph::new(Line::from(spans)), area);
+            return;
+        }
+        if area.width < 110 && !self.gallery {
+            for index in 0..10 {
+                let label = format!(" {}", (index + 1) % 10);
+                let x = area
+                    .x
+                    .saturating_add(spans.iter().map(Span::width).sum::<usize>() as u16);
+                let width = area
+                    .x
+                    .saturating_add(area.width)
+                    .saturating_sub(x)
+                    .min(label.len() as u16);
+                if width > 0 && area.height > 0 {
+                    self.tabs
+                        .push(Region::new(Rect::new(x, area.y, width, 1), index));
+                }
+                spans.push(Span::styled(
+                    label,
+                    if index == self.current {
+                        Style::new()
+                            .fg(crate::theme::accent())
+                            .add_modifier(Modifier::REVERSED | Modifier::BOLD)
+                    } else {
+                        Style::new()
+                    },
+                ));
+            }
+            spans.push(Span::raw(format!("  {}", self.views[self.current].name())));
+            frame.render_widget(Paragraph::new(Line::from(spans)), area);
+            return;
+        }
+        for (index, view) in
+            self.views
+                .iter()
+                .enumerate()
+                .take(if self.gallery { self.views.len() } else { 10 })
+        {
+            let label = format!(" {} {}", (index + 1) % 10, view.name());
             let x = area.x + spans.iter().map(Span::width).sum::<usize>() as u16;
             let width = (label.chars().count() as u16).min((area.x + area.width).saturating_sub(x));
             if width > 0 {
@@ -405,7 +668,9 @@ impl App {
             if index == self.current {
                 spans.push(Span::styled(
                     label,
-                    Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD),
+                    Style::new()
+                        .fg(crate::theme::accent())
+                        .add_modifier(Modifier::REVERSED | Modifier::BOLD),
                 ));
             } else {
                 spans.push(Span::raw(label));
@@ -414,8 +679,32 @@ impl App {
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
-    fn draw_footer(&self, frame: &mut Frame<'_>, area: Rect) {
+    fn draw_footer(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        self.enter_region = None;
+        let ctx = Ctx {
+            data: &self.data,
+            against: self.against.as_ref(),
+            focus: &self.focus,
+        };
+        let enter_label = if self.views[self.current].takes_text() {
+            None
+        } else {
+            self.views[self.current].enter_label(&ctx)
+        };
         let mut spans = Vec::new();
+        if let Some(label) = enter_label {
+            let text = format!("[Enter] {label}");
+            let width = (text.chars().count() as u16).min(area.width);
+            if width > 0 && area.height > 0 {
+                self.enter_region = Some(Rect::new(area.x, area.y, width, 1));
+            }
+            spans.push(Span::styled(
+                text,
+                Style::new()
+                    .fg(crate::theme::accent())
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
         let mut push = |key: &str, what: &str| {
             if !spans.is_empty() {
                 spans.push(Span::raw("  "));
@@ -429,9 +718,10 @@ impl App {
         if self.gallery {
             push("space/p", "next/previous view");
         }
-        for (key, what) in FRAME_KEYS {
-            push(key, what);
-        }
+        push("q", "quit");
+        push("F", "families");
+        push("I", "guide");
+        push("?", "help");
         if let Some((view, _)) = self.history.last() {
             push("⌫", &format!("back to {}", self.views[*view].name()));
         }
@@ -441,11 +731,288 @@ impl App {
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
-    fn draw_help(&self, frame: &mut Frame<'_>, area: Rect) {
-        let [popup] = Layout::horizontal([Constraint::Percentage(80)])
+    fn guide_sources(&self) -> Vec<&str> {
+        let mut sources: Vec<&str> = self.views[self.current]
+            .needs()
+            .iter()
+            .map(|need| need.source)
+            .collect();
+        if sources.is_empty() {
+            sources.extend(
+                self.data
+                    .run
+                    .results
+                    .iter()
+                    .map(|result| result.source.as_str()),
+            );
+            sources.extend(
+                self.data
+                    .refused
+                    .iter()
+                    .map(|refusal| refusal.source.as_str()),
+            );
+        }
+        let prefix = match self.views[self.current].name() {
+            "family-cpu" => Some("cpu."),
+            "family-memory" => Some("mem."),
+            "family-disk" => Some("io."),
+            "family-network" => Some("net."),
+            "family-gpu" => Some("gpu."),
+            "family-energy" => Some("power."),
+            "family-time" => Some("sched."),
+            _ => None,
+        };
+        if let Some(prefix) = prefix {
+            sources.retain(|source| source.starts_with(prefix));
+        }
+        sources.sort_unstable();
+        sources.dedup();
+        sources
+    }
+
+    fn draw_source_guide(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        let [popup] = Layout::horizontal([Constraint::Percentage(90)])
             .flex(Flex::Center)
             .areas(area);
-        let [popup] = Layout::vertical([Constraint::Percentage(80)])
+        let [popup] = Layout::vertical([Constraint::Percentage(90)])
+            .flex(Flex::Center)
+            .areas(popup);
+        let inner = popup.inner(ratatui::layout::Margin::new(1, 1));
+        let (list, divider, detail, stacked) = if inner.width < 60 {
+            let [list, divider, detail] = Layout::vertical([
+                Constraint::Percentage(35),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .areas(inner);
+            (list, divider, detail, true)
+        } else {
+            let [list, divider, detail] = Layout::horizontal([
+                Constraint::Percentage(42),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .areas(inner);
+            (list, divider, detail, false)
+        };
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Block::new()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::new().fg(crate::theme::accent()))
+                .title(" Guide · ↑↓/jk · gg/G · d · PgUp/Dn · I close "),
+            popup,
+        );
+        let separator = if stacked {
+            vec![Line::from("─".repeat(divider.width as usize))]
+        } else {
+            (0..divider.height).map(|_| Line::from("│")).collect()
+        };
+        frame.render_widget(
+            Paragraph::new(separator).style(Style::new().fg(crate::theme::accent())),
+            divider,
+        );
+        let sources: Vec<String> = self
+            .guide_sources()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let selected = self.guide_selected.min(sources.len());
+        let capacity = (list.height as usize / 2).max(1);
+        let start = selected.saturating_add(1).saturating_sub(capacity);
+        let mut regions = Vec::new();
+        let mut list_lines: Vec<Line<'_>> = Vec::new();
+        let names = std::iter::once("About this view").chain(sources.iter().map(String::as_str));
+        for (i, name) in names.enumerate().skip(start).take(capacity) {
+            let style = if i == selected {
+                Style::new()
+                    .fg(crate::theme::accent())
+                    .add_modifier(Modifier::REVERSED | Modifier::BOLD)
+            } else {
+                Style::new().add_modifier(Modifier::BOLD)
+            };
+            let description = if i == 0 {
+                "Purpose, reading and limits"
+            } else {
+                crate::views::source_help::short(name)
+                    .or_else(|| {
+                        self.data
+                            .facts
+                            .get(name)
+                            .map(|fact| fact.summary.as_str())
+                            .filter(|s| !s.is_empty())
+                    })
+                    .unwrap_or("Description unavailable")
+            };
+            let y = list.y.saturating_add(list_lines.len() as u16);
+            if y < list.bottom() && list.width > 0 {
+                regions.push(Region::new(
+                    Rect::new(list.x, y, list.width, 2.min(list.bottom() - y)),
+                    i,
+                ));
+            }
+            list_lines.push(Line::from(Span::styled(format!(" {}", name), style)));
+            list_lines.push(Line::from(Span::styled(
+                format!("   {description}"),
+                Style::new().add_modifier(Modifier::DIM),
+            )));
+        }
+        frame.render_widget(Paragraph::new(list_lines), list);
+        let mut lines = Vec::new();
+        if selected == 0 {
+            let name = self.views[self.current].name();
+            let (purpose, reading, limits) = crate::views::view_help::explanation(name);
+            lines.push(Line::from(Span::styled(
+                format!("About {name}"),
+                Style::new()
+                    .fg(crate::theme::accent())
+                    .add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::default());
+            lines.push(Line::from(purpose));
+            lines.push(Line::default());
+            lines.push(Line::from(format!("How to use it: {reading}")));
+            lines.push(Line::default());
+            lines.push(Line::from(format!("Limits: {limits}")));
+            lines.push(Line::default());
+            lines.push(Line::from(
+                "Select a source on the left for its reading guide and quality.",
+            ));
+        } else if let Some(source) = sources.get(selected - 1) {
+            lines.push(Line::from(Span::styled(
+                source.to_owned(),
+                Style::new()
+                    .fg(crate::theme::accent())
+                    .add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::default());
+            if let Some((what, reading)) = crate::views::source_help::explanation(source.as_str()) {
+                lines.push(Line::from(what));
+                lines.push(Line::default());
+                lines.push(Line::from(format!("How to read it: {reading}")));
+            } else if let Some(fact) = self
+                .data
+                .facts
+                .get(source.as_str())
+                .filter(|fact| !fact.summary.is_empty())
+            {
+                lines.push(Line::from(fact.summary.clone()));
+                lines.push(Line::from("No detailed reading guide is available yet."));
+            } else {
+                lines.push(Line::from("No description is available for this source."));
+            }
+            lines.push(Line::default());
+            for result in self
+                .data
+                .run
+                .results
+                .iter()
+                .filter(|result| result.source == *source)
+            {
+                lines.push(Line::from(format!(
+                    "{} · unit: {}",
+                    result.label,
+                    if result.unit.is_empty() {
+                        "not specified"
+                    } else {
+                        &result.unit
+                    }
+                )));
+                let badges = crate::trust::Trust::of(&self.data, result).badges();
+                if !badges.is_empty() {
+                    let mut spans = vec![Span::raw("Quality: ")];
+                    spans.extend(badges);
+                    lines.push(Line::from(spans));
+                }
+            }
+            for refusal in self
+                .data
+                .refused
+                .iter()
+                .filter(|refusal| refusal.source == *source)
+            {
+                lines.push(Line::from(format!(
+                    "{} refused: {}",
+                    refusal.label, refusal.reason
+                )));
+            }
+            lines.push(Line::default());
+            lines.push(Line::from("Series group observations by task, device or other key. Last, mean and max describe observations, not necessarily totals."));
+        } else {
+            lines.push(Line::from("No sources are listed for this view."));
+        }
+        if self.guide_deep {
+            let lesson = if selected == 0 {
+                crate::views::lessons::view(self.views[self.current].name())
+            } else {
+                sources
+                    .get(selected - 1)
+                    .and_then(|source| crate::views::lessons::source(source))
+            };
+            lines.clear();
+            let name = if selected == 0 {
+                self.views[self.current].name()
+            } else {
+                sources.get(selected - 1).map(String::as_str).unwrap_or("")
+            };
+            lines.push(Line::from(Span::styled(
+                format!("Deep dive · {name}"),
+                Style::new()
+                    .fg(crate::theme::accent())
+                    .add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::default());
+            if let Some(lesson) = lesson {
+                let article = if selected == 0 {
+                    crate::views::articles::view(name)
+                } else {
+                    crate::views::articles::source(name)
+                };
+                if let Some(paragraphs) = article {
+                    lines.push(Line::from(Span::styled(
+                        "Understanding the measurement",
+                        Style::new().add_modifier(Modifier::BOLD),
+                    )));
+                    for paragraph in paragraphs {
+                        lines.push(Line::from(paragraph));
+                        lines.push(Line::default());
+                    }
+                }
+                for (heading, text) in [
+                    ("What to look for", lesson.observe),
+                    ("Avoid assuming", lesson.beware),
+                    ("What to check next", lesson.next),
+                ] {
+                    lines.push(Line::from(Span::styled(
+                        heading,
+                        Style::new().add_modifier(Modifier::BOLD),
+                    )));
+                    lines.push(Line::from(text));
+                    lines.push(Line::default());
+                }
+            } else {
+                lines.push(Line::from("No deep dive is available for this item yet. Press d to return to its short guide."));
+            }
+            lines.push(Line::from("d: short guide · PgUp/PgDn: scroll"));
+        } else {
+            lines.push(Line::default());
+            lines.push(Line::from("d: deeper explanation"));
+        }
+        frame.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .scroll((self.guide_scroll, 0)),
+            detail,
+        );
+        self.guide_regions = regions;
+    }
+
+    fn draw_help(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        let [popup] = Layout::horizontal([Constraint::Percentage(90)])
+            .flex(Flex::Center)
+            .areas(area);
+        let [popup] = Layout::vertical([Constraint::Percentage(90)])
             .flex(Flex::Center)
             .areas(popup);
         let bold = Style::new().add_modifier(Modifier::BOLD);
@@ -498,16 +1065,27 @@ impl App {
         ]));
         lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled("refused", Style::new().fg(palette::REFUSED)),
+            Span::styled("refused", Style::new().fg(palette::refused())),
             Span::raw("    a source that was not served shows why where its panel would be"),
         ]));
         lines.push(Line::default());
-        lines.push(Line::from("Any key closes this."));
+
+        let content = Paragraph::new(lines).wrap(Wrap { trim: false });
+        let max_scroll = content
+            .line_count(popup.width.saturating_sub(2))
+            .saturating_sub(popup.height.saturating_sub(2) as usize);
+        self.help_scroll = self
+            .help_scroll
+            .min(max_scroll.min(u16::MAX as usize) as u16);
         frame.render_widget(Clear, popup);
         frame.render_widget(
-            Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .block(Block::new().borders(Borders::ALL).title(" help ")),
+            content.scroll((self.help_scroll, 0)).block(
+                Block::new()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::new().fg(crate::theme::accent()))
+                    .title(" Help · ↑↓/jk · PgUp/Dn · ? close "),
+            ),
             popup,
         );
     }
@@ -614,6 +1192,19 @@ mod tests {
         app.key(KeyEvent::from(code));
     }
 
+    #[test]
+    fn help_scrolls_on_small_terminals_and_closes_like_the_guide() {
+        let mut app = app("http-server");
+        press(&mut app, KeyCode::Char('?'));
+        let initial = crate::snapshot::text(&draw_app(&mut app, 60, 18));
+        press(&mut app, KeyCode::PageDown);
+        let scrolled = crate::snapshot::text(&draw_app(&mut app, 60, 18));
+        assert_ne!(initial, scrolled);
+        assert!(app.help);
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.help);
+    }
+
     /// A run with no target claims no target's cpu, even where a request on
     /// it is keyed per task: its account is the machine's.
     #[test]
@@ -632,8 +1223,8 @@ mod tests {
 
     #[test]
     fn the_first_screen_is_the_process_s_with_a_target_and_the_machine_s_without() {
-        assert_eq!(current(&app("http-server")), "process");
-        assert_eq!(current(&app("machine")), "system");
+        assert_eq!(current(&app("http-server")), "overview");
+        assert_eq!(current(&app("machine")), "overview");
     }
 
     #[test]
@@ -687,8 +1278,264 @@ mod tests {
     }
 
     #[test]
+    fn distinct_family_and_process_shortcuts_work_from_any_view() {
+        let mut app = app("http-server");
+        app.open("flame").unwrap();
+        press(&mut app, KeyCode::Char('F'));
+        assert_eq!(current(&app), "overview");
+        press(&mut app, KeyCode::Char('0'));
+        assert_eq!(current(&app), "process");
+        press(&mut app, KeyCode::Char('F'));
+        assert_eq!(current(&app), "overview");
+    }
+
+    #[test]
+    fn families_button_and_source_guide_work_from_existing_views() {
+        let mut app = app("http-server");
+        app.open("flame").unwrap();
+        app.key(KeyEvent::from(KeyCode::Char('I')));
+        let screen = draw_app(&mut app, WIDTH, HEIGHT);
+        assert!(find(&screen, "About flame").is_some());
+        assert!(find(&screen, "cpu.profile").is_some());
+        app.key(KeyEvent::from(KeyCode::Esc));
+        assert_eq!(current(&app), "flame");
+        let screen = draw_app(&mut app, WIDTH, HEIGHT);
+        let (column, row) = find(&screen, "[F] Families").unwrap();
+        click(&mut app, column + 1, row);
+        assert_eq!(current(&app), "overview");
+    }
+
+    #[test]
+    fn guide_has_view_and_source_pages_and_a_clickable_button() {
+        let mut app = app("http-server");
+        app.open("family-memory").unwrap();
+        let screen = draw_app(&mut app, WIDTH, HEIGHT);
+        let (x, y) = find(&screen, "[I] Guide").unwrap();
+        click(&mut app, x + 1, y);
+        let screen = draw_app(&mut app, WIDTH, HEIGHT);
+        assert!(find(&screen, "About family-memory").is_some());
+        app.key(KeyEvent::from(KeyCode::Down));
+        let screen = draw_app(&mut app, WIDTH, HEIGHT);
+        assert!(find(&screen, "Page faults").is_some());
+        app.key(KeyEvent::from(KeyCode::Char('I')));
+        assert!(!app.source_guide);
+    }
+
+    #[test]
+    fn deep_guide_covers_views_sources_and_missing_lessons() {
+        let mut app = app("http-server");
+        app.open("family-memory").unwrap();
+        app.data.run.results.push(Results {
+            source: "mem.custom".into(),
+            label: "mem.custom".into(),
+            ..Results::default()
+        });
+        press(&mut app, KeyCode::Char('I'));
+        press(&mut app, KeyCode::Char('d'));
+        let screen = draw_app(&mut app, WIDTH, HEIGHT);
+        assert!(find(&screen, "Deep dive · family-memory").is_some());
+        assert!(find(&screen, "What to look for").is_some());
+        let custom = app
+            .guide_sources()
+            .iter()
+            .position(|name| *name == "mem.custom")
+            .unwrap()
+            + 1;
+        app.guide_selected = custom;
+        let screen = draw_app(&mut app, WIDTH, HEIGHT);
+        assert!(find(&screen, "No deep dive is available").is_some());
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.guide_deep && app.source_guide);
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.source_guide);
+    }
+
+    #[test]
+    fn lessons_cover_registered_views_and_default_family_sources() {
+        for view in crate::views::registry() {
+            assert!(
+                crate::views::lessons::view(view.name()).is_some(),
+                "{}",
+                view.name()
+            );
+            let paragraphs = crate::views::articles::view(view.name()).expect(view.name());
+            assert!(
+                paragraphs.iter().map(|p| p.len()).sum::<usize>() > 250,
+                "{}",
+                view.name()
+            );
+            for need in view.needs() {
+                if crate::views::source_help::explanation(need.source).is_some() {
+                    assert!(
+                        crate::views::lessons::source(need.source).is_some(),
+                        "{}",
+                        need.source
+                    );
+                    let paragraphs =
+                        crate::views::articles::source(need.source).expect(need.source);
+                    assert!(
+                        paragraphs.iter().map(|p| p.len()).sum::<usize>() > 250,
+                        "{}",
+                        need.source
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn guide_lists_descriptions_and_click_selects_source() {
+        let mut app = app("http-server");
+        app.open("family-memory").unwrap();
+        app.key(KeyEvent::from(KeyCode::Char('I')));
+        let screen = draw_app(&mut app, 80, 24);
+        assert!(find(&screen, "Memory page faults").is_some());
+        let (x, y) = find(&screen, "Process memory held in RAM").unwrap();
+        click(&mut app, x, y);
+        let screen = draw_app(&mut app, 80, 24);
+        assert!(find(&screen, "Resident memory:").is_some());
+    }
+
+    #[test]
+    fn vim_jumps_match_home_end_in_supported_views() {
+        for (view, fixture) in [
+            ("system", "http-server"),
+            ("ledger", "http-server"),
+            ("timebar", "workload-timebar"),
+            ("wake", "workload-wake"),
+            ("flows", "workload-flows"),
+            ("lanes", "workload-lanes"),
+        ] {
+            let mut vim = app(fixture);
+            let mut keys = app(fixture);
+            vim.open(view).unwrap();
+            keys.open(view).unwrap();
+            draw_app(&mut vim, WIDTH, HEIGHT);
+            draw_app(&mut keys, WIDTH, HEIGHT);
+            press(&mut vim, KeyCode::Char('G'));
+            press(&mut keys, KeyCode::End);
+            assert_eq!(
+                draw_app(&mut vim, WIDTH, HEIGHT),
+                draw_app(&mut keys, WIDTH, HEIGHT),
+                "{view} G"
+            );
+            press(&mut vim, KeyCode::Char('g'));
+            press(&mut vim, KeyCode::Char('g'));
+            press(&mut keys, KeyCode::Home);
+            assert_eq!(
+                draw_app(&mut vim, WIDTH, HEIGHT),
+                draw_app(&mut keys, WIDTH, HEIGHT),
+                "{view} gg"
+            );
+        }
+    }
+
+    #[test]
+    fn arrows_match_hl_in_flame_without_switching_views() {
+        let mut arrow = app("cpython-hot");
+        let mut vim = app("cpython-hot");
+        arrow.open("flame").unwrap();
+        vim.open("flame").unwrap();
+        draw_app(&mut arrow, WIDTH, HEIGHT);
+        draw_app(&mut vim, WIDTH, HEIGHT);
+        press(&mut arrow, KeyCode::Right);
+        press(&mut vim, KeyCode::Char('l'));
+        assert_eq!(current(&arrow), "flame");
+        assert_eq!(
+            crate::snapshot::text(&draw_app(&mut arrow, WIDTH, HEIGHT)),
+            crate::snapshot::text(&draw_app(&mut vim, WIDTH, HEIGHT))
+        );
+    }
+
+    #[test]
+    fn guide_vim_jumps_do_not_leave_guide() {
+        let mut app = app("http-server");
+        app.open("family-memory").unwrap();
+        press(&mut app, KeyCode::Char('I'));
+        press(&mut app, KeyCode::Char('G'));
+        assert_eq!(app.guide_selected, app.guide_sources().len());
+        press(&mut app, KeyCode::Char('g'));
+        press(&mut app, KeyCode::Char('g'));
+        assert_eq!(app.guide_selected, 0);
+        assert!(app.source_guide);
+    }
+
+    #[test]
+    fn compact_nav_keeps_all_ten_views_clickable() {
+        for width in [40, 60, 80] {
+            let mut app = app("http-server");
+            app.open("system").unwrap();
+            draw_app(&mut app, width, 24);
+            for index in 0..10 {
+                let tab = app
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.id == index)
+                    .unwrap_or_else(|| panic!("tab {index} missing at {width}"));
+                assert!(tab.rect.width > 0);
+            }
+            let tab = *app.tabs.iter().find(|tab| tab.id == 9).unwrap();
+            click(&mut app, tab.rect.x + tab.rect.width - 1, tab.rect.y);
+            assert_eq!(current(&app), "process");
+        }
+    }
+
+    #[test]
+    fn open_button_names_destination_and_requires_an_explicit_click() {
+        let mut app = app("http-server");
+        app.open("process").unwrap();
+        let screen = draw_app(&mut app, 80, 24);
+        assert!(find(&screen, "[Enter] open flame").is_some());
+        let (x, y) = find(&screen, "[Enter] open flame").unwrap();
+        click(&mut app, x + 1, y);
+        assert_eq!(current(&app), "flame");
+    }
+
+    #[test]
+    fn guide_has_separate_panes_at_narrow_and_wide_sizes() {
+        for width in [40, 55, 80, 120] {
+            let mut app = app("http-server");
+            app.open("family-memory").unwrap();
+            press(&mut app, KeyCode::Char('I'));
+            let screen = draw_app(&mut app, width, 24);
+            assert!(find(&screen, "About this view").is_some(), "{width}");
+            assert!(find(&screen, "About family-memory").is_some(), "{width}");
+            assert!(app
+                .guide_regions
+                .iter()
+                .all(|region| region.rect.x + region.rect.width <= width));
+        }
+    }
+
+    #[test]
+    fn compact_flows_and_heatmap_keep_useful_measurements() {
+        let mut flows = app("workload-flows");
+        flows.open("flows").unwrap();
+        let screen = draw_app(&mut flows, 60, 18);
+        assert!(find(&screen, "Compact view").is_some());
+        assert!(!flows.views[flows.current].regions().is_empty());
+        let mut heatmap = app("workload-heatmap");
+        heatmap.open("heatmap").unwrap();
+        let screen = draw_app(&mut heatmap, 60, 18);
+        assert!(find(&screen, "Compact summary").is_some());
+        assert!(find(&screen, "p99").is_some());
+    }
+
+    #[test]
+    fn all_views_draw_on_small_terminals() {
+        for (width, height) in [(60, 18), (80, 24)] {
+            let mut app = app("http-server");
+            for index in 0..app.views.len() {
+                app.current = index;
+                draw_app(&mut app, width, height);
+            }
+        }
+    }
+
+    #[test]
     fn a_click_on_a_tab_opens_its_view() {
         let mut app = app("machine");
+        app.open("system").unwrap();
         let screen = draw_app(&mut app, WIDTH, HEIGHT);
         let (column, row) = find(&screen, "6 heatmap").expect("the tab is drawn");
         click(&mut app, column + 2, row);
@@ -696,7 +1543,7 @@ mod tests {
     }
 
     #[test]
-    fn a_click_selects_a_second_goes_in_and_a_right_click_comes_back() {
+    fn clicks_select_enter_opens_and_right_click_comes_back() {
         let mut app = app("http-server");
         app.open("system").unwrap();
         draw_app(&mut app, WIDTH, HEIGHT);
@@ -712,7 +1559,9 @@ mod tests {
         press(&mut keyed, KeyCode::Down);
         press(&mut keyed, KeyCode::Enter);
         click(&mut app, second.rect.x + 2, second.rect.y);
-        assert_eq!(current(&app), "ledger", "a click on the selection goes in");
+        assert_eq!(current(&app), "system", "a second click only selects");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(current(&app), "ledger", "Enter opens the announced view");
         assert_eq!(
             app.focus, keyed.focus,
             "the click selected what the keys do"
@@ -724,6 +1573,7 @@ mod tests {
     #[test]
     fn with_the_mouse_off_a_click_does_nothing() {
         let mut app = app("machine");
+        app.open("system").unwrap();
         let screen = draw_app(&mut app, WIDTH, HEIGHT);
         press(&mut app, KeyCode::Char('M'));
         let (column, row) = find(&screen, "6 heatmap").unwrap();

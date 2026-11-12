@@ -1,8 +1,8 @@
 omn top │ fixture cpython-hot │ 3.99s                                                                                                                                                     view: snapshot │ collectors ≥9.54% │ target 93.1% cpu
- 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
+ [F] Families  [I] Guide  1 system 2 flame 3 ledger 4 request 5 timebar 6 heatmap 7 lanes 8 wake 9 flows 0 process
  flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 on cpu: 3.96k → 7.89k (x1.99) · absolute: the difference is `py::score:/omniscient/cases/cpython-interpreter/hot.py` +3932 own (x2.00, 36.2σ); nothing else beyond the noise
-┌ on cpu cpu.profile 3.96k vs 7.89k 136 late ~low det degraded x8 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+╭ on cpu cpu.profile 3.96k vs 7.89k 136 late ~low det degraded x8 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 │width ∝ the mean of the two runs · heaviest left                                                                                                                                                                               24 frames deep │
 │▏all › ⋯20⋯ › py::score:/omniscient/cases/cpython-interpreter/hot.py 5.89k                                                                                                                                                                    │
 │▏libpython3.14+0x64ef5 15.0%        ▏libpython3.14+0x596ab 13.2%   ▏PyNumber_Remainder 9.93%▏+0x5e970 9.03%      ▏+0x5eae3 7.57%   ▏+0x5efd3 ▏PyO▏lib▏lib▏li▏li▏li▏li▏li▏li▏li▏P▏li▏l▏P▏l▏l ▏l                                                │
@@ -49,12 +49,12 @@ on cpu: 3.96k → 7.89k (x1.99) · absolute: the difference is `py::score:/omnis
 │  outside the target's own code, which is where the callers are lost; `--stack fp+leaf` recovers the leaf's caller and `--stack dwarf` the whole chain                                                                                        │
 │‼ the other run: names came from -- perf-2627262.map: perf-map, the 176 lines the program wrote for code no file holds; python3.14: its dynamic symbols only: its internal functions are unnamed; ld-linux-x86-64.so.2: its dynamic symbols   │
 │  only: its internal functions are unnamed; libc.so.6: its dynamic symbols only: its internal functions are unnamed; libpython3.14.so.1.0: its dynamic symbols only: its internal functions are unnamed                                       │
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-┌ off cpu sched.offcpu ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ off cpu sched.offcpu ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 │no block was recorded: the target never waited, or never long enough for `sched.offcpu` to see it (0 events) ~low det degraded x2                                                                                                             │
 │                                                                                                                                                                                                                                              │
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 on cpu ▸ py::score:/omniscient/cases/cpython-interpreter/hot.py  the last of 22 frames called in one chain from all
 this run 3.93k → the other 7.86k samples (+3932, x2.00, 36.2σ) · own 3.93k → 7.86k
-⏎ zooms into the selected box, ⌫ out · / finds a name, * the selected one · o switches pane, m shows it alone · t splits off cpu by thread · ! lists caveats
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t split  d shape  ! caveats
++ zooms into the selected box, - out · / finds a name, * the selected one · o switches pane, m shows it alone · t splits off cpu by thread · ! lists caveats
+[Enter] zoom frame  q quit  F families  I guide  ? help  ↑↓hl move  +/- zoom  /* find  om pane  t split  d shape  ! caveats

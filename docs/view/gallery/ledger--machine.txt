@@ -1,6 +1,6 @@
 omn top │ fixture machine │ 20.0s                                                view: snapshot │ collectors ≥2.90% cpu
- 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
-┌ ledger -- what the machine cost over 20.0s of wall-clock ────────────────────────────────────────────────────────────┐
+ [F] Families  [I] Guide  1 system 2 flame 3 ledger 4 request 5 timebar 6 heatmap 7 lanes 8 wake 9 flows 0 process
+╭ ledger -- what the machine cost over 20.0s of wall-clock ────────────────────────────────────────────────────────────╮
 │  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST               │
 │                                                             █                    ▁                                   │
 │▸ cpu time        2.75s on cpu     13.7% of one cpu          █▄▅▄▄▄▄▃▃▃▅▃▄▃▃▃▃▃▃▄██▅▃     ≥323ms  ~low det            │
@@ -24,7 +24,10 @@ omn top │ fixture machine │ 20.0s                                           
 │                                                                                                                      │
 │  to know all of this: ≥331ms of omn's cpu                                                                            │
 │    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which           │
-│ cpu time -- ↑/↓ another line ────────────────────────────────────────────────────────────────────────────────────────│
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│ cpu time · ↑↓ resource · PgUp/Dn detail ─────────────────────────────────────────────────────────────────────────────│
 │cpu.oncpu_time via bpf:raw_tp -- cpu time, per thread                                                                 │
 │· the source is not reproducible between two runs of the same workload                                                │
 │· to know it: 323ms of omn's cpu, and unknown inside the target -- the kernel is not timing eBPF programs on this run:│
@@ -33,8 +36,5 @@ omn top │ fixture machine │ 20.0s                                           
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ line  t next task  enter the view behind the line
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+[Enter] open flame  q quit  F families  I guide  ? help  ↑/↓ line  PgUp/Dn scroll detail  t next task  enter the view be

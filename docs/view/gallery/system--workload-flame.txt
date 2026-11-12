@@ -1,16 +1,12 @@
 omn top │ fixture workload-flame │ 2.05s                          view: snapshot │ collectors ≥13.2% │ target 61.6% cpu
- 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
-┌ system -- the overview: cpu, memory, disk, network, GPU and power, and the processes ────────────────────────────────┐
+ [F] Families  [I] Guide  1 system 2 flame 3 ledger 4 request 5 timebar 6 heatmap 7 lanes 8 wake 9 flows 0 process
+╭ system -- the overview: cpu, memory, disk, network, GPU and power, and the processes ────────────────────────────────╮
 ├ cpu busy, as a share of the whole machine ───────────────────────────────────────────────────────────────── ~low det ┤
 │   10.0% ┤                                                                        last 1.04%                          │
-│         │                                                                        mean 3.65%                          │
-│         │                                                                        peak 6.32%                          │
-│         │                                           ▆▆▆▆▆▆▆▆                     0.86 cpus busy, on average          │
-│         │        ▅▅▅▅▅▅▅▅▅        ▂▂▂▂▂▂▂▂▂         ████████                     by state: in the events only        │
-│         │▆▆▆▆▆▆▆▆██████████████████████████▇▇▇▇▇▇▇▇▇████████                                                         │
-│         │███████████████████████████████████████████████████▄▄▄▄▄▄▄▄▄                                                │
-│         │████████████████████████████████████████████████████████████▅▅▅▅▅▅▅▅▅▄                                      │
-│       0 ┤██████████████████████████████████████████████████████████████████████▇                                     │
+│         │                                           ▁▁▁▁▁▁▁▁                     mean 3.65%                          │
+│         │▁▁▁▁▁▁▁▁▅▅▅▅▅▅▅▅▅▂▂▂▂▂▂▂▂▃▃▃▃▃▃▃▃▃▁▁▁▁▁▁▁▁▁████████                     peak 6.32%                          │
+│         │███████████████████████████████████████████████████▃▃▃▃▃▃▃▃▃            0.86 cpus busy, on average          │
+│       0 ┤████████████████████████████████████████████████████████████▇▇▇▇▇▇▇▇▇▇▄ by state: in the events only        │
 ├ gpu the device, as its driver says ───────────────────────────────────────────────────── ±1.00s ~low det degraded x3 ┤
 │busy                                                                              0.00% mean  0.00% peak              │
 │ ≤100%    ·······································································                                     │
@@ -22,19 +18,23 @@ omn top │ fixture workload-flame │ 2.05s                          view: snap
 ├ power watts, from the RAPL counters, no capacity so one hue; per domain by name: in the events only ─────────────────┤
 │all               ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇█████████▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▅ 47.1W mean  55.8W peak  97J         │
 ├ disk bytes moved, per device; speed unknown, so one hue ────────────────────────────────────────── ~low det degraded ┤
-│          +3 moved nothing: 253:0 259:0 7:0                                                                           │
+│253:0             ······························································· 0B read  0B written                 │
+│259:0             ······························································· 0B read  0B written                 │
+│7:0               ······························································· 0B read  0B written                 │
 ├ network bytes moved, per interface; speed unknown, so one hue ──────────────────────────────────── ~low det degraded ┤
 │wlan0             █████████··························████████···················· 172B in  212B out                   │
-│          +6 moved nothing: br-bf6c2e1afced br-cb843b6eb1dd docker0 enp38s0 lo tailscale0                             │
+│br-bf6c2e         ······························································· 0B in  0B out                       │
+│br-cb843b         ······························································· 0B in  0B out                       │
+│docker0           ······························································· 0B in  0B out                       │
+│enp38s0           ······························································· 0B in  0B out                       │
+│lo                ······························································· 0B in  0B out                       │
+│tailscale         ······························································· 0B in  0B out                       │
 │          └0s──────────────────────────────1.03s───────────────────────────2.05s┘ a cell is 28.9ms, drawn at its peak │
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-┌ processes the target's, by cpu ────────────────────────────────────────────────────┐┌ cost, share of one cpu ────────┐
-│       ID    CPU cpu over the run  ON CPU      RSS FAULTS RUN QUEUE I/O CALLS       ││cpu.oncpu_time   ███████ ≥1.15% │
-│  2620697  48.8%   ▇██████▁         1.00s        ·      8     214µs        10       ││gpu.engine_busy  ████     0.69% │
-│  2620698  19.6%          ▃▃▃▃▃▃▃   401ms        ·      3    85.7µs         2       ││cpu.util         ▏        0.03% │
-│ t2620696  1.35% ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁  27.7ms        ·  1.69k    50.4µs       606       ││net.bytes        ▏        0.03% │
-│  2620696      ·                        ·  13.2MiB      ·         ·         ·       ││io.bytes         ▏        0.02% │
-│                                                                                    ││+3 more                  ≥0.03% │
-│CPU ~low det  FAULTS 23 late  RUN QUEUE ~low det degraded  I/O CALLS ~low det degrad││all of them              ≥1.95% │
-└────────────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────┘
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ process  enter its ledger  s sort  i idle devices
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ processes the target's, by cpu ───────────────────────────────────────────────────╮ ╭ cost, share of one cpu ────────╮
+│       ID    CPU cpu over the run  ON CPU      RSS FAULTS RUN QUEUE I/O CALLS      │ │cpu.oncpu_time   ███████ ≥1.15% │
+│  2620697  48.8%   ▇██████▁         1.00s        ·      8     214µs        10      │ │gpu.engine_busy  ████     0.69% │
+│  2620698  19.6%          ▃▃▃▃▃▃▃   401ms        ·      3    85.7µs         2      │ │+6 more                  ≥0.11% │
+│+2 more  CPU ~low det  FAULTS 23 late  RUN QUEUE ~low det degraded  I/O CALLS ~low │ │all of them              ≥1.95% │
+╰───────────────────────────────────────────────────────────────────────────────────╯ ╰────────────────────────────────╯
+q quit  F families  I guide  ? help  ↑/↓ process  enter its ledger  s sort  i show/hide idle

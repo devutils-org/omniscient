@@ -664,6 +664,9 @@ impl View for RequestView {
         self.regions.clear();
         let block = Block::new()
             .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(crate::theme::border())
+            .title_style(crate::theme::title())
             .title(" request -- what one request costs ");
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -755,6 +758,16 @@ impl View for RequestView {
             _ => {}
         }
         Action::None
+    }
+
+    fn enter_label(&self, ctx: &Ctx<'_>) -> Option<String> {
+        self.selected.as_ref().map(|id| {
+            if ctx.focus.request.as_ref() == Some(id) {
+                "open lanes".to_owned()
+            } else {
+                "focus request".to_owned()
+            }
+        })
     }
 
     fn keys(&self) -> &'static [(&'static str, &'static str)] {
@@ -874,7 +887,7 @@ fn notice_line(
                     "  the focus names {id}, {why}: {} is drawn instead",
                     drawn.id
                 ),
-                Style::new().fg(palette::LOSS),
+                Style::new().fg(palette::loss()),
             ));
         }
     }
@@ -882,13 +895,13 @@ fn notice_line(
     if partial > 0 {
         spans.push(Span::styled(
             format!("  {partial} ≥: a network side unknown"),
-            Style::new().fg(palette::LOSS),
+            Style::new().fg(palette::loss()),
         ));
     }
     if !gathered.undrawn.is_empty() {
         spans.push(Span::styled(
             gathered.undrawn.text(),
-            Style::new().fg(palette::LOSS),
+            Style::new().fg(palette::loss()),
         ));
     }
     (!spans.is_empty()).then(|| Line::from(spans))
@@ -1011,10 +1024,10 @@ fn list_lines(
         let marker = if chosen { "▶ " } else { "  " };
         let mut row_style = trust.style();
         if chosen {
-            row_style = row_style.patch(bold()).fg(palette::ACCENT);
+            row_style = row_style.patch(bold()).fg(palette::accent());
         }
         let mut line = vec![
-            Span::styled(marker, Style::new().fg(palette::ACCENT)),
+            Span::styled(marker, Style::new().fg(palette::accent())),
             Span::styled(format!("{:<id_w$} ", request.id), row_style),
             Span::styled(
                 format!("{:>8}  ", request.span_text()),
@@ -1153,7 +1166,7 @@ fn draw_detail(
     let rule = "─".repeat(usize::from(area.width).saturating_sub(heading.chars().count()));
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(heading, bold().fg(palette::ACCENT)),
+            Span::styled(heading, bold().fg(palette::accent())),
             Span::styled(rule, dim()),
         ])),
         title,
@@ -1219,7 +1232,7 @@ fn bytes_span(request: &Request, trust: &Trust, gathered: &Gathered<'_>) -> Span
     if request.rx_bytes.is_none() || request.tx_bytes.is_none() {
         Span::styled(
             format!("{text} (? where its start was not seen)"),
-            Style::new().fg(palette::LOSS),
+            Style::new().fg(palette::loss()),
         )
     } else {
         Span::styled(text, trust.style())
@@ -1367,7 +1380,7 @@ fn waterfall_lines(
     // The network in: its first byte to its birth, where it happened. When
     // `net.request` could not place the first byte, that part is unknown:
     // said, and marked `?` at the edge of what is known, never drawn as none.
-    let unknown = Style::new().fg(palette::LOSS);
+    let unknown = Style::new().fg(palette::loss());
     let net_in = &STATES[NET_IN];
     let mut row = Row::new(bar_w);
     let mut line = vec![label("  net in", net_in.style())];
@@ -1610,7 +1623,7 @@ fn where_lines(request: &Request, data: &Data, width: u16, trust: &Trust) -> Vec
                 if known {
                     dim()
                 } else {
-                    Style::new().fg(palette::LOSS)
+                    Style::new().fg(palette::loss())
                 },
             ));
         }
@@ -1690,7 +1703,7 @@ fn against_the_others(request: &Request, all: &[Request], trust: &Trust) -> Opti
                 state.name,
                 at_least(difference, request.known(index))
             ),
-            trust.style().fg(palette::WORSE),
+            trust.style().fg(palette::worse()),
         ));
         line.push(Span::styled(
             format!(" (theirs {})", units::duration(typical)),
@@ -1790,7 +1803,7 @@ fn share_lines(
                 indent(),
                 Span::styled(
                     format!("{} ", why.sentence()),
-                    Style::new().fg(palette::LOSS),
+                    Style::new().fg(palette::loss()),
                 ),
             ];
             line.extend(block_trust.badges());
