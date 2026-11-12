@@ -14,7 +14,8 @@
  *                        SECONDS (a guest's; never run on the development
  *                        machine, which has too much memory to fragment)
  *   huge MB              fault MB of anonymous memory 2 MiB at a time, which
- *                        transparent huge pages back where the policy lets
+ *                        transparent huge pages back where the policy lets,
+ *                        300 ms after it starts
  *   readseq PATH MB HINT write PATH (MB of incompressible bytes), evict it
  *                        from the cache, and read its first half 4 KiB at
  *                        a time; HINT random or normal. Half, because over
@@ -237,6 +238,11 @@ int main(int argc, char **argv)
 		if (area == MAP_FAILED)
 			return 9;
 		char *aligned = (char *)(((uintptr_t)area + step - 1) & ~(uintptr_t)(step - 1));
+		/* A moment first: a program gone before omn's first read of it has
+		 * none of its settings read, and the rule needs one. Before the
+		 * faults, not after: compaction is read machine-wide, and an idle
+		 * tail would hold kcompactd's background work too. */
+		usleep(300000);
 		for (size_t at = 0; at < bytes; at += step)
 			aligned[at] = 1;
 		printf("fixture: faulted %s MB\n", argv[2]);

@@ -14646,3 +14646,22 @@ The `gcc-shell` and `make-sqlite` checks that failed beside it in the full
 run passed when the test ran alone: load. A case that needs debuginfod should
 say "skipped: the server has no debug info for this build" rather than fail
 -- filed, not done.
+
+## A launched program that ends before omn's first read has no process setting (2026-11-12)
+
+`advice_truth::defrag_on_madvise_ends_the_compaction_stall` failed on the
+Debian 13 guest after the thirty-second wave's sweep: `mm.thp-defrag-stall`
+was undecided with `process.madv_hugepage_mappings: not read`, and the
+answer held no process setting at all. `conf.process` is a snapshot, read at
+the runner's first round after the program is released; `huge 600` on that
+guest, with less to compact than on Arch, was gone by then. On the
+development machine `omn advise -- /bin/true` reads 0 process settings and
+`-- sleep 0.3` reads 12.
+
+What changed: the rule's "not read" says, when no setting of the target's
+was read at all, that a program which ends that early has none; and the
+fixture's `huge` waits 300 ms before its faults (after them, the window held
+kcompactd's background compaction, and the pair failed on Arch). What did not: a program that short
+still has no process settings. Reading them at its exit would need the
+zombie's `/proc/<pid>`, which keeps `status` but not `smaps` -- filed, not
+done.

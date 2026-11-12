@@ -611,3 +611,11 @@ fn a_device_s_readahead_set_again_reads_ahead() {
 fn defrag_on_madvise_ends_the_compaction_stall() {
     judge_guest_pair("thp", "mm.thp-defrag-stall", "mm.thp.defrag");
 }
+
+/// `irq.on-the-workload-cpus`: a spin pinned to cpu 0 beside a ping flood
+/// whose network interrupts land on cpu 0 loses half its wall clock to them;
+/// with the network card's lines moved to the last cpu, it does not.
+#[test]
+fn interrupts_moved_off_the_pinned_cpu_give_it_back() {
+    judge_guest_pair("irq", "irq.on-the-workload-cpus", "irq.smp_affinity_list");
+}

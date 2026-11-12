@@ -70,6 +70,45 @@ else
     echo "advice: no writable $thp/defrag; the THP pair is not run"
 fi
 
+# --- irq.on-the-workload-cpus: a spin pinned to cpu 0, a ping flood from
+# another cpu, the network card's interrupts on cpu 0 and then on the last.
+nic=$(awk '$2 == "00000000" {print $1; exit}' /proc/net/route)
+cpus=$(nproc)
+nic_irqs=""
+if [ -n "$nic" ] && [ "$cpus" -ge 3 ] && command -v ping >/dev/null; then
+    # The card's lines: its MSI vectors where it has them, its INTx line
+    # otherwise; a virtio card's are its PCI parent's.
+    for dir in "/sys/class/net/$nic/device" "/sys/class/net/$nic/device/.."; do
+        [ -d "$dir/msi_irqs" ] && nic_irqs="$nic_irqs $(ls "$dir/msi_irqs")"
+        [ -z "$nic_irqs" ] && [ -r "$dir/irq" ] && [ "$(cat "$dir/irq")" != 0 ] && nic_irqs=$(cat "$dir/irq")
+    done
+fi
+kept_irqs=$PWD/irq-kept
+: > "$kept_irqs"
+for irq in $nic_irqs; do
+    file=/proc/irq/$irq/smp_affinity_list
+    was=$(cat "$file" 2>/dev/null) || continue
+    # A managed vector refuses the write: it is not this pair's to move.
+    echo 0 > "$file" 2>/dev/null && echo "$irq $was" >> "$kept_irqs"
+done
+if [ -s "$kept_irqs" ]; then
+    last=$((cpus - 1))
+    irqs_to() { awk '{print $1}' "$kept_irqs" | while read -r irq; do echo "$1" > "/proc/irq/$irq/smp_affinity_list"; done; }
+    # /proc/net/route spells the gateway as one little-endian hex word.
+    set -- $(awk '$2 == "00000000" {print $3; exit}' /proc/net/route | sed 's/../& /g')
+    gateway=$(printf '%d.%d.%d.%d' "0x$4" "0x$3" "0x$2" "0x$1")
+    taskset -c 1 ping -f -q "$gateway" >/dev/null 2>&1 &
+    flood=$!
+    sleep 1
+    echo "advice: $nic's lines$(awk '{printf " %s", $1}' "$kept_irqs") under a ping flood of $gateway"
+    pair irq latency "irqs_to 0" "irqs_to $last" -- taskset -c 0 "$fixture" spin 1 400000000
+    kill "$flood" 2>/dev/null
+    wait "$flood" 2>/dev/null
+    while read -r irq value; do echo "$value" > "/proc/irq/$irq/smp_affinity_list"; done < "$kept_irqs"
+else
+    echo "advice: no network card line whose affinity can be written (or no ping, or under 3 cpus); the irq pair is not run"
+fi
+
 # One document: {"<pair>": {"before": ..., "after": ...}}.
 {
     printf '{'

@@ -59,8 +59,8 @@ rule's own setting did not is not credited to the rule.
 their own measurements hold under `settings that bear on this`.
 
 The rules today, each with a ground-truth test (`tests/advice_truth.rs`;
-`bdi.readahead-off` and `mm.thp-defrag-stall` are judged on what a distroproof
-guest brought back, `distroproof-advice.toml`, and `tcp.unsent-backlog` is
+`bdi.readahead-off`, `mm.thp-defrag-stall` and `irq.on-the-workload-cpus` are
+judged on what a distroproof guest brought back, `distroproof-advice.toml`, and `tcp.unsent-backlog` is
 proved in a network namespace of the test's own):
 
 | Rule | Fires on | Setting |
@@ -71,6 +71,7 @@ proved in a network namespace of the test's own):
 | `io.readahead-refused` | a thousand page-cache misses, one block request each, every bdi reading ahead | the program's readahead hint |
 | `bdi.readahead-off` | the same, with a backing device at `read_ahead_kb` 0 | `/sys/class/bdi/*/read_ahead_kb` |
 | `mm.thp-defrag-stall` | compaction during the run, `defrag` at always, nothing madvised | `transparent_hugepage/defrag` |
+| `irq.on-the-workload-cpus` | interrupts taking over a tenth of the run on the cpus a pinned workload may use | `/proc/irq/*/smp_affinity_list` |
 | `tcp.unsent-backlog` | a connection of the program's holding over 1 MiB unsent, no low mark | `net.ipv4.tcp_notsent_lowat` |
 
 What a rule says is in `docs/scenarios/advice.md`, with the numbers its

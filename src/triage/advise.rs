@@ -20,6 +20,7 @@ use super::engine::{self, Dropped, Run};
 use super::{Method, Objective, Refusal, TriageError};
 use crate::capabilities::Capabilities;
 use crate::catalog::Catalog;
+use crate::collect::conf::settings::Scope;
 use crate::collect::conf::{self, settings, Reading, State};
 use crate::emit::{Output, Shortfall};
 use crate::event::{AttrValue, Event};
@@ -113,9 +114,22 @@ pub struct Item {
     /// one of them (the default).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub every: bool,
-    /// A measure this one is divided by: block requests per page-cache miss.
+    /// A measure this one is divided by: block requests per page-cache miss,
+    /// or the run's wall clock.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub per: Option<Box<Item>>,
+    /// For a machine source keyed by cpu: only the events of the cpus the
+    /// target may run on, as `process.cpus_allowed` read them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on: Option<On>,
+}
+
+/// Which of a machine source's cpus a measure reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum On {
+    /// The cpus the target's affinity allows.
+    TargetCpus,
 }
 
 impl Item {
@@ -150,10 +164,13 @@ impl Item {
             .stat
             .map(|stat| format!("{stat:?}").to_lowercase())
             .unwrap_or_default();
-        let own = match &self.attr {
+        let mut own = match &self.attr {
             Some(attr) => format!("{} {stat}({attr})", self.label()),
             None => format!("{} {stat}", self.label()),
         };
+        if self.on == Some(On::TargetCpus) {
+            own.push_str(" on the target's cpus");
+        }
         match &self.per {
             Some(per) => format!("{own} per {}", per.reading()),
             None => own,
@@ -318,11 +335,20 @@ fn check_item(item: &Item, place: Place) -> Result<(), String> {
         return Err(format!("`every` is for a setting's instances: {item:?}"));
     }
     if let Some(per) = &item.per {
-        if per.source.is_none() || per.per.is_some() || per.stat.is_none() || per.mode.is_none() {
+        let wall = per.run.is_some() && per.source.is_none();
+        let measure = per.source.is_some() && per.stat.is_some() && per.mode.is_some();
+        if per.per.is_some() || !(wall || measure) {
             return Err(format!(
-                "`per` names one measure, with a mode and a stat, divided by nothing: {item:?}"
+                "`per` names one measure, with a mode and a stat, or the run's wall clock, \
+                 divided by nothing: {item:?}"
             ));
         }
+    }
+    if item.on.is_some() && (item.target.as_deref() != Some("system") || item.attr.is_none()) {
+        return Err(format!(
+            "`on: target_cpus` keeps a machine source's events by their `cpu`: it needs \
+             `target: system` and an `attr` to reduce: {item:?}"
+        ));
     }
     if let Some(run) = &item.run {
         if run != "wall_ns" {
@@ -784,15 +810,17 @@ fn measure(run: &Run, item: &Item, dropped: &[Dropped]) -> Measured {
         measure_one(run, per, dropped),
     );
     match (top.number, bottom.number) {
-        // A ratio of two counts either of which lost events is no bound
-        // either way: neither `above` nor `below` can be decided on it.
-        (Some(_), Some(_)) if top.lower_bound || bottom.lower_bound => Measured::missing(
-            "events were lost on one side of the ratio, so it bounds nothing".to_owned(),
+        // A divisor that lost events makes the ratio no bound either way:
+        // neither `above` nor `below` can be decided on it. A numerator that
+        // lost them, over an exact divisor -- the wall clock, a count that
+        // lost nothing -- makes it a lower bound, as the numerator is.
+        (Some(_), Some(_)) if bottom.lower_bound => Measured::missing(
+            "events were lost below the ratio's line, so it bounds nothing".to_owned(),
         ),
         (Some(top_number), Some(bottom_number)) if bottom_number > 0.0 => Measured {
             number: Some(top_number / bottom_number),
             text: None,
-            lower_bound: false,
+            lower_bound: top.lower_bound,
             missing: None,
         },
         (_, Some(_)) => top.missing.map_or_else(
@@ -840,10 +868,25 @@ fn measure_one(run: &Run, item: &Item, dropped: &[Dropped]) -> Measured {
     };
     let lower_bound = Shortfall::of(&results.losses, results.events_seen as u64, false).is_some();
     let stat = item.stat.unwrap_or(Stat::Total);
+    let cpus = match item.on {
+        Some(On::TargetCpus) => match target_cpus(run) {
+            Ok(cpus) => Some(cpus),
+            Err(why) => return Measured::missing(why),
+        },
+        None => None,
+    };
     let mut measured = match &item.attr {
         Some(attr) => {
             let events: Vec<&Event> = raw_events(run, &results.label)
                 .filter(|event| event.attr(attr).is_some())
+                .filter(|event| {
+                    cpus.as_ref().is_none_or(|cpus| {
+                        event
+                            .attr("cpu")
+                            .and_then(AttrValue::as_f64)
+                            .is_some_and(|cpu| cpus.contains(&(cpu as u32)))
+                    })
+                })
                 .collect();
             reduce_events(&events, attr, stat)
         }
@@ -851,6 +894,21 @@ fn measure_one(run: &Run, item: &Item, dropped: &[Dropped]) -> Measured {
     };
     measured.lower_bound = lower_bound && matches!(stat, Stat::Total | Stat::Count | Stat::Max);
     measured
+}
+
+/// The cpus the target may run on, as the run read its affinity.
+fn target_cpus(run: &Run) -> Result<Vec<u32>, String> {
+    let readings = settings_of(run);
+    let value = readings
+        .iter()
+        .find(|reading| reading.setting == "process.cpus_allowed")
+        .and_then(|reading| reading.value.clone())
+        .ok_or_else(|| {
+            "the target's affinity (process.cpus_allowed) was not read, so its cpus are unknown"
+                .to_owned()
+        })?;
+    crate::capabilities::parse_cpu_list(&value)
+        .ok_or_else(|| format!("the target's affinity `{value}` is not a cpu list"))
 }
 
 /// The results a measure reads: the request of that label, which is how
@@ -1053,7 +1111,20 @@ fn holds(
                     reading.reason.as_deref().unwrap_or("no reason given")
                 )
             })
-            .unwrap_or_else(|| "not read".to_owned());
+            .unwrap_or_else(|| {
+                let process = settings::find(id).is_some_and(|row| row.scope == Scope::Process);
+                let any_process = readings
+                    .values()
+                    .flatten()
+                    .any(|reading| reading.scope == Scope::Process);
+                if process && !any_process {
+                    "not read, nor any setting of the target's: a launched program that ends \
+                     before omn's first read of it, a few milliseconds in, has none"
+                        .to_owned()
+                } else {
+                    "not read".to_owned()
+                }
+            });
         return Err(format!("{id}: {why}"));
     }
     let other = match &item.below_setting {
@@ -1693,6 +1764,32 @@ mod tests {
         let rules = rules();
         assert!(rules.len() >= 4, "{}", rules.len());
         check_against(rules, &Catalog::embedded().expect("the catalog")).expect("the rules");
+    }
+
+    /// `on: target_cpus` reads a machine source by its events' `cpu`, so it
+    /// needs both; and a measure may be per the run's wall clock.
+    #[test]
+    fn a_measure_on_the_target_s_cpus_is_a_machine_source_s_events() {
+        let rule = |evidence: &str| {
+            format!(
+                "- id: x\n  summary: s\n  objectives: [latency]\n  evidence: [{evidence}]\n  \
+                 setting: vm.swappiness\n  mechanism: m\n  docs: d\n  \
+                 expect: {{source: mem.oom, mode: count, stat: total, goes: down}}\n  \
+                 scope: machine\n  change: c\n  truth: t\n"
+            )
+        };
+        let good = "{source: sched.irq, mode: trace, target: system, attr: total_ns, stat: total, \
+                    on: target_cpus, per: {run: wall_ns}, above: 0.1}";
+        let loaded = load(&rule(good)).expect("a measure on the target's cpus");
+        assert!(loaded[0].evidence[0]
+            .reading()
+            .contains("on the target's cpus per run wall_ns"));
+        for bad in [
+            "{source: sched.irq, mode: trace, attr: total_ns, stat: total, on: target_cpus, above: 0}",
+            "{source: sched.irq, mode: trace, target: system, stat: total, on: target_cpus, above: 0}",
+        ] {
+            assert!(load(&rule(bad)).unwrap_err().contains("on: target_cpus"), "{bad}");
+        }
     }
 
     #[test]

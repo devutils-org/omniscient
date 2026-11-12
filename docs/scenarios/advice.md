@@ -210,3 +210,28 @@ configuration no distribution ships is advice that would be wrong where it
 is read, so there is none: `vm.swappiness` stays a setting `conf.machine`
 reads and `mem.swap` names beside its readings.
 
+## `irq.on-the-workload-cpus` (in a guest)
+
+`distroproof-advice.toml`, as root, 4 cpus: `taskset -c 0 fixture spin 1
+400000000` (one thread, a fixed amount of work) beside `ping -f` of the
+gateway from cpu 1, the network card's interrupt lines on cpu 0, then on
+cpu 3. The guests' card is virtio-net on an IO-APIC line, which takes a new
+affinity; the virtio-blk queues beside it are managed and refuse one
+(`EIO`), which the rule's first caveat says.
+
+| Guest | Interrupt time on cpu 0, per wall clock | Wall clock |
+|---|---|---|
+| Arch 7.2 | 0.419 -> 0.0003: as predicted | 889 ms -> 386 ms |
+| Debian 13, 6.12 | 0.443 -> 0.0003: as predicted | 903 ms -> 425 ms |
+
+The same spin with no ping takes 385 ms: the time the interrupts took is the
+time the pinned thread got back. Measured first by hand, from `/proc/stat`:
+41 to 42 ticks of interrupt time on cpu 0 with the line there, 0 with it on
+cpu 3, two runs each.
+
+The evidence needed one thing the rules could not say: `sched.irq` is the
+machine's, keyed by cpu, and the share that matters is the one on the cpus
+the workload may run on. A measure takes `on: target_cpus` for that -- the
+events whose `cpu` the target's `process.cpus_allowed` allows -- and `per:
+{run: wall_ns}` divides it by the program's wall clock.
+
