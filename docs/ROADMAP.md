@@ -354,7 +354,7 @@ req:a3f1   total 412 ms
       `the_segments_sum_to_the_latency_the_client_measured` holds each of five
       requests within 10 % of the client's own clock; the slow reader is the
       widest, at about +3 %.*
-- [~] **Ground truth**: a synthetic server with known injected delays (`tc netem`,
+- [x] **Ground truth**: a synthetic server with known injected delays (`tc netem`,
       `dm-delay`, `usleep` under a lock) is decomposed correctly. Without that
       test, nothing proves the correlation is right rather than merely plausible.
       *`usleep` under a lock and a cold read, each landing in its own row; since
@@ -371,6 +371,16 @@ req:a3f1   total 412 ms
       `decompose:` of the vertical server puts the delay in its row yet. Left
       `[~]`: it closes when `examples/vertical-one-request.yml`'s block-io
       table reads a file on the delayed device and its row carries the delay.*
+      *Closed 2026-11-12, in guests (`distroproof-vertical.toml`, as root,
+      Arch 7.2 and Debian 13): the server's file on ext4 over `dm-delay`
+      (20 ms a read) over a loop device, and the same session with two
+      requests. The one reading 16 pages has 321.5 ms (Arch) and 315.7 ms
+      (Debian) in `block_io` against 322.2 and 316.1 ms on the worker's own
+      clock; the one reading nothing has none. The block-io table holds it
+      whole in its residue: dm-delay's worker submits each delayed read to the
+      loop device, so no block request the server's thread issued is the one
+      it waited for, and the table says so rather than crediting the device
+      (`vertical::a_delay_below_the_filesystem_lands_in_block_io_and_its_residue`).*
 
 ---
 

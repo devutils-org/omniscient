@@ -1328,3 +1328,112 @@ fn a_request_that_never_ends_is_counted_and_named_and_does_not_leak() {
         holder_held / MS
     );
 }
+
+/// Every guest's run of `distroproof-vertical.toml`, by target: the
+/// document, and what the programs said of their own clocks.
+fn guest_runs() -> Vec<(String, Run)> {
+    let collect = root().join(".distroproof/collect");
+    let Ok(dirs) = std::fs::read_dir(&collect) else {
+        return Vec::new();
+    };
+    let mut runs = Vec::new();
+    for dir in dirs.flatten() {
+        let target = dir.file_name().to_string_lossy().into_owned();
+        let (Ok(json), Ok(err)) = (
+            std::fs::read_to_string(dir.path().join("vertical-guest.json")),
+            std::fs::read_to_string(dir.path().join("vertical-guest.err")),
+        ) else {
+            continue;
+        };
+        let document = serde_json::from_str(&json)
+            .unwrap_or_else(|error| panic!("{target}: the document is not json ({error})"));
+        let said = err
+            .lines()
+            .filter_map(|line| line.strip_prefix("vertical: "))
+            .map(|line| {
+                line.split_whitespace()
+                    .filter_map(|pair| pair.split_once('='))
+                    .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                    .collect()
+            })
+            .collect();
+        runs.push((target, Run { document, said }));
+    }
+    runs.sort_by(|a, b| a.0.cmp(&b.0));
+    runs
+}
+
+/// `dm-delay` below the filesystem (`distroproof-vertical.toml`, 20 ms on
+/// every read of the device the server's file is on): a request that reads
+/// 16 pages carries the delay in its `block_io` row, the one that reads
+/// nothing carries none -- and the block-io table puts it in its residue, not
+/// on the device: dm-delay queues each read, and a kernel worker submits it
+/// to the loop device once the delay is over, so no block request the
+/// server's thread issued is the read it waited for. The wait is whole and
+/// traced; which device request served it is what the residue says no row
+/// accounts for.
+#[test]
+fn a_delay_below_the_filesystem_lands_in_block_io_and_its_residue() {
+    let runs = guest_runs();
+    if runs.is_empty() {
+        return eprintln!(
+            "skipped: no guest brought back the vertical run; run distroproof-vertical.toml \
+             (`distroproof up -f distroproof-vertical.toml`)"
+        );
+    }
+    const DELAY_MS: f64 = 20.0;
+    const READS: f64 = 16.0;
+    for (target, run) in &runs {
+        let quiet = run.request("a001");
+        let delayed = run.request("a002");
+        let worker_read: f64 = delayed.worker["read_ns"].parse().expect("read_ns");
+        let done: f64 = delayed.worker["done_reads"].parse().expect("done_reads");
+        assert_eq!(done, READS, "{target}: the worker read {done} pages");
+        // The worker's own clock around its reads holds every delayed read.
+        assert!(
+            worker_read >= READS * DELAY_MS * MS * 0.95,
+            "{target}: the reads took {} ms on the worker's clock",
+            worker_read / MS
+        );
+        let block_io = delayed.row("block_io");
+        assert!(
+            block_io >= READS * DELAY_MS * MS * 0.95 && block_io <= worker_read * 1.01,
+            "{target}: block_io {} ms against {} reads of {DELAY_MS} ms, {} ms on the worker's \
+             clock",
+            block_io / MS,
+            READS,
+            worker_read / MS
+        );
+        assert!(
+            quiet.table["rows"]
+                .as_array()
+                .expect("rows")
+                .iter()
+                .all(|row| row["state"] != "block_io"
+                    || row["amount"].as_f64().unwrap_or(0.0) < DELAY_MS * MS),
+            "{target}: the request that read nothing waited for the disk: {}",
+            quiet.table
+        );
+        let table = delayed
+            .block_table
+            .unwrap_or_else(|| panic!("{target}: no block-io table for the delayed request"));
+        let device = amount(table, "device");
+        let residue = table["residue"].as_f64().expect("a residue");
+        assert!(
+            device < block_io * 0.25 && (residue - (block_io - device)).abs() < MS,
+            "{target}: the server's own block requests hold {} ms of the {} ms wait and the \
+             residue {} ms: dm-delay's worker submits the delayed reads, not the server",
+            device / MS,
+            block_io / MS,
+            residue / MS
+        );
+        eprintln!(
+            "{target}: block_io {:.1} ms, worker's reads {:.1} ms, the server's own block \
+             requests {:.1} ms, the residue {:.1} ms",
+            block_io / MS,
+            worker_read / MS,
+            device / MS,
+            residue / MS
+        );
+    }
+}

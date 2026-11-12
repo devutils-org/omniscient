@@ -1,0 +1,29 @@
+# The vertical case on a delayed device (docs/ROADMAP.md, phase 4, the
+# `dm-delay` ground truth): the server's data file on an ext4 over dm-delay
+# over a loop device, as root in a guest -- losetup and dmsetup are not the
+# development machine's to run. tests/vertical.rs judges what comes back.
+#
+#   scripts/release.sh && scripts/distroproof/vertical-build.sh
+#   distroproof up -f distroproof-vertical.toml --no-tui --jobs 2
+#   cargo test --test vertical a_delay_below_the_filesystem
+
+[defaults]
+memory = "2G"
+cpus = 4
+timeout = "20m"
+
+[[target]]
+name = "vertical-arch"
+image = "arch"
+
+[[target]]
+name = "vertical-debian-13"
+image = "debian-13"
+
+[run]
+setup = "sh scripts/distroproof/setup.sh"
+command = "sh scripts/distroproof/vertical.sh"
+as_user = "root"
+collect = ["vertical-guest.json", "vertical-guest.err"]
+exclude = ["*"]
+include = ["target/dist", "target/dp-vertical", "scripts/distroproof", "examples/vertical-one-request.yml"]
