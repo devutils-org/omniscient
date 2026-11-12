@@ -78,6 +78,35 @@ impl Prepared for Prepare {
     }
 }
 
+/// How long a process's executable must stay the same before it is read,
+/// and the longest the first read waits for that.
+const SETTLED: std::time::Duration = std::time::Duration::from_millis(10);
+const SETTLE_AT_MOST: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Waits until `pid` has stopped exec'ing: its executable the same at two
+/// looks [`SETTLED`] apart, for at most [`SETTLE_AT_MOST`]. A launched
+/// program is often a chain -- `taskset -c 0 nice -n 7 choom -n 345 -- prog`
+/// -- each link setting what the next inherits, and a read in the middle of
+/// it reads a wrapper's settings as the program's: the affinity before
+/// `taskset` applied it. Returns whether it settled; a process gone meanwhile
+/// is the read's to report.
+fn settle(pid: i32) -> bool {
+    let exe = || std::fs::read_link(format!("/proc/{pid}/exe")).ok();
+    let started = std::time::Instant::now();
+    let mut seen = exe();
+    loop {
+        std::thread::sleep(SETTLED);
+        let now = exe();
+        if now.is_none() || now == seen {
+            return now.is_some();
+        }
+        if started.elapsed() >= SETTLE_AT_MOST {
+            return false;
+        }
+        seen = now;
+    }
+}
+
 /// Every setting one read of the target finds: the machine's, and the
 /// process's when there is one.
 fn read_all(pid: Option<i32>, machine: bool) -> Result<(Vec<Reading>, usize), SampleError> {
@@ -193,6 +222,9 @@ impl Collector for Once {
             return Ok(Vec::new());
         }
         self.done = true;
+        if let Some(pid) = self.pid {
+            settle(pid);
+        }
         let (readings, unread) = read_all(self.pid, self.pid.is_none())?;
         let ts_ns = monotonic_ns();
         let mut events: Vec<Event> = readings
@@ -241,6 +273,10 @@ struct Changed {
 
 impl Changed {
     fn take(&mut self) -> Result<(), SampleError> {
+        // The baseline is the program's, not a wrapper's on the way to it.
+        if let (Some(pid), true) = (self.pid, self.first.is_empty()) {
+            settle(pid);
+        }
         let (readings, _) = read_all(self.pid, true)?;
         let ts_ns = monotonic_ns();
         self.reads += 1;

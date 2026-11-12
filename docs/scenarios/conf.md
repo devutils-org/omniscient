@@ -46,6 +46,11 @@ the thirty-first wave".
 - **A launched program is read after it starts**: the snapshot under
   `taskset -c 0` read `0` on five runs of five, and the one under `sh -c
   'echo 700 > oom_score_adj; exec sleep'` read 700.
+- **...and after its chain of wrappers** (2026-11-12): `taskset -c 0 nice -n
+  7 chrt -b 0 prlimit ... choom -n 345 -- sleep` read `oom_score_adj` 0 in
+  one run of three, on a quiet machine: the snapshot was taken after `nice`
+  and before `choom`. The first read now waits until the executable is the
+  same 10 ms apart (250 ms at most): eight runs of eight read 345.
 
 ## What it does not cover
 

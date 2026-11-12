@@ -14688,5 +14688,13 @@ the wave, and are not its:
   these tests still expect the screens before it -- the TUI stream's.
 - `scenario_sched::an_interrupts_wakeup_names_an_interrupt_the_kernel_numbers`:
   the direct reader completed 933 281 reads in a second, which no disk
-  interrupt served, and the one `hardirq` wakeup seen carried no `irq=`.
-  Not investigated; filed.
+  interrupt served. **Fixed the same day**: the file was 4 MiB of one byte,
+  which this btrfs (`compress=zstd:1`) compresses, and a direct read of a
+  compressed extent is served from the page cache. The test writes
+  incompressible bytes: 34 000 to 39 000 wakeups named a hard interrupt.
+
+The TUI three are fixed the same day too (the overview's heading, a replay
+opening on it, the framed `process` view), and
+`family_conf::the_process_settings_are_what_the_process_was_given` was not
+load: it read a launched program in the middle of its chain of wrappers, a
+defect of `conf.process`'s, fixed (`docs/scenarios/conf.md`).

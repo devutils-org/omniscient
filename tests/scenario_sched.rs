@@ -802,7 +802,19 @@ print(reads, flush=True)
         {
             use std::io::Write;
             let mut out = std::fs::File::create(&file).expect("the scratch file");
-            out.write_all(&vec![0x5a; 4 << 20]).expect("written");
+            // Incompressible: btrfs compresses a run of one byte, and serves
+            // a direct read of a compressed extent from the page cache, which
+            // no disk interrupt completes (933 281 reads in a second here).
+            let mut x = 0x9e37_79b9_7f4a_7c15_u64;
+            let bytes: Vec<u8> = (0..(4 << 20) / 8)
+                .flat_map(|_| {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    x.to_ne_bytes()
+                })
+                .collect();
+            out.write_all(&bytes).expect("written");
             out.sync_all().expect("on the disk");
         }
         let mut child = Command::new("python3")

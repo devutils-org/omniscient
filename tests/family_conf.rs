@@ -165,9 +165,15 @@ fn the_process_settings_are_what_the_process_was_given() {
         "0",
         "prlimit",
         "--nofile=1000:2000",
-        "sh",
-        "-c",
-        "echo 345 > /proc/self/oom_score_adj && exec sleep 0.5",
+        // The adjustment set by the caller before the program, as every other
+        // setting here is: a program that sets it itself (`echo 345 >
+        // /proc/self/oom_score_adj`) can be read before it has, under load.
+        "choom",
+        "-n",
+        "345",
+        "--",
+        "sleep",
+        "0.5",
     ];
     let mut args = vec!["conf.process", "--"];
     args.extend(program);

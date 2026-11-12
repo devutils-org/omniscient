@@ -40,7 +40,10 @@
   caveats:
     - "A launched program is read once it runs, as the program itself: the
        children it starts later are other processes, with settings of their
-       own."
+       own. A chain of wrappers (`taskset -c 0 nice -n 7 choom -n 345 --
+       prog`) is read once it has stopped exec'ing -- its executable the same
+       10 ms apart, waited for 250 ms at most -- so a wrapper's settings are
+       not read as the program's; one that ends before then has none read."
     - "A cgroup limit is read at the target's cgroup and at each ancestor up
        to the root; the reading names the level whose limit binds, because a
        parent's `memory.max` binds a child whose own reads `max`."
