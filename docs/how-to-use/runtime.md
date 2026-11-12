@@ -46,6 +46,15 @@ call has `depth` above 1 and is also inside its caller's time, so sum
 `depth == 1` for a total. A request that names no function is refused, and a
 name that matches nothing lists the functions whose names contain it.
 
+For a function called hundreds of thousands of times a second, ask
+`-e hist` alone: the calls are counted into rows of thread, function, depth
+and log2 bucket in the kernel, with their exact time summed beside, and
+nothing is published per call. On two million calls of a function that does
+nothing, one record per call lost 298 542 of them to a full ring and cost omn
+4.15 s of cpu; the rows lost none and cost 11.8 ms. A filter on `ret` or
+`comm`, a key other than `task`, or any emit beside `hist` asks for every
+call again.
+
 ## Targets
 
 A launch or `--pid` (`runtime.custom` and `runtime.func` also `--tid`). For a

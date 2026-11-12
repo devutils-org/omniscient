@@ -1478,22 +1478,13 @@ fn exit_instructions(
         None => timed.function.ret(),
     };
     program.push(Insn::ldx(BPF_DW, 8, 6, ret));
-    insn::push_log2_bucket(&mut program, 9, &LOG2);
-    program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_BUCKET, 3));
-
-    // Which row map is being written this interval. An array's element zero
-    // always exists; the null check is the verifier's, and the fallback is
-    // the first map.
-    program.push(Insn::st_imm(BPF_W, R10, EXIT_GEN_KEY, 0));
-    program.extend(Insn::load_map_fd(1, maps.generation));
-    program.push(Insn::mov64_reg(2, R10));
-    program.push(Insn::add64_imm(2, EXIT_GEN_KEY as i32));
-    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
-    program.jump_to(ROWS_A.rows, Insn::jeq_imm(0, 0, 0));
-    program.push(Insn::ldx(BPF_W, 1, 0, 0));
-    program.jump_to(ROWS_B.rows, Insn::jne_imm(1, 0, 0));
-    row_section(&mut program, maps.rows[0], maps.drops, &ROWS_A);
-    row_section(&mut program, maps.rows[1], maps.drops, &ROWS_B);
+    count_into_rows(
+        &mut program,
+        maps.generation,
+        maps.rows,
+        maps.drops,
+        DROP_ROWS,
+    );
 
     program.label("done");
     program.push(Insn::mov64_imm(0, 0));
@@ -1503,9 +1494,66 @@ fn exit_instructions(
     Ok(instructions)
 }
 
+/// Counts one call into the row map being written this interval: the
+/// bucket of the duration in `r9`, written into the key at [`ROW_KEY`], then
+/// the row created or added to. The key's other fields are the caller's,
+/// written before; `r8` is the return value, whose sign and size fill
+/// `errors` and `bytes`. Every path ends at `done`, which the caller defines,
+/// and a call that finds no room is counted in `rows_slot` of `drops`.
+///
+/// A program that times calls its own way -- `runtime.func`'s uprobes --
+/// counts into [`RowMaps`] through this, and is drained as these are.
+pub(crate) fn count_into_rows(
+    program: &mut Program,
+    generation_fd: i32,
+    rows_fds: [i32; 2],
+    drops_fd: i32,
+    rows_slot: u32,
+) {
+    insn::push_log2_bucket(program, 9, &LOG2);
+    program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_BUCKET, 3));
+
+    // Which row map is being written this interval. An array's element zero
+    // always exists; the null check is the verifier's, and the fallback is
+    // the first map.
+    program.push(Insn::st_imm(BPF_W, R10, EXIT_GEN_KEY, 0));
+    program.extend(Insn::load_map_fd(1, generation_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, EXIT_GEN_KEY as i32));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    program.jump_to(ROWS_A.rows, Insn::jeq_imm(0, 0, 0));
+    program.push(Insn::ldx(BPF_W, 1, 0, 0));
+    program.jump_to(ROWS_B.rows, Insn::jne_imm(1, 0, 0));
+    row_section(program, rows_fds[0], drops_fd, rows_slot, &ROWS_A);
+    row_section(program, rows_fds[1], drops_fd, rows_slot, &ROWS_B);
+}
+
+/// Zeroes the row key, for a program that writes its fields one by one.
+pub(crate) fn zero_row_key(program: &mut Program) {
+    for slot in 0..(ROW_KEY_BYTES as i16 / 8) {
+        program.push(Insn::st_imm(BPF_DW, R10, ROW_KEY + slot * 8, 0));
+    }
+}
+
+/// Where a row key's fields sit on the stack of a program that counts into
+/// rows ([`count_into_rows`]); the stack below [`ROW_STACK_FLOOR`] is the
+/// rows' own.
+pub(crate) const ROW_TID: i16 = ROW_KEY + KEY_TID;
+pub(crate) const ROW_TGID: i16 = ROW_KEY + KEY_TGID;
+pub(crate) const ROW_OP: i16 = ROW_KEY + KEY_OP;
+pub(crate) const ROW_AUX: i16 = ROW_KEY + KEY_AUX;
+#[cfg(test)]
+pub(crate) const ROW_STACK_FLOOR: i16 = EXIT_GEN_KEY;
+
 /// Adds the call to its row in one row map, creating the row if it is the
 /// first, and counts a call that found no room. Every path ends at `done`.
-fn row_section(program: &mut Program, rows_fd: i32, drops_fd: i32, labels: &RowLabels) {
+fn row_section(
+    program: &mut Program,
+    rows_fd: i32,
+    drops_fd: i32,
+    rows_slot: u32,
+    labels: &RowLabels,
+) {
     program.label(labels.rows);
     lookup_row(program, rows_fd);
     program.jump_to(labels.first, Insn::jeq_imm(0, 0, 0));
@@ -1542,7 +1590,7 @@ fn row_section(program: &mut Program, rows_fd: i32, drops_fd: i32, labels: &RowL
     program.jump_to("done", Insn::jeq_imm(0, 0, 0));
     program.jump_to(labels.lost_race, Insn::jeq_imm(0, -EEXIST, 0));
     // The histogram is full: this call is in no bucket.
-    count_drop(program, drops_fd, EXIT_DROP_KEY, DROP_ROWS, "done");
+    count_drop(program, drops_fd, EXIT_DROP_KEY, rows_slot, "done");
     program.jump_to("done", Insn::ja());
 
     // Another cpu created the row between the lookup and the insert. Its row
@@ -1557,7 +1605,7 @@ fn row_section(program: &mut Program, rows_fd: i32, drops_fd: i32, labels: &RowL
     // from a map that is being written -- the drain takes the other one -- so
     // this is not expected to happen, and it is counted if it does.
     program.label(labels.raced_out);
-    count_drop(program, drops_fd, EXIT_DROP_KEY, DROP_ROWS, "done");
+    count_drop(program, drops_fd, EXIT_DROP_KEY, rows_slot, "done");
     program.jump_to("done", Insn::ja());
 }
 
@@ -1695,8 +1743,7 @@ pub struct Kprobe {
 /// last drain is no special case.
 pub struct HistogramProgram {
     pending: Hash,
-    rows: [Hash; 2],
-    flip: std::rc::Rc<Flip>,
+    rows: RowMaps,
     drops: Counters,
     links: Vec<Link>,
     /// A kprobe pair's: one perf event per cpu, each running the program.
@@ -1801,8 +1848,17 @@ fn write_word(map: &OwnedFd, value: u32) -> io::Result<()> {
     Ok(())
 }
 
-impl HistogramProgram {
-    pub fn load(spec: HistogramSpec<'_>) -> Result<Self, String> {
+/// Two row maps the programs write in turn, and the word that says which:
+/// a drain points the programs at the idle one, waits for a grace period, and
+/// reads the other whole.
+pub struct RowMaps {
+    rows: [Hash; 2],
+    flip: std::rc::Rc<Flip>,
+}
+
+impl RowMaps {
+    /// `max_rows` rows a map, named after `name`.
+    pub fn create(name: &str, max_rows: u32) -> Result<Self, String> {
         if !crate::bpf::map::grace_periods_offered() {
             return Err(
                 "this kernel offers no way to wait for a grace period from userspace \
@@ -1811,6 +1867,99 @@ impl HistogramProgram {
                     .to_owned(),
             );
         }
+        let row_map = |which: &str| {
+            Hash::create(
+                ROW_KEY_BYTES,
+                ROW_VALUE_BYTES,
+                max_rows,
+                &format!("{name}_rows{which}"),
+            )
+            .map_err(|error| map_failure(&format!("{name} histogram map"), error))
+        };
+        let rows = [row_map("a")?, row_map("b")?];
+        let generation =
+            crate::bpf::syscall::map_create(BPF_MAP_TYPE_ARRAY, 4, 4, 1, &format!("{name}_gen"))
+                .map_err(|error| map_failure(&format!("{name} generation word"), error))?;
+        let flip = std::rc::Rc::new(Flip {
+            generation,
+            writing: std::cell::Cell::new(0),
+            flipped_at: std::cell::Cell::new(crate::clock::monotonic_ns()),
+            retired: std::cell::Cell::new(None),
+        });
+        let shared: std::rc::Rc<dyn crate::bpf::map::Retire> = flip.clone();
+        crate::bpf::map::register(&shared);
+        Ok(Self { rows, flip })
+    }
+
+    /// The generation word's descriptor, for [`count_into_rows`].
+    pub fn generation_fd(&self) -> i32 {
+        self.flip.generation.as_raw_fd()
+    }
+
+    /// The two maps' descriptors, for [`count_into_rows`].
+    pub fn rows_fds(&self) -> [i32; 2] {
+        [self.rows[0].as_raw_fd(), self.rows[1].as_raw_fd()]
+    }
+
+    /// Starts the first interval now: when the programs are attached, not
+    /// when the maps were made.
+    pub fn started(&self) {
+        self.flip.flipped_at.set(crate::clock::monotonic_ns());
+    }
+
+    /// Takes every row counted since the last drain, and starts a new
+    /// interval.
+    ///
+    /// Every drain is whole: the programs are pointed at the empty map, a
+    /// grace period is waited for, and only then is the retired map read -- so
+    /// a call is in this drain or in the next one, never lost between them and
+    /// never a tick late.
+    ///
+    /// Retired ahead by its round, the map retired then is read, once a grace
+    /// period that began after it has ended: the round's own.
+    pub fn drain(&self) -> Result<Drained, String> {
+        let (retired, needed, opened, closed) = match self.flip.retired.take() {
+            Some(ahead) => ahead,
+            None => {
+                let (retired, opened, closed) = self
+                    .flip
+                    .flip()
+                    .map_err(|error| format!("cannot flip the histogram's generation: {error}"))?;
+                (
+                    retired,
+                    crate::bpf::map::next_grace_period(),
+                    opened,
+                    closed,
+                )
+            }
+        };
+        if !crate::bpf::map::grace_period_ended(needed) {
+            crate::bpf::map::grace_period().map_err(|error| {
+                format!("cannot wait for the histogram's grace period: {error}")
+            })?;
+        }
+        let mut drained = Drained {
+            opened_ns: opened,
+            closed_ns: closed,
+            ..Default::default()
+        };
+        let taken = self.rows[retired]
+            .drain()
+            .map_err(|error| format!("cannot read the histogram: {error}"))?;
+        drained.losses.vanished += taken.vanished;
+        drained.losses.truncated |= taken.truncated;
+        for (key, value) in &taken.entries {
+            match Row::decode(key, value) {
+                Some(row) => drained.rows.push(row),
+                None => drained.losses.vanished += 1,
+            }
+        }
+        Ok(drained)
+    }
+}
+
+impl HistogramProgram {
+    pub fn load(spec: HistogramSpec<'_>) -> Result<Self, String> {
         let pending = Hash::create(
             PEND_KEY_BYTES,
             if spec.kprobe.is_some() {
@@ -1822,24 +1971,7 @@ impl HistogramProgram {
             &format!("{}_pend", spec.name),
         )
         .map_err(|error| map_failure(&format!("{} pending map", spec.name), error))?;
-        let row_map = |which: &str| {
-            Hash::create(
-                ROW_KEY_BYTES,
-                ROW_VALUE_BYTES,
-                spec.max_rows,
-                &format!("{}_rows{which}", spec.name),
-            )
-            .map_err(|error| map_failure(&format!("{} histogram map", spec.name), error))
-        };
-        let rows = [row_map("a")?, row_map("b")?];
-        let generation = crate::bpf::syscall::map_create(
-            BPF_MAP_TYPE_ARRAY,
-            4,
-            4,
-            1,
-            &format!("{}_gen", spec.name),
-        )
-        .map_err(|error| map_failure(&format!("{} generation word", spec.name), error))?;
+        let rows = RowMaps::create(spec.name, spec.max_rows)?;
         let drops = Counters::create(3, &format!("{}_drop", spec.name))
             .map_err(|error| map_failure(&format!("{} drop counter", spec.name), error))?;
         let descendants = match spec.narrowing.tgid {
@@ -1851,8 +1983,8 @@ impl HistogramProgram {
             .map(crate::bpf::sched_common::Descendants::map_fd);
         let maps = ExitMaps {
             pending: pending.as_raw_fd(),
-            generation: generation.as_raw_fd(),
-            rows: [rows[0].as_raw_fd(), rows[1].as_raw_fd()],
+            generation: rows.generation_fd(),
+            rows: rows.rows_fds(),
             drops: drops.as_raw_fd(),
         };
 
@@ -1935,21 +2067,10 @@ impl HistogramProgram {
             .collect();
         let mut links = attach_all(&exits)?;
         links.extend(attach_all(&entries)?);
-        let now = crate::clock::monotonic_ns();
+        rows.started();
         Ok(Self {
             pending,
             rows,
-            flip: {
-                let flip = std::rc::Rc::new(Flip {
-                    generation,
-                    writing: std::cell::Cell::new(0),
-                    flipped_at: std::cell::Cell::new(now),
-                    retired: std::cell::Cell::new(None),
-                });
-                let shared: std::rc::Rc<dyn crate::bpf::map::Retire> = flip.clone();
-                crate::bpf::map::register(&shared);
-                flip
-            },
             drops,
             links,
             probes,
@@ -1957,60 +2078,11 @@ impl HistogramProgram {
         })
     }
 
-    /// Takes every row counted since the last drain, and starts a new
-    /// interval.
-    ///
-    /// Every drain is whole: the programs are pointed at the empty map, a
-    /// grace period is waited for, and only then is the retired map read -- so
-    /// a call is in this drain or in the next one, never lost between them and
-    /// never a tick late. `last` is kept for the callers, and asks for nothing
-    /// more: the last drain is an ordinary one.
-    ///
-    /// Retired ahead by its round, the map retired then is read, once a grace
-    /// period that began after it has ended: the round's own.
+    /// Takes every row counted since the last drain ([`RowMaps::drain`]).
+    /// `last` is kept for the callers, and asks for nothing more: the last
+    /// drain is an ordinary one.
     pub fn drain(&self, _last: bool) -> Result<Drained, String> {
-        let (retired, needed, opened, closed) = match self.flip.retired.take() {
-            Some(ahead) => ahead,
-            None => {
-                let (retired, opened, closed) = self
-                    .flip
-                    .flip()
-                    .map_err(|error| format!("cannot flip the histogram's generation: {error}"))?;
-                (
-                    retired,
-                    crate::bpf::map::next_grace_period(),
-                    opened,
-                    closed,
-                )
-            }
-        };
-        if !crate::bpf::map::grace_period_ended(needed) {
-            crate::bpf::map::grace_period().map_err(|error| {
-                format!("cannot wait for the histogram's grace period: {error}")
-            })?;
-        }
-        let mut drained = Drained {
-            opened_ns: opened,
-            closed_ns: closed,
-            ..Default::default()
-        };
-        self.take(retired, &mut drained)?;
-        Ok(drained)
-    }
-
-    fn take(&self, which: usize, into: &mut Drained) -> Result<(), String> {
-        let taken = self.rows[which]
-            .drain()
-            .map_err(|error| format!("cannot read the histogram: {error}"))?;
-        into.losses.vanished += taken.vanished;
-        into.losses.truncated |= taken.truncated;
-        for (key, value) in &taken.entries {
-            match Row::decode(key, value) {
-                Some(row) => into.rows.push(row),
-                None => into.losses.vanished += 1,
-            }
-        }
-        Ok(())
+        self.rows.drain()
     }
 
     /// The stamps still in the map, split into calls genuinely in flight and

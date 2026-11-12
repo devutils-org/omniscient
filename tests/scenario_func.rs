@@ -159,6 +159,16 @@ fn spoken(output: &Output) -> String {
 /// the document, and what the fixture printed; `None`, having said why,
 /// where this machine places no uprobe.
 fn timed(filter: &str, extra: &[&str], program: &[&str]) -> Option<(Value, Vec<String>)> {
+    timed_as(&["raw", "summary"], filter, extra, program)
+}
+
+/// [`timed`], asking for `emits` instead of every call and a summary.
+fn timed_as(
+    emits: &[&str],
+    filter: &str,
+    extra: &[&str],
+    program: &[&str],
+) -> Option<(Value, Vec<String>)> {
     let fixture = match fixture() {
         Ok(path) => path,
         Err(reason) => {
@@ -173,21 +183,18 @@ fn timed(filter: &str, extra: &[&str], program: &[&str]) -> Option<(Value, Vec<S
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let said = dir.join("program.stdout");
-    let mut args = vec![
-        "runtime.func",
-        "-m",
-        "trace",
-        "-e",
-        "raw",
-        "-e",
-        "summary",
+    let mut args = vec!["runtime.func", "-m", "trace"];
+    for emit in emits {
+        args.extend(["-e", emit]);
+    }
+    args.extend([
         "--filter",
         filter,
         "--format",
         "json",
         "--program-stdout",
         said.to_str().unwrap(),
-    ];
+    ]);
     args.extend_from_slice(extra);
     args.push("--");
     args.push(fixture.to_str().unwrap());
@@ -686,11 +693,28 @@ fn a_function_in_a_library_opened_later_is_timed_from_when_it_is_mapped() {
         .iter()
         .map(|row| row["count"].as_u64().unwrap_or(0))
         .sum();
-    // Forty calls of 10 ms; the read that finds the library is at most
-    // 100 ms after it is mapped, so at least thirty are timed.
+    // Forty calls of 10 ms, and the ones before the probes were placed are
+    // not timed: the run says how long after the mapping that could be at
+    // most -- the 100 ms rescan, the tick that runs it, the search and the
+    // attach -- so at most that many tens of milliseconds' calls are missing.
+    let at_most_ms = said
+        .split("at most ")
+        .nth(1)
+        .and_then(|rest| rest.split(" after it was mapped").next())
+        .and_then(|span| {
+            span.strip_suffix("ms")
+                .and_then(|ms| ms.parse::<f64>().ok())
+                .or_else(|| {
+                    span.strip_suffix('s')
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .map(|s| s * 1e3)
+                })
+        })
+        .unwrap_or_else(|| panic!("no `at most` delay in the notes: {said}"));
+    let missed = (at_most_ms / 10.0).ceil() as u64 + 1;
     assert!(
-        (30..=40).contains(&count),
-        "{count} calls timed: {summary:?}\n{said}"
+        at_most_ms < 250.0 && (40 - missed.min(40)..=40).contains(&count),
+        "{count} calls timed, at most {at_most_ms} ms unprobed: {summary:?}\n{said}"
     );
 
     let missing = run("omn_plugin_absent");
@@ -700,5 +724,65 @@ fn a_function_in_a_library_opened_later_is_timed_from_when_it_is_mapped() {
         text.contains("found no function named `omn_plugin_absent`")
             && text.contains("while it ran"),
         "{text}"
+    );
+}
+
+/// The histogram one series of a document holds, as `(count, sum)`.
+fn histogram(document: &Value) -> (f64, f64) {
+    let hist = document["results"][0]["outputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|output| output["emit"] == "hist")
+        .unwrap_or_else(|| panic!("no hist: {document:#}"));
+    let series = hist["series"].as_array().expect("series");
+    (
+        series.iter().map(|one| number(&one["count"])).sum(),
+        series.iter().map(|one| number(&one["sum"])).sum(),
+    )
+}
+
+/// `--emit hist` alone is built in the kernel: rows counted where the call
+/// returns, no record per call, and every call of a function called two
+/// hundred thousand times in a row is in a bucket.
+#[test]
+fn a_histogram_alone_is_counted_in_the_kernel_and_misses_no_call() {
+    let Some((document, _)) = timed_as(&["hist"], "function == 'tiny'", &[], &["tiny", "200000"])
+    else {
+        return;
+    };
+    let (count, _) = histogram(&document);
+    assert_eq!(count, 200_000.0, "{}", notes(&document));
+    assert!(
+        notes(&document).contains("built in the kernel"),
+        "{}",
+        notes(&document)
+    );
+    assert_eq!(
+        document["results"][0]["losses"]["dropped"]
+            .as_u64()
+            .unwrap_or(0),
+        0,
+        "{document:#}"
+    );
+}
+
+/// A row's exact sum travels beside its bucket: the histogram's sum is what
+/// the program measured around its calls, not their buckets' low bounds.
+#[test]
+fn a_kernel_histogram_s_sum_is_the_calls_own() {
+    let Some((document, printed)) =
+        timed_as(&["hist"], "function == 'hold'", &[], &["hold", "3", "5"])
+    else {
+        return;
+    };
+    let (count, sum) = histogram(&document);
+    assert_eq!(count, 5.0, "{document:#}");
+    let measured: f64 = printed.iter().map(|line| measured(line)).sum();
+    // Each call's time is inside what the program measured around it, short
+    // of it by the clock reads and the traps: a few microseconds a call.
+    assert!(
+        sum <= measured && measured - sum < 5.0 * 50_000.0,
+        "the histogram's sum {sum} against the program's {measured}"
     );
 }

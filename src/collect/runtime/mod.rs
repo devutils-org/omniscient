@@ -24,6 +24,7 @@ pub fn factories() -> Vec<Factory> {
         }),
         Factory::new("runtime.func", "bpf:uprobe", |resolved| {
             Ok(Box::new(func::Prepare {
+                histogram: func::builds_histogram_in_kernel(&resolved.request),
                 mode: resolved.request.mode,
                 target: resolved.request.target.clone(),
                 filter: resolved.request.filter.clone(),

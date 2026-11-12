@@ -182,6 +182,15 @@
        see, and a profile's share is not a call's duration. Each call pays two
        traps into the kernel, a few microseconds, and the run says how many
        calls were shorter than that."
+    - "`--emit hist` alone, keyed by nothing but `task` and filtered only on
+       `function`, `signature`, `object` or `depth`, is built in the kernel:
+       each call is counted into a row of (thread, function, depth, log2
+       bucket) where it returns, its exact time added to the row's
+       `total_ns`, and the rows are read every 100 ms. Nothing is published
+       per call, so nothing is lost to a ring: two million calls of a function
+       that does nothing were all counted, against 298 542 lost one record
+       per call. An event is then a row: `count` calls, `lat_ns` the low bound
+       of their bucket."
     - "Calls are paired per thread and per depth, so a recursive function's
        calls are each timed; a call inside one of the same function has
        `depth` above 1 and its time is also in its caller's. A return whose

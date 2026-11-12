@@ -26,6 +26,7 @@ use std::path::PathBuf;
 
 use super::attach::{self, PerfAttachment, Scope};
 use super::btf::Btf;
+use super::fentry::{self, Drained, RowMaps};
 use super::insn::{count_drop, helper, Insn, Program, BPF_DW, BPF_W, R10};
 use super::map::{map_failure, Counters, Hash};
 use super::syscall;
@@ -39,13 +40,19 @@ pub const MAX_DEPTH: u64 = 64;
 /// Calls open at once, across every thread and depth.
 const MAX_OPEN: u32 = 65536;
 
+/// Rows of `(thread, function, depth, bucket)` one interval of a histogram
+/// holds: 32 functions on a few hundred threads, a handful of buckets each.
+const MAX_ROWS: u32 = 65536;
+
 /// The drop counter's slots.
 const DROP_RING: u32 = 0;
 const DROP_OPEN: u32 = 1;
 const UNPAIRED: u32 = 2;
 const STAMP_LOST: u32 = 3;
 const TOO_DEEP: u32 = 4;
-const DROP_SLOTS: u32 = 5;
+/// Calls timed and in no row: the kernel's histogram was full.
+const ROWS_FULL: u32 = 5;
+const DROP_SLOTS: u32 = 6;
 
 /// The stack: the depth map's key and value, the stamp's, the drop key, and
 /// the record.
@@ -56,6 +63,9 @@ const STAMP_KEY_BYTES: usize = 16;
 const STAMP_VALUE: i16 = -40;
 const DROP_KEY: i16 = -48;
 const RECORD: i16 = -112;
+/// Where a histogram's return program keeps the duration across the stamp's
+/// delete: below the rows' own stack ([`fentry::ROW_STACK_FLOOR`]).
+const HELD_DURATION: i16 = -104;
 
 /// The record.
 const R_START: i16 = 0;
@@ -213,14 +223,24 @@ fn entry_instructions(
     done(program)
 }
 
+/// Where a return program puts the call it timed.
+#[derive(Clone, Copy)]
+enum Sink {
+    /// One record per call, on the ring.
+    Ring(Output),
+    /// Counted into a row of `(thread, function, depth, log2 bucket)` in the
+    /// kernel, drained on a tick: no record per call.
+    Rows { generation: i32, rows: [i32; 2] },
+}
+
 /// The program on the function's return: the call open at this thread's
-/// depth is closed, timed and published.
+/// depth is closed, timed and published, or counted into its row.
 fn return_instructions(
     placed: Placed,
     ret_at: i16,
     depths_fd: i32,
     stamps_fd: i32,
-    output: Output,
+    sink: Sink,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
     let mut program = Program::new();
@@ -249,6 +269,38 @@ fn return_instructions(
     lookup(&mut program, stamps_fd, STAMP_KEY);
     program.jump_to("lost", Insn::jeq_imm(0, 0, 0));
     program.push(Insn::ldx(BPF_DW, 1, 0, 0));
+    if let Sink::Rows { generation, rows } = sink {
+        program.push(Insn::sub64_reg(9, 1));
+        program.push(Insn::stx(BPF_DW, R10, HELD_DURATION, 9));
+        delete(&mut program, stamps_fd, STAMP_KEY);
+        program.push(Insn::ldx(BPF_DW, 9, R10, HELD_DURATION));
+        fentry::zero_row_key(&mut program);
+        program.push(Insn::stx(BPF_W, R10, fentry::ROW_TID, 7));
+        program.push(Insn::mov64_reg(1, 7));
+        program.push(Insn::rsh64_imm(1, 32));
+        program.push(Insn::stx(BPF_W, R10, fentry::ROW_TGID, 1));
+        program.push(Insn::st_imm(
+            BPF_W,
+            R10,
+            fentry::ROW_OP,
+            placed.function as i32,
+        ));
+        program.push(Insn::stx(BPF_W, R10, fentry::ROW_AUX, 8));
+        // A return value is no size and no error here: the row's `bytes`
+        // and `errors` stay zero.
+        program.push(Insn::mov64_imm(8, 0));
+        // Every path of the rows' section ends at `done`.
+        fentry::count_into_rows(&mut program, generation, rows, drops_fd, ROWS_FULL);
+        program.label("unpaired");
+        count_drop(&mut program, drops_fd, DROP_KEY, UNPAIRED, "done");
+        program.jump_to("done", Insn::ja());
+        program.label("lost");
+        count_drop(&mut program, drops_fd, DROP_KEY, STAMP_LOST, "done");
+        return done(program);
+    }
+    let Sink::Ring(output) = sink else {
+        unreachable!("the rows returned above")
+    };
     program.push(Insn::stx(BPF_DW, R10, RECORD + R_START, 1));
     program.push(Insn::mov64_reg(2, 9));
     program.push(Insn::sub64_reg(2, 1));
@@ -314,11 +366,15 @@ pub struct Lost {
     pub stamp: u64,
     /// Calls nested deeper than [`MAX_DEPTH`], counted and not timed.
     pub deep: u64,
+    /// Calls timed and in no row: the kernel's histogram was full.
+    pub rows: u64,
 }
 
 /// The programs on every function's entry and return, for one process.
 pub struct FuncProgram {
-    ring: Transport,
+    /// Where calls go: one record each on a ring, or rows in the kernel.
+    ring: Option<Transport>,
+    rows: Option<RowMaps>,
     drops: Counters,
     stamps: Hash,
     depths: Hash,
@@ -378,11 +434,30 @@ impl FuncProgram {
     /// process `pid`; the returns first, so no entry is stamped that nothing
     /// will close. `targets` may be empty, for a run that waits for the
     /// library its functions are in ([`FuncProgram::add`]).
-    pub fn load(targets: &[Target], pid: i32, requested_ring_bytes: usize) -> Result<Self, String> {
+    ///
+    /// With `histogram`, each call is counted into a row in the kernel
+    /// instead of published: [`FuncProgram::drain_rows`] reads them.
+    pub fn load(
+        targets: &[Target],
+        pid: i32,
+        requested_ring_bytes: usize,
+        histogram: bool,
+    ) -> Result<Self, String> {
         let btf: &Btf = super::kernel_btf()?;
         let ret_at = btf.return_register()? as i16;
         let tgid = super::pidns::kernel_tgid(pid as u32)?;
-        let ring = Transport::create(requested_ring_bytes, Some(R_START as usize), "omn_func")?;
+        let (ring, rows) = if histogram {
+            (None, Some(RowMaps::create("omn_func", MAX_ROWS)?))
+        } else {
+            (
+                Some(Transport::create(
+                    requested_ring_bytes,
+                    Some(R_START as usize),
+                    "omn_func",
+                )?),
+                None,
+            )
+        };
         let drops = Counters::create(DROP_SLOTS, "omn_func_drop")
             .map_err(|error| map_failure("function drop counter", error))?;
         let depths = Hash::create(8, 8, MAX_OPEN, "omn_func_depth")
@@ -391,6 +466,7 @@ impl FuncProgram {
             .map_err(|error| map_failure("function open-call map", error))?;
         let mut program = Self {
             ring,
+            rows,
             drops,
             stamps,
             depths,
@@ -402,6 +478,9 @@ impl FuncProgram {
             fallback: None,
         };
         program.add(targets)?;
+        if let Some(rows) = &program.rows {
+            rows.started();
+        }
         Ok(program)
     }
 
@@ -424,7 +503,7 @@ impl FuncProgram {
                         self.ret_at,
                         self.depths.as_raw_fd(),
                         self.stamps.as_raw_fd(),
-                        self.ring.output(),
+                        self.sink(),
                         self.drops.as_raw_fd(),
                     )?
                 } else {
@@ -496,13 +575,41 @@ impl FuncProgram {
         Ok(())
     }
 
+    fn sink(&self) -> Sink {
+        match (&self.ring, &self.rows) {
+            (Some(ring), _) => Sink::Ring(ring.output()),
+            (None, Some(rows)) => Sink::Rows {
+                generation: rows.generation_fd(),
+                rows: rows.rows_fds(),
+            },
+            (None, None) => unreachable!("a program has a ring or rows"),
+        }
+    }
+
+    /// Whether calls are counted into rows in the kernel.
+    pub fn histogram(&self) -> bool {
+        self.rows.is_some()
+    }
+
     /// Hands every timed call to `handle`, counting records this reader does
-    /// not recognise rather than reinterpreting them.
+    /// not recognise rather than reinterpreting them. A histogram's program
+    /// publishes none: [`FuncProgram::drain_rows`].
     pub fn drain(&mut self, mut handle: impl FnMut(Call), undecoded: &mut u64) {
-        self.ring.drain(|bytes| match Call::decode(bytes) {
-            Some(call) => handle(call),
-            None => *undecoded += 1,
-        });
+        if let Some(ring) = &mut self.ring {
+            ring.drain(|bytes| match Call::decode(bytes) {
+                Some(call) => handle(call),
+                None => *undecoded += 1,
+            });
+        }
+    }
+
+    /// The rows counted since the last drain: `op` is the function's index,
+    /// `aux` the call's depth. Empty for a program that publishes calls.
+    pub fn drain_rows(&self) -> Result<Drained, String> {
+        match &self.rows {
+            Some(rows) => rows.drain(),
+            None => Ok(Drained::default()),
+        }
     }
 
     pub fn lost(&self) -> Lost {
@@ -512,6 +619,7 @@ impl FuncProgram {
             unpaired: self.drops.read(UNPAIRED),
             stamp: self.drops.read(STAMP_LOST),
             deep: self.drops.read(TOO_DEEP),
+            rows: self.drops.read(ROWS_FULL),
         }
     }
 
@@ -538,8 +646,8 @@ mod tests {
     #[test]
     fn the_programs_keep_one_process_and_read_the_return_register() {
         let entry = entry_instructions(placed(), 3, 4, 5).expect("an entry");
-        let ret =
-            return_instructions(placed(), 80, 3, 4, Output::PerfArray(6), 5).expect("a return");
+        let ret = return_instructions(placed(), 80, 3, 4, Sink::Ring(Output::PerfArray(6)), 5)
+            .expect("a return");
         for program in [&entry, &ret] {
             assert!(
                 program
@@ -596,6 +704,10 @@ mod tests {
             (DROP_KEY, 4, "drop key"),
             (RECORD, RECORD_BYTES as i16, "record"),
         ];
+        const _: () = assert!(
+            HELD_DURATION + 8 <= fentry::ROW_STACK_FLOOR && HELD_DURATION >= RECORD,
+            "the held duration is below the rows' stack and inside the record it replaces"
+        );
         for (at, size, name) in regions {
             assert!(at >= -512 && at + size <= 0, "`{name}` is off the frame");
             for (other_at, other_size, other) in regions {

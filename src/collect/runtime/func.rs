@@ -31,6 +31,9 @@ use crate::stack::FunctionSymbol;
 /// How often the ring is drained.
 const DRAIN_INTERVAL: StdDuration = StdDuration::from_millis(20);
 
+/// How often a histogram's rows are read.
+const ROWS_INTERVAL: StdDuration = StdDuration::from_millis(100);
+
 /// The ring between the programs and this collector.
 const RING_BYTES: usize = 1 << 20;
 
@@ -480,7 +483,29 @@ fn chosen(search: &Search, objects: &Objects) -> Vec<Timed> {
 
 // ------------------------------------------------------------ the prepare
 
+/// Whether this request's calls are counted into rows in the kernel rather
+/// than published one by one: `--emit hist` alone, in trace mode, keyed by
+/// nothing but the thread, filtered only on what a row still says --
+/// the function, as named or by its file, and the depth. Such a run has no
+/// record per call to lose: what a function called millions of times a
+/// second needs. Its events are rows, stamped when the drain read them.
+pub(crate) fn builds_histogram_in_kernel(request: &crate::request::Request) -> bool {
+    use crate::request::{Emit, HistScale, KeyKind};
+    request.source.as_str() == "runtime.func"
+        && request.mode == Mode::Trace
+        && matches!(request.emit.as_slice(), [Emit::Hist(HistScale::Log2)])
+        && request.keys.iter().all(|key| *key == KeyKind::Task)
+        && request.filter.as_ref().is_none_or(|filter| {
+            filter
+                .fields()
+                .iter()
+                .all(|field| ["function", "signature", "object", "depth"].contains(field))
+        })
+}
+
 pub struct Prepare {
+    /// Calls counted into rows in the kernel ([`builds_histogram_in_kernel`]).
+    pub histogram: bool,
     pub mode: Mode,
     /// The request's own target: a launched program is a pid that has not
     /// execed yet at attach time, and what it will map is read from its argv.
@@ -561,6 +586,7 @@ impl Prepared for Prepare {
             }
         }
         Ok(Box::new(FuncCollector {
+            histogram: self.histogram,
             filter: self.filter,
             pid: process,
             only_tid,
@@ -619,6 +645,8 @@ struct Late {
 // ----------------------------------------------------------- the collector
 
 pub struct FuncCollector {
+    /// Calls counted into rows in the kernel, drained as rows.
+    histogram: bool,
     filter: Option<FilterExpr>,
     pid: i32,
     only_tid: Option<u32>,
@@ -750,6 +778,9 @@ impl FuncCollector {
         let Some(program) = self.program.as_mut() else {
             return Vec::new();
         };
+        if program.histogram() {
+            return self.drain_rows(seq);
+        }
         let mut calls = Vec::new();
         let mut undecoded = 0;
         program.drain(|call| calls.push(call), &mut undecoded);
@@ -811,6 +842,108 @@ impl FuncCollector {
     }
 }
 
+impl FuncCollector {
+    /// The rows the kernel counted since the last drain, each one event that
+    /// stands for its `count` calls: `lat_ns` its bucket's low bound,
+    /// `total_ns` their exact sum.
+    fn drain_rows(&mut self, seq: u64) -> Vec<Event> {
+        let Some(program) = self.program.as_ref() else {
+            return Vec::new();
+        };
+        let drained = match program.drain_rows() {
+            Ok(drained) => drained,
+            Err(reason) => {
+                self.losses.failed_reads += 1;
+                self.losses.note_times(reason, 1);
+                return Vec::new();
+            }
+        };
+        if drained.losses.vanished > 0 || drained.losses.truncated {
+            self.losses.undecoded += drained.losses.vanished;
+            self.losses.note(
+                "rows of the function histogram went missing between the drain's listing and \
+                 its read",
+            );
+        }
+        let lost = program.lost();
+        let full = lost.rows.saturating_sub(self.lost.rows);
+        if full > 0 {
+            self.losses.dropped += full;
+            self.losses.note_times(
+                "the kernel's function histogram was full in an interval: these calls were \
+                 timed and counted into no row",
+                full,
+            );
+        }
+        let open =
+            lost.open.saturating_sub(self.lost.open) + lost.stamp.saturating_sub(self.lost.stamp);
+        if open > 0 {
+            self.losses.dropped += open;
+            self.losses.note_times(
+                "more calls were open at once than the map of open calls holds, so these were \
+                 never timed",
+                open,
+            );
+        }
+        self.lost = lost;
+        let window_ns = drained.closed_ns.saturating_sub(drained.opened_ns);
+        let mut events = Vec::with_capacity(drained.rows.len());
+        let mut index = seq;
+        for row in &drained.rows {
+            if self.only_tid.is_some_and(|tid| tid != row.tid) {
+                continue;
+            }
+            let Some(timed) = self.timed.get(row.op as usize) else {
+                self.losses.undecoded += row.count;
+                continue;
+            };
+            let low = row.bucket_low_ns();
+            let event = Event {
+                ts_ns: drained.closed_ns,
+                ts_err_ns: 0,
+                kind: "runtime.func".to_owned(),
+                keys: vec![KeyValue::task(row.tid as i32)],
+                attrs: vec![
+                    Attr::uint("lat_ns", low),
+                    Attr::uint("count", row.count),
+                    Attr::uint(crate::emit::WEIGHT_ATTR, row.count),
+                    Attr::uint(crate::emit::SUM_NS_ATTR, row.total_ns),
+                    Attr::uint("bucket", u64::from(row.bucket)),
+                    Attr::uint("window_ns", window_ns),
+                    Attr::text("function", bare(&timed.function)),
+                    Attr::text("signature", timed.function.name.clone()),
+                    Attr::text("symbol", timed.function.symbol.clone()),
+                    Attr::text("object", timed.object.clone()),
+                    Attr::uint("depth", u64::from(row.aux)),
+                    Attr::text("comm", row.comm.clone()),
+                    Attr::uint("tid", u64::from(row.tid)),
+                    Attr::uint("pid", u64::from(row.tgid)),
+                ],
+                collector_id: CollectorId::unstamped(),
+                seq: index,
+            };
+            if let Some(filter) = &self.filter {
+                if !matches_call(filter, &event, &timed.function) {
+                    self.filtered_out += row.count;
+                    continue;
+                }
+            }
+            self.calls += row.count;
+            // A bucket is [low, 2 * low): every call in it was shorter than
+            // the floor only if its high bound is.
+            if low.saturating_mul(2) <= TRAP_FLOOR_NS {
+                self.short += row.count;
+            }
+            if row.aux > 1 {
+                self.nested += row.count;
+            }
+            events.push(event);
+            index += 1;
+        }
+        events
+    }
+}
+
 /// One call as an event, stamped at its start and keyed by its thread.
 fn event(timed: &Timed, call: &Call, seq: u64) -> Event {
     Event {
@@ -846,7 +979,7 @@ impl Collector for FuncCollector {
             .iter()
             .map(|timed| timed.placed.clone())
             .collect();
-        let program = FuncProgram::load(&placed, self.pid, RING_BYTES)?;
+        let program = FuncProgram::load(&placed, self.pid, RING_BYTES, self.histogram)?;
         self.fallback = program.fallback.clone();
         self.program = Some(program);
         self.started = Some(std::time::Instant::now());
@@ -887,7 +1020,12 @@ impl Collector for FuncCollector {
     }
 
     fn tick(&self) -> Option<StdDuration> {
-        Some(DRAIN_INTERVAL)
+        // A row drain waits for a grace period; rows fill no faster for it.
+        Some(if self.histogram {
+            ROWS_INTERVAL
+        } else {
+            DRAIN_INTERVAL
+        })
     }
 
     fn losses(&self) -> Losses {
@@ -907,6 +1045,15 @@ impl Collector for FuncCollector {
                 ": the process ran unmeasured for that long"
             }
         ));
+        if self.histogram {
+            notes.push(
+                "the histogram was built in the kernel: each call was counted into a row of \
+                 (thread, function, depth, log2 bucket) where it returned, with its exact time \
+                 added to the row's total, and the rows were read every 100 ms -- no record \
+                 per call, so a call is lost only to a full histogram, which is counted"
+                    .to_owned(),
+            );
+        }
         notes.push(
             "`depth` counts the calls of one function open at once on one thread, so two \
              different functions both at depth 1 can still be one inside the other; it is not \
